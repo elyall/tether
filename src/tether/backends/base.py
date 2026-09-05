@@ -144,6 +144,8 @@ _BUILTIN_MODULES: dict[str, str] = {
     "delta": "tether.backends.delta",
     "lance": "tether.backends.lance",
     "lakefs": "tether.backends.lakefs",
+    "ducklake": "tether.backends.ducklake",
+    "dolt": "tether.backends.dolt",
 }
 
 

@@ -21,6 +21,8 @@ except ImportError as exc:  # pragma: no cover - optional dep
 from tether.errors import TetherError
 from tether.handles import (
     DeltaHandle,
+    DoltHandle,
+    DuckLakeHandle,
     FileHandle,
     GitHandle,
     Handle,
@@ -81,6 +83,10 @@ def _handle_address(handle: Handle) -> str:
         return f"{handle.uri}#{ref}"
     if isinstance(handle, LakeFSHandle):
         return handle.uri
+    if isinstance(handle, DuckLakeHandle):
+        return f"{handle.metadata}#snapshot={handle.snapshot_id}"
+    if isinstance(handle, DoltHandle):
+        return handle.url
     return handle.key
 
 
@@ -133,6 +139,9 @@ def add(
     region: str | None = typer.Option(None, "--region"),
     repository: str | None = typer.Option(None, "--repository", help="lakeFS repo."),
     prefix: str | None = typer.Option(None, "--prefix", help="Path scope in a repo."),
+    host: str | None = typer.Option(None, "--host", help="Dolt server host."),
+    port: int | None = typer.Option(None, "--port", help="Dolt server port."),
+    table: str | None = typer.Option(None, "--table", help="DuckLake table scope."),
     set_: list[str] = typer.Option(
         [], "--set", help="Extra locator field key=value (repeatable)."
     ),
@@ -154,6 +163,9 @@ def add(
         ("region", region),
         ("repository", repository),
         ("prefix", prefix),
+        ("host", host),
+        ("port", port),
+        ("table", table),
     ):
         if value is not None:
             loc[name] = value

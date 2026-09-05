@@ -9,6 +9,7 @@ dataset at a branch/tag, a lakeFS ref URI) and steps out of the way.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -115,6 +116,67 @@ class LakeFSHandle(Handle):
     ref: str
     commit_id: str | None = None
     prefix: str = ""
+
+
+@dataclass
+class DuckLakeHandle(Handle):
+    """A DuckLake catalog attached (read-only) in a DuckDB connection.
+
+    The catalog is attached as ``alias`` in ``connection``, positioned at
+    ``snapshot_id`` when opened at a committed state. ``attach_sql`` is the exact
+    statement used, for callers that want the same view in their own DuckDB
+    process. Call :meth:`close` when done; a DuckDB-file metadata catalog can
+    only be attached once per process.
+    """
+
+    metadata: str
+    alias: str
+    connection: Any  # duckdb.DuckDBPyConnection
+    snapshot_id: int
+    attach_sql: str
+    data_path: str | None = None
+    table: str | None = None
+
+    def table_ref(self, table: str | None = None) -> str:
+        """Qualified table reference (``alias.table``) for SQL."""
+        name = table or self.table
+        if not name:
+            raise ValueError("no table given and the locator has no 'table'")
+        return f"{self.alias}.{name}"
+
+    def close(self) -> None:
+        con = self.connection
+        if con is None:
+            return
+        with contextlib.suppress(Exception):  # best effort; may be detached already
+            con.execute(f"DETACH {self.alias}")
+        con.close()
+        self.connection = None
+
+    def __enter__(self) -> DuckLakeHandle:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+@dataclass
+class DoltHandle(Handle):
+    """A Dolt revision database: ``mysql://user@host:port/db/<ref>``.
+
+    ``ref`` is a branch (writable) or a tag / commit hash (read-only). Connect
+    with ``database=handle.database_ref`` or ``USE db/ref``; the password is
+    never carried in the handle.
+    """
+
+    url: str
+    database: str
+    ref: str
+    commit: str | None = None
+
+    @property
+    def database_ref(self) -> str:
+        return f"{self.database}/{self.ref}"
 
 
 @dataclass
