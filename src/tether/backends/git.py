@@ -49,8 +49,9 @@ class GitBackend(ObjectBackend):
 
     # -- helpers --------------------------------------------------------- #
     def _path(self, locator: Locator) -> Path:
-        path = locator.get("path")
-        if not path:
+        # `path`, or the CLI's positional locator (`uri`) when it is a local path.
+        path = locator.get("path") or locator.get("uri")
+        if not path or "://" in str(path):
             raise BackendError(
                 "git backend needs a local 'path' (url-only clones are not "
                 "supported yet)",

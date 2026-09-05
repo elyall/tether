@@ -92,3 +92,19 @@ def test_git_backend_lifecycle(vcs_root: Path) -> None:
     assert log[0].message == "add util" and "HEAD" not in log[0].refs
     assert pin.ref in backend.history({"path": str(code)}, sha0, 10)[0].refs
     assert backend.fingerprint({"path": str(code), "at": sha0}, None)["sha"] == sha0
+
+
+def test_positional_locator_is_the_path(vcs_root: Path) -> None:
+    import pytest
+
+    from tether.errors import BackendError
+
+    code = vcs_root / "code"
+    sha0 = _init_code_repo(code)
+    repo = Repo.init(vcs_root)
+    backend = repo.backend_for("git")
+    # `tether add code --kind git ../code` puts the path in `uri`.
+    assert backend.fingerprint({"uri": str(code)}, None)["sha"] == sha0
+    assert backend.identity({"uri": str(code)}) == backend.identity({"path": str(code)})
+    with pytest.raises(BackendError):
+        backend.fingerprint({"uri": "https://github.com/o/r.git"}, None)

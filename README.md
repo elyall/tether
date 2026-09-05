@@ -70,8 +70,19 @@ aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,
 
 ## Quickstart
 
+tether has no store of its own. It lives *inside* a git or jj repository and
+commits small manifests there; that repository's history, branches, bookmarks,
+workspaces, undo, and remotes are tether's too. Start in one:
+
 ```bash
-tether init
+jj git init my-dataset && cd my-dataset      # or: git init my-dataset
+tether init                                  # writes tether.toml + .tether/ into the working copy
+```
+
+Then register objects. Nothing is contacted yet; each `add` writes one
+`.tether/objects/<key>.toml`:
+
+```bash
 tether add zarr/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --write fork
 tether add db/rosebud   --kind neon --project-id prj-123 --database neondb --role runner
 tether add raw/plate1   --kind file s3://bucket/raw/plate1/     # Observed unless versioned
@@ -81,22 +92,44 @@ tether add events       --kind delta s3://bucket/events        # Addressable (re
 tether add lake         --kind lakefs --repository analytics --branch main --prefix raw/
 tether add warehouse    --kind ducklake ducklake:postgres:dbname=lake --table events
 tether add ledger       --kind dolt --host dolt.internal --database ledger --branch main
-tether add code         --kind git . --remote origin
+tether add code         --kind git ../analysis-code --remote origin   # another repo, as an object
+```
 
+`tether commit` is a VCS commit: it pins each object natively, writes the
+states into the manifests, and runs `jj commit` / `git commit` on them. Every
+`REV` below is a jj revset or git revision of the enclosing repository.
+
+```bash
 tether status                       # fan-out: modified / unpinned / drifted per object
 tether commit -m "Baseline imaging + metrics"   # pins, writes manifests, jj/git commit
-tether new main                     # fork fresh writable branches off main's pins
+jj log                              # the dataset's history *is* the repo's history
+tether new main                     # jj new main / git checkout main, then fork writable branches off its pins
 tether open db/rosebud              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
-tether diff main @ --content         # what changed inside each object, natively
-tether log zarr/imaging              # native snapshot history; ids feed `add --at`
+tether diff main @ --content        # what changed inside each object between two revisions, natively
+tether log zarr/imaging             # an object's *native* history (snapshots); ids feed `add --at`
 tether add old/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --pick   # start from an older snapshot
-tether verify --all-history --deep
+tether verify --all-history --deep  # walks every commit of the repo
 tether commit -m "..." --dry-run    # every store-writing command plans first; --plan/--from-plan save + apply
 tether add scratch/feat s3://bucket/feat.lance --kind lance --pin record   # no tag per commit; fork from the recorded state
+```
+
+History surgery is the VCS's job, and tether follows it. Abandon or squash a
+dataset commit with `jj abandon` / `jj squash` (or `git rebase -i`) and the
+pins only that commit named become unreferenced; `gc` releases them:
+
+```bash
+jj squash --from <first-try>::<last-try> --into <result>   # drop intermediate dataset commits
 tether gc                           # dry run: pins no commit references, orphaned listings (never branches)
+tether gc --no-dry-run
 tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned; --force-prune for the rest
 ```
+
+Multiple people (or agents) work in jj workspaces / git worktrees of the same
+repository; each gets its own `tether.ws.<workspace-id>.*` branches in every
+system, and pushing the repository publishes the dataset history. The
+`tether.toml` and `.tether/` paths are the only things tether adds to the
+repo; `.tether/workspace.toml` is per-checkout and ignored.
 
 Python:
 
@@ -177,7 +210,7 @@ the locator's `at` field: `tether add --at <id>` / `--pick`).
 | `file` (S3 / GCS / Azure object) | Addressable | size, etag, version_id | -- | -- | `CHEAP`; `--file versioned` on a versioning-enabled bucket; one `HEAD` |
 | `file` (S3 / GCS / Azure prefix) | Observed | count, size, etag digest | -- | -- | `CHEAP`; one paged `LIST`, no per-object calls |
 | `icechunk` | Forkable | snapshot_id | tag | branch | `ATOMIC_REF`; tags immutable, excluded from expiry |
-| `neon` | Forkable | lsn, next_xid | protected child branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`; no merge/promote, leaf-only gc, quotas |
+| `neon` | Forkable | lsn, next_xid, branch | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`; no merge/promote, leaf-only gc, quotas |
 | `git` / `jj` | Forkable | sha, change_id, dirty | tag (pushed if `remote`) | branch | `CHEAP`, `ATOMIC_REF`; local path only for now |
 | `iceberg` | Forkable | snapshot_id, metadata_location | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`; `record` for S3 Tables (no native ref) |
 | `delta` | Addressable | version, table_id | -- | -- | `CHEAP`, `RETENTION_BOUND`; no native tags; `VACUUM`/log retention bound readability |
