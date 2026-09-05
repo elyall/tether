@@ -19,6 +19,7 @@ from tether import manifest as _m
 from tether.backends.base import (
     Capability,
     ObjectBackend,
+    ObjectDiff,
     Tier,
     VerifyReport,
     VerifyStatus,
@@ -46,14 +47,18 @@ from tether.manifest import (
     compute_pin_id,
     ensure_layout,
     find_dataset_root,
+    listing_name,
+    listings_dir,
     manifest_hash,
     read_config,
+    read_listing,
     read_objects,
     read_workspace,
     ref_for_pin,
     remove_object,
     working_ref_name,
     write_config,
+    write_listing,
     write_object,
     write_workspace,
 )
@@ -113,6 +118,7 @@ class CommitResult:
 class GcReport:
     unpinned: dict[str, list[str]] = field(default_factory=dict)
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    deleted_listings: list[str] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -122,6 +128,8 @@ class DiffEntry:
     change: str  # added | removed | changed | unchanged
     a_pin: str | None = None
     b_pin: str | None = None
+    detail: ObjectDiff | None = None  # content diff (``diff(content=True)``)
+    detail_error: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -203,13 +211,31 @@ class Repo:
 
     def _vcs_paths(self) -> list[str]:
         # Never include the untracked workspace file; commit the committed
-        # surface explicitly (objects dir, the ignore file, and config).
+        # surface explicitly (objects dir, listings, the ignore file, config).
         rel = self._dataset_rel()
-        return [
+        paths = [
             (rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix(),
             (rel / _m.TETHER_DIR / _m.GITIGNORE_FILENAME).as_posix(),
             (rel / _m.CONFIG_FILENAME).as_posix(),
         ]
+        if any(listings_dir(self.root).glob("*.jsonl")):
+            paths.append((rel / _m.TETHER_DIR / _m.LISTINGS_DIR).as_posix())
+        return paths
+
+    def _listing_relpath(self, name: str) -> str:
+        rel = self._dataset_rel()
+        return (rel / _m.TETHER_DIR / _m.LISTINGS_DIR / name).as_posix()
+
+    def _listing_for(self, m: ObjectManifest, rev: str | None) -> str | None:
+        """Read the stored listing for a manifest's state (working tree, then VCS)."""
+        if m.state is None:
+            return None
+        backend = self.backend_for(m.kind)
+        name = listing_name(m.kind, backend.identity(m.locator), m.state)
+        text = read_listing(self.root, name)
+        if text is None and rev is not None:
+            text = self.vcs.read_file_at(rev, self._listing_relpath(name))
+        return text
 
     def _objects_reldir(self) -> str:
         rel = self._dataset_rel()
@@ -242,12 +268,12 @@ class Repo:
         base = self.workspace.base
         return base is not None and base != self.current_manifest_hash()
 
-    def _fanout(self, fn, keys: list[str]) -> dict:
-        """Run ``fn(key)`` per key concurrently; aggregate failures."""
+    def _fanout_collect(self, fn, keys: list[str]) -> tuple[dict, dict[str, Exception]]:
+        """Run ``fn(key)`` per key concurrently; return ``(results, errors)``."""
         results: dict = {}
         errors: dict[str, Exception] = {}
         if not keys:
-            return results
+            return results, errors
         with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(keys))) as ex:
             futures = {ex.submit(fn, key): key for key in keys}
             for future in futures:
@@ -256,6 +282,11 @@ class Repo:
                     results[key] = future.result()
                 except Exception as exc:
                     errors[key] = exc
+        return results, errors
+
+    def _fanout(self, fn, keys: list[str]) -> dict:
+        """Run ``fn(key)`` per key concurrently; aggregate failures."""
+        results, errors = self._fanout_collect(fn, keys)
         if errors:
             raise MultiObjectError("fan-out failed", errors)
         return results
@@ -429,12 +460,18 @@ class Repo:
             self._rollback_pins(created_pins)
             raise
 
-        # Persist manifests.
+        # Persist manifests (and listings for backends that provide them).
         for key, (state, pin, recoverable) in plans.items():
             m = self.objects[key]
             updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
             self.objects[key] = updated
             write_object(self.root, updated)
+            backend = self.backend_for(m.kind)
+            if Capability.DIFF in effective_capabilities(backend, m.locator, m.policy):
+                text = backend.listing(m.locator, state)
+                if text is not None:
+                    name = listing_name(m.kind, backend.identity(m.locator), state)
+                    write_listing(self.root, name, text)
 
         # VCS commit (only if something changed on disk).
         if vcs and plans:
@@ -638,9 +675,11 @@ class Repo:
             return f"{backend.kind}|{_m.canonical_bytes(ident).decode()}"
 
         history_manifests: list[ObjectManifest] = []
+        all_manifests: list[ObjectManifest] = []
         seen: set[str] = set()
         for _rev, objects in self._iter_history_objects():
             for m in objects.values():
+                all_manifests.append(m)
                 if m.pin is None:
                     continue
                 backend = self.backend_for(m.kind)
@@ -688,6 +727,19 @@ class Repo:
             for key in dropped:
                 self.workspace.working_refs.pop(key, None)
             write_workspace(self.root, self.workspace)
+
+        # Prune listings no manifest (in history or the working tree) names.
+        wanted: set[str] = set()
+        for m in [*all_manifests, *self.objects.values()]:
+            if m.state is not None:
+                backend = self.backend_for(m.kind)
+                wanted.add(listing_name(m.kind, backend.identity(m.locator), m.state))
+        for path in sorted(listings_dir(self.root).glob("*.jsonl")):
+            if path.name in wanted:
+                continue
+            report.deleted_listings.append(path.name)
+            if not dry_run:
+                path.unlink()
         return report
 
     # -- diff ------------------------------------------------------------ #
@@ -695,20 +747,28 @@ class Repo:
         self,
         rev_a: str | None = None,
         rev_b: str | None = None,
+        *,
+        content: bool = False,
     ) -> list[DiffEntry]:
-        a = (
-            self._objects_at(self.vcs.resolve(rev_a))
-            if rev_a is not None
-            else self.objects
-        )
-        b = self._objects_at(self.vcs.resolve(rev_b)) if rev_b is not None else None
+        """Object-level manifest diff; with ``content`` also what changed inside.
+
+        Content diffs run concurrently for every ``changed`` object whose backend
+        declares ``DIFF``; per-object failures land in ``detail_error`` rather
+        than aborting the whole diff.
+        """
+        resolved_a = self.vcs.resolve(rev_a) if rev_a is not None else None
+        resolved_b = self.vcs.resolve(rev_b) if rev_b is not None else None
+        a = self._objects_at(resolved_a) if resolved_a is not None else self.objects
+        b = self._objects_at(resolved_b) if resolved_b is not None else None
         # Default: compare working tree (a) against its parent commit.
         if b is None and rev_a is None:
             try:
-                b = self._objects_at(self.vcs.current_rev())
+                resolved_b = self.vcs.current_rev()
+                b = self._objects_at(resolved_b)
             except VcsError:
                 b = {}
             a, b = b, a  # b = parent, a = working; present as parent -> working
+            resolved_a, resolved_b = resolved_b, None
         elif b is None:
             b = {}
 
@@ -727,4 +787,43 @@ class Repo:
             else:
                 change = "unchanged"
             entries.append(DiffEntry(key=key, change=change, a_pin=pa, b_pin=pb))
+
+        if content:
+            self._attach_content_diffs(entries, a, b, resolved_a, resolved_b)
         return entries
+
+    def _attach_content_diffs(
+        self,
+        entries: list[DiffEntry],
+        a: dict[str, ObjectManifest],
+        b: dict[str, ObjectManifest],
+        rev_a: str | None,
+        rev_b: str | None,
+    ) -> None:
+        by_key = {e.key: e for e in entries}
+        keys: list[str] = []
+        for e in entries:
+            if e.change != "changed":
+                continue
+            ma, mb = a[e.key], b[e.key]
+            if ma.state is None or mb.state is None or ma.kind != mb.kind:
+                continue
+            backend = self.backend_for(mb.kind)
+            if Capability.DIFF not in effective_capabilities(
+                backend, mb.locator, mb.policy
+            ):
+                continue
+            keys.append(e.key)
+
+        def diff_one(key: str) -> ObjectDiff:
+            ma, mb = a[key], b[key]
+            assert ma.state is not None and mb.state is not None
+            backend = self.backend_for(mb.kind)
+            listings = (self._listing_for(ma, rev_a), self._listing_for(mb, rev_b))
+            return backend.diff(mb.locator, ma.state, mb.state, listings=listings)
+
+        results, errors = self._fanout_collect(diff_one, keys)
+        for key, result in results.items():
+            by_key[key].detail = result
+        for key, err in errors.items():
+            by_key[key].detail_error = str(err)

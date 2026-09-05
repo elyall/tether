@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -59,6 +60,70 @@ def test_directory_fingerprint_tracks_content(tmp_path: Path) -> None:
 def test_missing_local_path_is_backend_error(tmp_path: Path) -> None:
     with pytest.raises(BackendError):
         FileBackend().fingerprint({"uri": str(tmp_path / "nope")}, None)
+
+
+def test_directory_listing_and_diff(tmp_path: Path) -> None:
+    b = FileBackend()
+    d = tmp_path / "data"
+    (d / "sub").mkdir(parents=True)
+    (d / "keep.bin").write_bytes(b"k")
+    (d / "grow.bin").write_bytes(b"12")
+    (d / "sub" / "gone.bin").write_bytes(b"gone")
+    loc = {"uri": str(d)}
+    s1 = b.fingerprint(loc, None)
+    l1 = b.listing(loc, s1)
+    assert l1 is not None
+    rows = [json.loads(line) for line in l1.splitlines()]
+    assert [r["p"] for r in rows] == ["grow.bin", "keep.bin", "sub/gone.bin"]
+    assert rows[0]["s"] == 2 and rows[0]["k"].startswith("2:")
+
+    (d / "grow.bin").write_bytes(b"1234567")
+    (d / "sub" / "gone.bin").unlink()
+    (d / "new.bin").write_bytes(b"n" * 2048)
+    s2 = b.fingerprint(loc, None)
+    l2 = b.listing(loc, s2)
+
+    diff = b.diff(loc, s1, s2, listings=(l1, l2))
+    assert diff.unit == "files"
+    assert {(e.path, e.change, e.detail) for e in diff.entries} == {
+        ("grow.bin", "modified", "+5 B"),
+        ("new.bin", "added", "+2.0 KiB"),
+        ("sub/gone.bin", "removed", "-4 B"),
+    }
+    assert b.diff(loc, s2, s2, listings=(l2, l2)).is_empty
+
+    # Without stored listings the diff degrades to a count/size summary.
+    fallback = b.diff(loc, s1, s2)
+    assert fallback.note == "no stored listing for side a and b"
+    assert fallback.entries[0].detail == "3 -> 3 files, +2.0 KiB"
+
+    # Listings are served from the fingerprint cache; a fresh backend can only
+    # produce one for the state the object currently has.
+    assert b.listing(loc, s1) == l1
+    fresh = FileBackend()
+    assert fresh.listing(loc, s1) is None  # stale state, not reproducible
+    assert fresh.listing(loc, s2) == l2
+    assert b.listing(loc, {"type": "file", "size": 1, "mtime_ns": 1}) is None
+
+
+def test_single_object_diff(tmp_path: Path) -> None:
+    b = FileBackend()
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"1234")
+    loc = {"uri": str(f)}
+    s1 = b.fingerprint(loc, None)
+    f.write_bytes(b"1234567890")
+    s2 = b.fingerprint(loc, None)
+    diff = b.diff(loc, s1, s2)
+    assert diff.unit == "objects" and diff.modified == 1
+    assert diff.entries[0].detail.startswith("size +6 B, mtime_ns ")
+    remote = b.diff(
+        {"uri": "s3://b/k"},
+        {"type": "object", "size": 1, "etag": "a", "version_id": "v1"},
+        {"type": "object", "size": 1, "etag": "b", "version_id": "v2"},
+    )
+    assert remote.entries[0].detail == "etag a -> b, version v1 -> v2"
+    assert b.diff(loc, s2, s2).is_empty
 
 
 # --------------------------------------------------------------------------- #

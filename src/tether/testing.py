@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from tether.backends.base import Capability, ObjectBackend, VerifyStatus
+from tether.backends.base import Capability, ObjectBackend, ObjectDiff, VerifyStatus
 from tether.handles import Handle
 from tether.manifest import (
     Locator,
@@ -33,7 +33,7 @@ class BackendHarness(Protocol):
         """Cause the state at ``working_ref`` (or the base) to change."""
 
 
-def _fingerprint_checks(h: BackendHarness, loc: Locator) -> dict:
+def _fingerprint_checks(h: BackendHarness, loc: Locator) -> tuple[dict, dict]:
     b = h.backend
     s1 = b.fingerprint(loc, None)
     assert isinstance(s1, dict), "fingerprint must return a dict"
@@ -41,7 +41,20 @@ def _fingerprint_checks(h: BackendHarness, loc: Locator) -> dict:
     h.mutate(loc, None)
     s2 = b.fingerprint(loc, None)
     assert s2 != s1, "fingerprint must change after a mutation"
-    return s2
+    return s1, s2
+
+
+def _diff_checks(h: BackendHarness, loc: Locator, s1: dict, s2: dict) -> None:
+    b = h.backend
+    listings = (b.listing(loc, s1), b.listing(loc, s2))
+    same = b.diff(loc, s2, s2, listings=(listings[1], listings[1]))
+    assert isinstance(same, ObjectDiff), "diff must return an ObjectDiff"
+    assert same.is_empty, "diffing a state against itself must be empty"
+    changed = b.diff(loc, s1, s2, listings=listings)
+    assert not changed.is_empty, "diff between distinct states must report change"
+    assert changed.summary, "diff must have a summary"
+    for entry in changed.entries:
+        assert entry.change in ("added", "removed", "modified", "renamed")
 
 
 def _identity_checks(h: BackendHarness, loc: Locator, state: dict) -> None:
@@ -119,8 +132,11 @@ def run_conformance(harness: BackendHarness) -> None:
     assert Capability.FINGERPRINT in caps, "every backend must fingerprint"
 
     loc = harness.new_object()
-    state = _fingerprint_checks(harness, loc)
+    before, state = _fingerprint_checks(harness, loc)
     _identity_checks(harness, loc, state)
+
+    if Capability.DIFF in caps:
+        _diff_checks(harness, loc, before, state)
 
     if Capability.ADDRESSABLE in caps:
         _addressable_checks(harness, loc, state)

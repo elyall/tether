@@ -13,10 +13,11 @@ stateless coordinators over user-supplied resources.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from tether.errors import CapabilityError
 from tether.handles import Handle
 from tether.manifest import Locator, Pin, State
 
@@ -35,6 +36,7 @@ class Capability(Flag):
     RETENTION_BOUND = auto()  # pin validity bounded by a retention window
     NEEDS_QUIESCENCE = auto()  # commit should check for active writers
     ATOMIC_REF = auto()  # create-if-absent semantics for pins
+    DIFF = auto()  # can describe what changed between two recorded states
 
 
 class Tier(Enum):
@@ -71,9 +73,92 @@ class VerifyReport:
         return self.status is VerifyStatus.OK
 
 
+# --------------------------------------------------------------------------- #
+# Content diffs
+# --------------------------------------------------------------------------- #
+MAX_DIFF_ENTRIES = 2000
+
+
+@dataclass
+class ChangeEntry:
+    """One changed thing inside an object: a file, table, array, key, ..."""
+
+    path: str
+    change: str  # added | removed | modified | renamed
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        d = {"path": self.path, "change": self.change}
+        if self.detail:
+            d["detail"] = self.detail
+        return d
+
+
+@dataclass
+class ObjectDiff:
+    """What changed inside one object between two recorded states.
+
+    Backends describe changes at whatever granularity their system exposes
+    natively and cheaply (files, tables, arrays, fragments, versions); ``unit``
+    names it. Entries are capped at :data:`MAX_DIFF_ENTRIES`; counts are not.
+    """
+
+    unit: str = "entries"
+    added: int = 0
+    removed: int = 0
+    modified: int = 0
+    entries: list[ChangeEntry] = field(default_factory=list)
+    truncated: bool = False
+    note: str = ""  # context the counts alone do not convey
+
+    def add(self, path: str, change: str, detail: str = "") -> None:
+        if change == "added":
+            self.added += 1
+        elif change == "removed":
+            self.removed += 1
+        else:
+            self.modified += 1
+        if len(self.entries) < MAX_DIFF_ENTRIES:
+            self.entries.append(ChangeEntry(path, change, detail))
+        else:
+            self.truncated = True
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.added or self.removed or self.modified or self.entries)
+
+    @property
+    def summary(self) -> str:
+        text = f"+{self.added} -{self.removed} ~{self.modified} {self.unit}"
+        if self.truncated:
+            text += f" (first {len(self.entries)} shown)"
+        if self.note:
+            text += f"; {self.note}"
+        return text
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "summary": self.summary,
+            "unit": self.unit,
+            "added": self.added,
+            "removed": self.removed,
+            "modified": self.modified,
+            "truncated": self.truncated,
+            "note": self.note,
+            "entries": [e.to_dict() for e in self.entries],
+        }
+
+
+Listings = tuple[str | None, str | None]
+
+
 @runtime_checkable
 class ObjectBackend(Protocol):
-    """The operations tether needs from one class of system."""
+    """The operations tether needs from one class of system.
+
+    ``listing`` and ``diff`` have default implementations (no listing; diff is a
+    capability error) so backends without ``DIFF`` need not define them.
+    """
 
     kind: str
     capabilities: Capability
@@ -124,6 +209,27 @@ class ObjectBackend(Protocol):
         ref, a :class:`~tether.manifest.Pin` (read a pinned state), or a
         recorded ``State`` mapping (read an addressable state without a pin).
         """
+
+    def listing(self, locator: Locator, state: State) -> str | None:
+        """Optional detailed description of ``state`` to store alongside it.
+
+        The engine writes the text content-addressed under ``.tether/listings/``
+        at commit time and hands both sides back to :meth:`diff` later. Used by
+        backends whose state is a digest (the ``file`` backend's directory and
+        prefix listings) so Observed states can still be diffed.
+        """
+        return None
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """Describe what changed from state ``a`` to state ``b``. Requires ``DIFF``."""
+        raise CapabilityError(f"{self.kind} backend cannot diff", kind=self.kind)
 
 
 # --------------------------------------------------------------------------- #

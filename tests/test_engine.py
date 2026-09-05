@@ -171,6 +171,91 @@ def test_open_missing_object_errors(vcs_root: Path) -> None:
         repo.open("nope")
 
 
+def test_content_diff_and_listings(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    data = vcs_root / "plate"
+    (data / "sub").mkdir(parents=True)
+    (data / "a.bin").write_bytes(b"aaaa")
+    (data / "sub" / "b.bin").write_bytes(b"bb")
+    repo.add("raw/plate", "file", {"uri": str(data)}, policy=Policy(file="versioned"))
+    r1 = repo.commit("baseline")
+    assert r1.vcs_commit is not None
+
+    # The directory listing was stored content-addressed and committed.
+    listings = sorted(p.name for p in (vcs_root / ".tether" / "listings").iterdir())
+    assert len(listings) == 1 and listings[0].endswith(".jsonl")
+    assert repo.vcs.files_at(r1.vcs_commit, ".tether/listings").keys() == {
+        f".tether/listings/{listings[0]}"
+    }
+
+    # Change both objects and commit again.
+    default_store().write(system, "main", {"rows": 3, "schema": "v2"})
+    (data / "a.bin").write_bytes(b"aaaaaaaa")
+    (data / "sub" / "b.bin").unlink()
+    (data / "c.bin").write_bytes(b"c")
+    r2 = repo.commit("update")
+    assert r2.vcs_commit is not None
+
+    entries = {e.key: e for e in repo.diff(r1.vcs_commit, r2.vcs_commit, content=True)}
+    db = entries["db"]
+    assert db.change == "changed" and db.detail is not None
+    assert db.detail.unit == "keys" and db.detail.added == 2
+    plate = entries["raw/plate"]
+    assert plate.change == "changed" and plate.detail is not None
+    assert (plate.detail.added, plate.detail.removed, plate.detail.modified) == (
+        1,
+        1,
+        1,
+    )
+    assert {e.path: e.change for e in plate.detail.entries} == {
+        "a.bin": "modified",
+        "c.bin": "added",
+        "sub/b.bin": "removed",
+    }
+    # Without --content no detail is computed; unchanged objects never are.
+    assert all(e.detail is None for e in repo.diff(r1.vcs_commit, r2.vcs_commit))
+
+    # Listings survive in VCS even when the working-tree copy is gone.
+    for p in (vcs_root / ".tether" / "listings").iterdir():
+        p.unlink()
+    again = {e.key: e for e in repo.diff(r1.vcs_commit, r2.vcs_commit, content=True)}
+    assert again["raw/plate"].detail is not None
+    assert again["raw/plate"].detail.added == 1 and not again["raw/plate"].detail.note
+
+    # gc prunes listings that no manifest in history references.
+    from tether.manifest import listing_path
+
+    orphan = listing_path(vcs_root, "deadbeefdeadbeefdead.jsonl")
+    orphan.parent.mkdir(exist_ok=True)
+    orphan.write_text('{"p":"x","k":"1:1","s":1}\n', encoding="utf-8")
+    report = repo.gc(dry_run=True)
+    assert report.deleted_listings == ["deadbeefdeadbeefdead.jsonl"]
+    assert orphan.exists()
+    repo.gc(dry_run=False)
+    assert not orphan.exists()
+
+
+def test_content_diff_reports_backend_failures_per_object(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    r1 = repo.commit("baseline")
+    default_store().write(system, "main", {"x": 1})
+    r2 = repo.commit("update")
+    assert r1.vcs_commit and r2.vcs_commit
+    backend = repo.backend_for("memory")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no diff for you")
+
+    monkeypatch.setattr(backend, "diff", boom)
+    entries = {e.key: e for e in repo.diff(r1.vcs_commit, r2.vcs_commit, content=True)}
+    assert entries["db"].detail is None
+    assert entries["db"].detail_error == "no diff for you"
+
+
 def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
     # Guard against accidental prefix drift between pin() and gc().
     assert ref_for_pin("abc") == "tether.abc"

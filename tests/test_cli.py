@@ -61,3 +61,25 @@ def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None
     r = runner.invoke(app, ["gc", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["dry_run"] is True
+
+    # Content diff between the baseline and a second commit (written through
+    # the forked working branch, which is what `new` made current).
+    first = commit_payload["vcs_commit"]
+    wref = next(b for b in default_store().system(system).branches if b != "main")
+    default_store().write(system, wref, {"rows": 42})
+    r = runner.invoke(app, ["commit", "-m", "more rows", "--json"])
+    assert r.exit_code == 0, r.output
+    second = json.loads(r.output)["vcs_commit"]
+
+    r = runner.invoke(app, ["diff", first, second])
+    assert r.exit_code == 0, r.output
+    assert "changed  db" in r.output and "rows" not in r.output
+
+    r = runner.invoke(app, ["diff", first, second, "--content"])
+    assert r.exit_code == 0, r.output
+    assert "[+1 -0 ~0 keys]" in r.output and "added  rows  42" in r.output
+
+    r = runner.invoke(app, ["diff", first, second, "-c", "--json"])
+    assert r.exit_code == 0, r.output
+    detail = json.loads(r.output)[0]["detail"]
+    assert detail["added"] == 1 and detail["entries"][0]["path"] == "rows"

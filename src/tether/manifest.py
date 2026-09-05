@@ -31,6 +31,7 @@ from tether.errors import ConfigError
 CONFIG_FILENAME = "tether.toml"
 TETHER_DIR = ".tether"
 OBJECTS_DIR = "objects"
+LISTINGS_DIR = "listings"
 WORKSPACE_FILENAME = "workspace.toml"
 GITIGNORE_FILENAME = ".gitignore"
 
@@ -89,6 +90,22 @@ def compute_pin_id(kind: str, identity: Locator, state: State) -> str:
 def ref_for_pin(pin_id: str) -> str:
     """Native reference name for a pin id (dot-delimited; no ``/``)."""
     return f"{REF_PREFIX}{pin_id}"
+
+
+def listing_name(kind: str, identity: Locator, state: State) -> str:
+    """Content-addressed file name for a state's listing.
+
+    Derived from the same inputs as the pin id (see ``ObjectBackend.listing``),
+    so the engine can locate a listing from a manifest alone, at commit time and
+    at diff time.
+    """
+    digest = _blake(
+        canonical_bytes(kind),
+        canonical_bytes(identity),
+        canonical_bytes(state),
+        size=16,
+    )[:20]
+    return f"{digest}.jsonl"
 
 
 def slugify_key(key: str) -> str:
@@ -396,6 +413,27 @@ def objects_dir(root: Path) -> Path:
 
 def workspace_path(root: Path) -> Path:
     return root / TETHER_DIR / WORKSPACE_FILENAME
+
+
+def listings_dir(root: Path) -> Path:
+    return root / TETHER_DIR / LISTINGS_DIR
+
+
+def listing_path(root: Path, name: str) -> Path:
+    return listings_dir(root) / name
+
+
+def write_listing(root: Path, name: str, text: str) -> Path:
+    """Store a listing (idempotent: content-addressed names never change)."""
+    path = listing_path(root, name)
+    if not path.exists():
+        _atomic_write(path, text)
+    return path
+
+
+def read_listing(root: Path, name: str) -> str | None:
+    path = listing_path(root, name)
+    return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
 def object_path(root: Path, key: str) -> Path:

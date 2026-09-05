@@ -12,20 +12,29 @@ Fingerprints are metadata-only: a local walk (``os.scandir`` + ``stat``), one
 ``HEAD`` for a remote object, or one paged ``LIST`` for a prefix (etag + size per
 object, no per-object round-trips).
 
+A directory/prefix state is only a digest, so on its own it cannot be diffed.
+The backend therefore hands the engine a per-file *listing* (JSON lines, sorted
+by path) to store content-addressed in VCS at commit time; ``diff`` compares two
+stored listings file by file.
+
 .. _obstore: https://developmentseed.org/obstore/
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -69,6 +78,40 @@ def _strip_etag(etag: object) -> str:
     return str(etag or "").strip('"')
 
 
+# A listing row: path -> (token, size). ``token`` is what "same content" means
+# for the entry: ``size:mtime_ns`` locally, the etag remotely.
+ListingRows = dict[str, tuple[str, int]]
+
+
+def _dump_listing(rows: ListingRows) -> str:
+    return "".join(
+        json.dumps({"p": path, "k": token, "s": size}, separators=(",", ":")) + "\n"
+        for path, (token, size) in sorted(rows.items())
+    )
+
+
+def _load_listing(text: str) -> ListingRows:
+    rows: ListingRows = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        rows[str(row["p"])] = (str(row.get("k", "")), int(row.get("s", 0)))
+    return rows
+
+
+def _human(n: int) -> str:
+    sign = "-" if n < 0 else "+"
+    value = float(abs(n))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{sign}{value:.0f} {unit}"
+            return f"{sign}{value:.1f} {unit}"
+        value /= 1024
+    return f"{sign}{value}"  # pragma: no cover
+
+
 def _walk_files(root: Path) -> list[tuple[str, int, int]]:
     """Return ``(relative posix path, size, mtime_ns)`` for every file under root.
 
@@ -94,19 +137,30 @@ def _walk_files(root: Path) -> list[tuple[str, int, int]]:
 class FileBackend(ObjectBackend):
     kind = "file"
     capabilities = (
-        Capability.FINGERPRINT | Capability.ADDRESSABLE | Capability.CHEAP_FINGERPRINT
+        Capability.FINGERPRINT
+        | Capability.ADDRESSABLE
+        | Capability.CHEAP_FINGERPRINT
+        | Capability.DIFF
     )
+    _LISTING_CACHE = 16  # recent directory/prefix listings kept, by digest
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
         self._stores: dict[str, Any] = {}
+        self._listings: OrderedDict[str, ListingRows] = OrderedDict()
 
     # -- capability refinement ------------------------------------------ #
     def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
-        base = Capability.FINGERPRINT | Capability.CHEAP_FINGERPRINT
+        base = Capability.FINGERPRINT | Capability.CHEAP_FINGERPRINT | Capability.DIFF
         if getattr(policy, "file", "immutable") == "versioned":
             return base | Capability.ADDRESSABLE
         return base
+
+    def _remember(self, digest: str, rows: ListingRows) -> None:
+        self._listings[digest] = rows
+        self._listings.move_to_end(digest)
+        while len(self._listings) > self._LISTING_CACHE:
+            self._listings.popitem(last=False)
 
     # -- helpers --------------------------------------------------------- #
     def _uri(self, locator: Locator) -> str:
@@ -165,12 +219,16 @@ class FileBackend(ObjectBackend):
             raise BackendError(f"path does not exist: {path}", kind="file")
         if path.is_dir():
             entries = _walk_files(path)
-            pairs = [(rel, f"{size}:{mtime}") for rel, size, mtime in entries]
+            rows: ListingRows = {
+                rel: (f"{size}:{mtime}", size) for rel, size, mtime in entries
+            }
+            digest = _digest_pairs([(p, tok) for p, (tok, _) in rows.items()])
+            self._remember(digest, rows)
             return {
                 "type": "dir",
                 "count": len(entries),
                 "size": sum(size for _, size, _ in entries),
-                "digest": _digest_pairs(pairs),
+                "digest": digest,
             }
         st = path.stat()
         return {"type": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns}
@@ -178,17 +236,20 @@ class FileBackend(ObjectBackend):
     def _fingerprint_remote(self, store: Any, key: str) -> State:
         obs = self._obstore()
         if key.endswith("/") or key == "":
-            pairs: list[tuple[str, str]] = []
+            rows: ListingRows = {}
             total = 0
             for page in obs.list(store, prefix=key or None):
                 for meta in page:
-                    pairs.append((str(meta["path"]), _strip_etag(meta.get("e_tag"))))
-                    total += int(meta["size"])
+                    size = int(meta["size"])
+                    rows[str(meta["path"])] = (_strip_etag(meta.get("e_tag")), size)
+                    total += size
+            digest = _digest_pairs([(p, tok) for p, (tok, _) in rows.items()])
+            self._remember(digest, rows)
             return {
                 "type": "prefix",
-                "count": len(pairs),
+                "count": len(rows),
                 "size": total,
-                "digest": _digest_pairs(pairs),
+                "digest": digest,
             }
         try:
             meta = obs.head(store, key)
@@ -260,6 +321,79 @@ class FileBackend(ObjectBackend):
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         return None
+
+    # -- listings / diff ------------------------------------------------- #
+    def listing(self, locator: Locator, state: State) -> str | None:
+        if state.get("type") not in ("dir", "prefix"):
+            return None  # a single object's state is already fully descriptive
+        digest = str(state.get("digest", ""))
+        rows = self._listings.get(digest)
+        if rows is None:
+            # Not cached (different process / evicted): re-read and use it only
+            # if the object still has exactly the recorded state.
+            current = self.fingerprint(locator, None)
+            if current.get("digest") != digest:
+                return None
+            rows = self._listings[digest]
+        return _dump_listing(rows)
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        if a.get("type") in ("dir", "prefix") or b.get("type") in ("dir", "prefix"):
+            return self._diff_listings(a, b, listings)
+        out = ObjectDiff(unit="objects")
+        if a == b:
+            return out
+        details: list[str] = []
+        for field_name, label in (
+            ("size", "size"),
+            ("etag", "etag"),
+            ("mtime_ns", "mtime_ns"),
+            ("version_id", "version"),
+        ):
+            va, vb = a.get(field_name), b.get(field_name)
+            if va != vb:
+                shown = (
+                    _human(int(vb) - int(va))
+                    if field_name == "size" and va is not None and vb is not None
+                    else f"{va} -> {vb}"
+                )
+                details.append(f"{label} {shown}")
+        out.add(str(self._uri(locator)), "modified", ", ".join(details))
+        return out
+
+    def _diff_listings(self, a: State, b: State, listings: Listings) -> ObjectDiff:
+        out = ObjectDiff(unit="files")
+        text_a, text_b = listings
+        if a.get("digest") == b.get("digest"):
+            return out
+        if text_a is None or text_b is None:
+            missing = [s for s, t in (("a", text_a), ("b", text_b)) if t is None]
+            out.note = f"no stored listing for side {' and '.join(missing)}"
+            count_a, count_b = int(a.get("count", 0)), int(b.get("count", 0))
+            size_a, size_b = int(a.get("size", 0)), int(b.get("size", 0))
+            out.add(
+                "(summary)",
+                "modified",
+                f"{count_a} -> {count_b} files, {_human(size_b - size_a)}",
+            )
+            return out
+        rows_a, rows_b = _load_listing(text_a), _load_listing(text_b)
+        for path in sorted(set(rows_a) | set(rows_b)):
+            ra, rb = rows_a.get(path), rows_b.get(path)
+            if ra is None and rb is not None:
+                out.add(path, "added", _human(rb[1]))
+            elif rb is None and ra is not None:
+                out.add(path, "removed", _human(-ra[1]))
+            elif ra != rb and ra is not None and rb is not None:
+                out.add(path, "modified", _human(rb[1] - ra[1]))
+        return out
 
     def open(
         self,

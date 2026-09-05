@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -77,6 +79,7 @@ class MemoryBackend(ObjectBackend):
         | Capability.FORK
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, store: MemoryStore | None = None) -> None:
@@ -178,6 +181,27 @@ class MemoryBackend(ObjectBackend):
             system=name,
             ref=resolved,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        name = self._system(locator)
+        pa = self.store.read(name, str(a["snapshot_id"]))
+        pb = self.store.read(name, str(b["snapshot_id"]))
+        out = ObjectDiff(unit="keys")
+        for key in sorted(set(pa) | set(pb)):
+            if key not in pa:
+                out.add(key, "added", repr(pb[key]))
+            elif key not in pb:
+                out.add(key, "removed", repr(pa[key]))
+            elif pa[key] != pb[key]:
+                out.add(key, "modified", f"{pa[key]!r} -> {pb[key]!r}")
+        return out
 
 
 # Process-global store so backends built independently by the engine (and by

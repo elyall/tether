@@ -346,26 +346,56 @@ def verify(
 def diff(
     rev_a: str | None = typer.Argument(None),
     rev_b: str | None = typer.Argument(None),
+    content: bool = typer.Option(
+        False, "--content", "-c", help="Also describe what changed inside each object."
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max entries shown per object."),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Show object-level manifest differences between two revisions."""
+    """Show object-level manifest differences between two revisions.
+
+    With --content, changed objects whose backend supports it are diffed
+    natively (files, tables, arrays, fragments, commits) using metadata only.
+    """
     repo = _repo()
     try:
-        entries = repo.diff(rev_a, rev_b)
+        entries = repo.diff(rev_a, rev_b, content=content)
     except TetherError as exc:
         _fail(exc)
     if json_out:
         _emit(
             [
-                {"key": e.key, "change": e.change, "a": e.a_pin, "b": e.b_pin}
+                {
+                    "key": e.key,
+                    "change": e.change,
+                    "a": e.a_pin,
+                    "b": e.b_pin,
+                    "detail": e.detail.to_dict() if e.detail else None,
+                    "detail_error": e.detail_error,
+                }
                 for e in entries
             ],
             as_json=True,
         )
         return
     for e in entries:
-        if e.change != "unchanged":
-            typer.echo(f"  {e.change:>9}  {e.key}")
+        if e.change == "unchanged":
+            continue
+        line = f"  {e.change:>9}  {e.key}"
+        if e.detail is not None:
+            line += f"  [{e.detail.summary}]"
+        elif e.detail_error:
+            line += f"  [diff failed: {e.detail_error}]"
+        typer.echo(line)
+        if e.detail is None:
+            continue
+        shown = e.detail.entries[: max(limit, 0)]
+        for item in shown:
+            suffix = f"  {item.detail}" if item.detail else ""
+            typer.echo(f"{'':14}{item.change:>9}  {item.path}{suffix}")
+        hidden = len(e.detail.entries) - len(shown)
+        if hidden > 0:
+            typer.echo(f"{'':14}... {hidden} more (use --limit)")
 
 
 @app.command()
@@ -381,7 +411,11 @@ def gc(
         _fail(exc)
     if json_out:
         _emit(
-            {"dry_run": report.dry_run, "unpinned": report.unpinned},
+            {
+                "dry_run": report.dry_run,
+                "unpinned": report.unpinned,
+                "deleted_listings": report.deleted_listings,
+            },
             as_json=True,
         )
         return
@@ -391,6 +425,9 @@ def gc(
     for kind, ids in report.unpinned.items():
         for pid in ids:
             typer.echo(f"  {kind}: {pid}")
+    if report.deleted_listings:
+        verb = "would delete" if report.dry_run else "deleted"
+        typer.echo(f"{verb} {len(report.deleted_listings)} orphan listing(s)")
 
 
 def main() -> None:
