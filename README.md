@@ -4,7 +4,7 @@
 
 > Status: alpha. See the [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md).
 >
-> State: vibe coded with Claude Fable 5.1.
+> State: vibe coded with Claude Fable 5.1. **USE AT YOUR OWN RISK.**
 
 `tether` ties heterogeneous data objects -- files and object-store prefixes (S3,
 GCS, Azure), [Icechunk](https://icechunk.io) repositories, [Neon](https://neon.com)
