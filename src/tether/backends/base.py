@@ -313,7 +313,7 @@ def build_backend(kind: str, config: dict | None = None) -> ObjectBackend:
         except ImportError as exc:
             raise ConfigError(
                 f"backend {kind!r} needs an optional dependency: {exc}. "
-                f"Install the matching extra (e.g. `pip install tether[{kind}]`)."
+                f"Install the matching extra (e.g. `pip install tether-vcs[{kind}]`)."
             ) from exc
     try:
         factory = _REGISTRY[kind]

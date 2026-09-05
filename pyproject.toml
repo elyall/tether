@@ -3,7 +3,9 @@ requires = ["uv_build>=0.11,<0.13"]
 build-backend = "uv_build"
 
 [project]
-name = "tether"
+# Distribution name; the import package and CLI are still `tether` (PyPI
+# prohibits the bare name `tether`).
+name = "tether-vcs"
 version = "0.1.0"
 description = "jj-style version control for heterogeneous datasets (files/object stores, Icechunk, Neon, Iceberg, Delta, Lance, lakeFS, DuckLake, Dolt, git)"
 readme = "README.md"
@@ -95,6 +97,9 @@ docs = [
 
 [tool.uv]
 package = true
+
+[tool.uv.build-backend]
+module-name = "tether"
 
 [tool.ruff]
 line-length = 88

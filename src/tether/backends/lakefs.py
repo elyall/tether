@@ -79,7 +79,7 @@ class LakeFSBackend(ObjectBackend):
             import lakefs
         except ImportError as exc:  # pragma: no cover - optional dep
             raise BackendError(
-                "the lakefs extra is required (`pip install tether[lakefs]`)",
+                "the lakefs extra is required (`pip install tether-vcs[lakefs]`)",
                 kind="lakefs",
             ) from exc
         client_kwargs = {k: v for k, v in self._config.items() if k != "kind"}

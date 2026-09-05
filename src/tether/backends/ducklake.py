@@ -129,7 +129,7 @@ class DuckLakeBackend(ObjectBackend):
             import duckdb
         except ImportError as exc:  # pragma: no cover - optional dep
             raise BackendError(
-                "the ducklake extra is required (`pip install tether[ducklake]`)",
+                "the ducklake extra is required (`pip install tether-vcs[ducklake]`)",
                 kind="ducklake",
             ) from exc
         con = duckdb.connect()

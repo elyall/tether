@@ -175,7 +175,7 @@ class FileBackend(ObjectBackend):
         except ImportError as exc:  # pragma: no cover - optional dep
             raise BackendError(
                 "the objectstore extra is required for remote file objects "
-                "(`pip install tether[objectstore]`)",
+                "(`pip install tether-vcs[objectstore]`)",
                 kind="file",
             ) from exc
         return obstore

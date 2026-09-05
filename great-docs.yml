@@ -6,6 +6,7 @@
 # ephemeral and gitignored); `great-docs preview` serves it locally.
 
 display_name: tether
+module: tether  # the distribution is `tether-vcs`; the importable package is `tether`
 parser: google
 dynamic: true
 repo: https://github.com/elyall/tether

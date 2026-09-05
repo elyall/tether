@@ -66,6 +66,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The distribution is published as `tether-vcs` (PyPI prohibits the bare name
+  `tether`); the importable package and the CLI remain `tether`. Install with
+  `pip install tether-vcs[...]`.
 - The `s3` extra now installs `obstore` instead of `boto3`; `objectstore`,
   `gcs`, and `azure` extras are aliases for the same dependency.
 - `gc` and `verify --all-history` stream history through a single object

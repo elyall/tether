@@ -56,10 +56,13 @@ records their snapshots, rather than a store that holds the data).
 ## Install
 
 ```bash
-pip install tether[cli]                 # core + CLI
-pip install tether[cli,icechunk,neon]   # add backends you need
-pip install tether[all]                 # everything
+pip install tether-vcs[cli]                 # core + CLI
+pip install tether-vcs[cli,icechunk,neon]   # add backends you need
+pip install tether-vcs[all]                 # everything
 ```
+
+The distribution is `tether-vcs` (PyPI reserves the bare name); the package you
+import and the command you run are both `tether`.
 
 Extras: `cli`, `objectstore` (S3/GCS/Azure for `file`; `s3`/`gcs`/`azure` are
 aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,

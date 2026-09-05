@@ -197,7 +197,8 @@ class DoltBackend(ObjectBackend):
             import pymysql
         except ImportError as exc:  # pragma: no cover - optional dep
             raise BackendError(
-                "the dolt extra is required (`pip install tether[dolt]`)", kind="dolt"
+                "the dolt extra is required (`pip install tether-vcs[dolt]`)",
+                kind="dolt",
             ) from exc
         host, port, database, user = self._endpoint(locator)
         password = os.environ.get(

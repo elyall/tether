@@ -1,6 +1,6 @@
 """Typer command-line interface for tether.
 
-Install with the ``cli`` extra (``pip install tether[cli]``). Every command that
+Install with the ``cli`` extra (``pip install tether-vcs[cli]``). Every command that
 inspects external systems fans out concurrently; ``--json`` emits
 machine-readable output for agents and scripts.
 """
@@ -15,7 +15,7 @@ try:
     import typer
 except ImportError as exc:  # pragma: no cover - optional dep
     raise SystemExit(
-        "the tether CLI requires the 'cli' extra: pip install tether[cli]"
+        "the tether CLI requires the 'cli' extra: pip install tether-vcs[cli]"
     ) from exc
 
 from tether.errors import TetherError
