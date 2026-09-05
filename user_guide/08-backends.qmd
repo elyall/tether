@@ -39,13 +39,18 @@ Common conventions:
 | `icechunk` | `icechunk` | Forkable | `ATOMIC_REF`, `DIFF` |
 | `neon` | `neon` | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND` |
 | `git` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` |
-| `iceberg` | `iceberg` | Forkable (Addressable with `--pin record`) | `RETENTION_BOUND`, `DIFF` |
+| `iceberg` | `iceberg` | Forkable | `RETENTION_BOUND`, `DIFF` |
 | `delta` | `delta` | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
 | `lance` | `lance` | Forkable | `ATOMIC_REF`, `DIFF` |
 | `lakefs` | `lakefs` | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` |
 | `ducklake` | `ducklake` | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
 | `dolt` | `dolt` | Forkable | `ATOMIC_REF`, `DIFF` |
 | `memory` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` (tests only) |
+
+`--pin record` removes `PIN` from any of these: the state is recorded without a
+native ref and `new` forks from it directly (Icechunk snapshot id, Lance
+`(branch, version)`, Iceberg snapshot id, lakeFS/Dolt/git commit, Neon LSN on
+the base branch) for as long as the system still has that state.
 
 ## `file` -- local paths and object stores
 

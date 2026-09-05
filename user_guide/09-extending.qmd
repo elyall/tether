@@ -50,8 +50,9 @@ Method by method:
 | `unpin(locator, pin)` | Delete the ref; ignore "already gone". |
 | `list_pins(locator)` | Pin ids (without the `tether.` prefix) that exist natively. `gc` subtracts the referenced ones. |
 | `verify(locator, state, pin, deep)` | With a pin: `OK` if it resolves to `state`, `DRIFTED` if it points elsewhere, `MISSING` if gone. Without: `UNKNOWN` unless `deep`, then actually open the state. |
-| `fork(locator, pin, name)` | Create writable branch `name` at the pin's state and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). Reset semantics if it already exists. |
-| `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. |
+| `fork(locator, source, name)` | Create writable branch `name` and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). `source` is a `Pin` (branch from the native ref) or a recorded `State` (branch straight from the snapshot / version / commit -- used by `pin = "record"` objects; raise `BackendError` if the state is no longer reachable). Reset semantics if it already exists. |
+| `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. Ignore "already gone". |
+| `list_working_refs(locator)` | Native branches named `tether.ws.*` (`WORKING_REF_PREFIX`) in this system; `gc --prune-workspaces` deletes the ones belonging to dead workspaces. Default: none. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
 
 Optional members:
@@ -83,8 +84,8 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | --- | --- |
 | `FINGERPRINT` | fingerprint on every command (required) |
 | `ADDRESSABLE` | let `open(state)` read a recorded state without a pin |
-| `PIN` | call `pin` on commit, `list_pins`/`unpin` in `gc`, `verify` with the pin |
-| `FORK` | call `fork` in `new` and return writable handles from `open` |
+| `PIN` | call `pin` on commit, `list_pins`/`unpin` in `gc`, `verify` with the pin. Removed per object by `policy.pin = "record"`, in which case commit records the state instead |
+| `FORK` | call `fork` in `new` (from the pin, or from the recorded state without one) and return writable handles from `open`; `list_working_refs`/`delete_working_ref` in `gc --prune-workspaces` |
 | `CHEAP_FINGERPRINT` | (informational) metadata-only reads |
 | `RETENTION_BOUND` | (informational) surface that recoverability expires |
 | `NEEDS_QUIESCENCE` | call `check_quiescence` before pinning |

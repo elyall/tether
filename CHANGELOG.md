@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Plans for every store-writing command. `commit`, `new`, and `gc` are now a
+  read-only plan followed by an apply: `Repo.plan_commit`/`apply_commit`,
+  `plan_new`/`apply_new`, `plan_gc`/`apply_gc`, with `tether.plan.Plan` /
+  `Action` serializing to JSON. CLI: `--dry-run` prints the plan, `--plan FILE`
+  saves it, `--from-plan FILE` applies it; apply re-fingerprints the planned
+  objects and refuses with `StalePlanError` if anything moved. `tether gc`'s
+  default dry run now prints the plan.
+- Pin-less forks for every backend: `--pin record` (`policy.pin = "record"`)
+  removes `PIN` for any object, so `commit` records the state without a native
+  ref and `new` forks straight from it (`ObjectBackend.fork` accepts a `Pin` or
+  a recorded `State`). Implemented for icechunk, lance, iceberg, lakefs, dolt,
+  git, neon (LSN on the base branch), and memory; conformance-tested.
+- Working-branch cleanup: `tether gc --prune-workspaces [--keep-workspace ID]`
+  deletes `tether.ws.*` branches left by workspaces that no longer exist (and
+  this workspace's branches no object uses) via the new
+  `ObjectBackend.list_working_refs`. `gc` now also deletes -- not just forgets
+  -- the working branch of a `tether remove`d object, and `remove` no longer
+  drops the ref so `gc` can find it.
+- User guide page "Reclaiming storage": plans, `--pin record`, dropping history
+  with `jj`/`git`, `gc`, and pruning dead workspaces.
+
+### Changed
+
+- `Repo.remove` keeps the object's working ref in the workspace state (for
+  `gc`); `Repo.add` clears any stale ref for a re-registered key.
+- `tether new` prints the working refs it forked; `--json` returns them.
+
 ## [0.1.0a2] - 2026-09-05
 
 ### Added

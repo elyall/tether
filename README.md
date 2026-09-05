@@ -92,7 +92,10 @@ tether diff main @ --content         # what changed inside each object, natively
 tether log zarr/imaging              # native snapshot history; ids feed `add --at`
 tether add old/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --pick   # start from an older snapshot
 tether verify --all-history --deep
-tether gc --dry-run
+tether commit -m "..." --dry-run    # every store-writing command plans first; --plan/--from-plan save + apply
+tether add scratch/feat s3://bucket/feat.lance --kind lance --pin record   # no tag per commit; fork from the recorded state
+tether gc                           # dry run: pins no commit references, orphaned listings
+tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # drop dead workspaces' tether.ws.* branches
 ```
 
 Python:
@@ -254,6 +257,12 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
 - **Pin-then-commit ordering.** Pins are created before the VCS commit; if the
   commit never lands, pins leak until `gc` (which scans VCS history + the current
   workspace). Re-run `tether verify` after merging manifests across branches.
+- **Data history costs storage.** Every pin holds bytes in its system until the
+  commit that names it is dropped (`jj abandon`/`squash`, `git rebase -i`) and
+  `gc` releases it. `--pin record` skips the native ref on any backend and forks
+  from the recorded state instead, at the price of retention-bound
+  recoverability. `commit`/`new`/`gc` all take `--dry-run` (and `--plan FILE` /
+  `--from-plan FILE`) so store writes can be reviewed before they happen.
 - **Neon lineage.** Pins are child branches, so a working branch can't be deleted
   while its pins exist, `gc` only drops leaf pins, and fork-per-`new` deepens the
   tree. Neon cannot merge/promote a child into `main`; use `--write track` on
@@ -268,7 +277,8 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
   storage_options` in `tether.toml` passes non-secret options (region,
   endpoint, account name) to obstore.
 - **Iceberg catalog variance.** S3 Tables disables maintenance when user refs
-  exist; use `--pin record` there.
+  exist; use `--pin record` there (forks then come from the snapshot id, valid
+  until snapshot expiry).
 - **Delta has no refs.** Versions are recorded, not pinned; `VACUUM` (7-day
   default) and log retention (30 days) bound how long `open -r` works. A
   recreated table (new metadata id) verifies as drifted, not re-addressed.

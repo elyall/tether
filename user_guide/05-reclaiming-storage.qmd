@@ -1,0 +1,220 @@
+---
+title: "Reclaiming Storage"
+---
+
+Version control for data is not free the way it is for code. A pin is a native
+ref, and a native ref holds storage: an Icechunk tag keeps every chunk its
+snapshot references, a Neon branch keeps its history window, an Iceberg tag
+blocks snapshot expiry, a lakeFS tag keeps its objects. Each commit adds one
+per changed object, and each fork adds a branch. This page shows the three
+levers for keeping that bill in check -- and how to preview every store write
+before it happens.
+
+The rule underneath all of it: **tether's VCS history is the reference set.**
+A pin, branch, or listing stays alive as long as some manifest in some commit
+names it. Drop the commit and `gc` releases what it held.
+
+## Preview before you write: plans
+
+`commit`, `new`, and `gc` are the commands that touch external systems. Each
+can be split into a read-only *plan* and an *apply*:
+
+```bash
+tether commit -m "Relabel plate1" --dry-run
+```
+
+```
+plan: commit (3 write(s))
+                 pin  zarr/imaging  [icechunk] tether.deb4861eb388  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
+              record  features      [lance] pin=record: state branch=main version=7, no native ref
+              record  raw/plate1    [file] Observed: recorded, not recoverable
+          vcs-commit  jj commit: 'Relabel plate1'
+                      db/metrics: unchanged
+```
+
+Nothing happened: no tag, no manifest write, no VCS commit. `--json` prints the
+same plan as data, and `--plan FILE` saves it. A saved plan can be applied
+later, exactly as computed:
+
+```bash
+tether commit -m "Relabel plate1" --plan /tmp/commit.json   # plan only
+# review, get sign-off, ...
+tether commit --from-plan /tmp/commit.json                   # apply it
+```
+
+Apply re-fingerprints the planned objects first. If any moved since the plan
+was made, or if the manifest set changed, the apply is refused with
+`StalePlanError` and nothing is written -- re-plan and look again. The same
+three flags exist on `new` (`--dry-run`, `--plan`, `--from-plan`) and on `gc`,
+which is a dry run by default and prints its plan.
+
+From Python the split is explicit: `repo.plan_commit(...)` /
+`repo.apply_commit(plan)`, `repo.plan_new(...)` / `repo.apply_new(plan)`,
+`repo.plan_gc(...)` / `repo.apply_gc(plan)`. `Plan.to_json()` and
+`Plan.from_json()` round-trip.
+
+## Lever 1: do not pin what you will not need -- `--pin record`
+
+Forking needs a *source*, not a *pin*. When you branch off to try something and
+only care about the two heads afterwards -- not about recovering the exact
+split point next year -- the tag at the split point is pure cost. Register the
+object with `--pin record`:
+
+```bash
+tether add features s3://lab-data/features.lance --kind lance --pin record
+tether add zarr/imaging s3://lab-data/imaging --kind icechunk --pin record
+```
+
+With `pin = "record"` on any backend:
+
+- `commit` records the state (snapshot id, version, commit hash, LSN) but
+  creates **no native ref**. The plan shows `record ... pin=record` instead of
+  `pin`.
+- `new` forks **straight from the recorded state**: `create_branch(name,
+  snapshot_id)` in Icechunk, `(branch, version)` in Lance, the commit id in
+  lakeFS/Dolt/git, the LSN on the base branch in Neon.
+- `verify` checks the state is still reachable natively; `open -r` still works
+  while it is.
+
+The trade: recoverability is now bounded by the system's own retention.
+Icechunk's snapshot lives until someone expires it, Iceberg's until snapshot
+expiry runs, Neon's until the history window closes. `verify --all-history`
+turns each expiry into a `MISSING` report, so you always know which old
+commits have become labels without data. Mix per object: keep `--pin native`
+on the archive-quality store, use `record` on the scratch ones.
+
+## Lever 2: drop history you no longer want
+
+Suppose an experiment produced five commits, and only the last matters. Every
+one of the four intermediate commits holds pins.
+
+::: {.panel-tabset}
+
+### jj
+
+```bash
+jj log -r 'main..@'
+# ○  vqmxzkwl  Scores for A1, third try
+# ○  ptnwqsyu  Scores for A1, second try
+# ○  krlwtmzy  Scores for A1, first try
+# ○  ntsyulyo  Relabel plate1 with model v3
+# ◆  main
+
+# Keep the split point and the result; fold the tries into the result.
+jj squash --from krlwtmzy::ptnwqsyu --into vqmxzkwl
+```
+
+`jj squash` (and `jj abandon`) hide the old commits: they are no longer in
+`all()`, which is what `gc` walks. `jj op log` can still restore them for a
+while -- but once `gc` runs, a restored commit will point at pins that are
+gone, and `verify` will say so.
+
+To drop a whole side branch, delete its bookmark and abandon its commits:
+
+```bash
+jj bookmark delete try-model-v2
+jj abandon 'try-model-v2-change-id::'    # everything from there up
+```
+
+### git
+
+```bash
+git log --oneline main..HEAD
+# 9e1c3a0 Scores for A1, third try
+# 5b77d21 Scores for A1, second try
+# c0ffee1 Scores for A1, first try
+# a1b2c3d Relabel plate1 with model v3
+
+git rebase -i a1b2c3d      # mark the two middle commits `fixup`/`drop`
+```
+
+To drop a whole side branch: `git branch -D try-model-v2`. `gc` walks
+`rev-list --all`, so anything unreachable from a ref is gone as far as tether
+is concerned; git's own reflog and `git gc` are independent of that.
+
+:::
+
+History is now three commits. The pins that only the dropped commits named are
+orphans.
+
+## Lever 3: `gc`
+
+```bash
+tether verify --all-history      # confirm what is still referenced actually resolves
+tether gc                        # dry run: the plan
+```
+
+```
+plan: gc (5 write(s))
+               unpin  zarr/imaging  [icechunk] tether.7d1e0c9a2b34  no manifest in history references it
+               unpin  zarr/imaging  [icechunk] tether.c48b2f6e1d07  no manifest in history references it
+               unpin  db/metrics    [neon] tether.7d1e0c9a2b34  no manifest in history references it
+               unpin  db/metrics    [neon] tether.c48b2f6e1d07  no manifest in history references it
+      delete-listing                a1c9…e3f2.jsonl  unreferenced
+```
+
+Two tags in Icechunk, two branches in Neon, one content listing. Nothing named
+by the three surviving commits appears. Apply it:
+
+```bash
+tether gc --no-dry-run
+```
+
+```
+unpinned 4 pin(s)
+  icechunk: 7d1e0c9a2b34
+  icechunk: c48b2f6e1d07
+  neon: 7d1e0c9a2b34
+  neon: c48b2f6e1d07
+deleted 1 orphan listing(s)
+```
+
+Or save the plan and apply it from a job with the right credentials:
+
+```bash
+tether gc --plan /tmp/gc.json
+tether gc --from-plan /tmp/gc.json
+```
+
+Releasing a tag or branch makes the data *eligible* for reclamation; the
+system decides when. Icechunk needs `repo.expire_snapshots(...)` then
+`repo.garbage_collect(...)`; Iceberg needs `expire_snapshots`; Lance needs
+`cleanup_old_versions`; Neon frees the branch's history on its own schedule.
+Those are the system's operations, not tether's.
+
+### Working branches from dead workspaces
+
+Every workspace forks its own `tether.ws.<id>.<key>` branch per Forkable
+object. Workspaces that were forgotten, machines that were wiped, and
+`jj workspace forget` all leave those branches behind -- each one holding
+whatever it wrote. `--prune-workspaces` lists the `tether.ws.*` branches in
+each system and deletes the ones whose workspace id is not this one's and not
+on the keep list:
+
+```bash
+jj workspace list                 # the ids of workspaces still alive
+tether gc --prune-workspaces --keep-workspace 3f9c2a1b --keep-workspace 7e21d0ab
+```
+
+```
+plan: gc (2 write(s))
+       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging  working branch of workspace c0ffee42 (not kept)
+       delete-branch  features      [lance] tether.ws.c0ffee42.features  working branch of workspace c0ffee42 (not kept)
+```
+
+Add `--no-dry-run` to delete them. Branches of `tether remove`d objects are
+handled without the flag: the working ref stays in `.tether/workspace.toml`
+until `gc` deletes the native branch and forgets it. (Lance refuses to delete
+a branch that a tag still points at; tether leaves it and moves on.)
+
+## Recap
+
+- Plans: `--dry-run` shows store writes; `--plan FILE` saves them;
+  `--from-plan FILE` applies them and refuses if anything moved.
+- `--pin record` skips the native ref on any backend and forks from the
+  recorded state; cheaper, retention-bound.
+- Drop commits with `jj squash` / `jj abandon` / `git rebase -i`; tether reads
+  the VCS's idea of history, so what you cannot see it does not protect.
+- `gc` releases orphaned pins and listings; `--prune-workspaces` deletes
+  working branches of workspaces that are gone; reclaiming the bytes is the
+  system's own expiry/cleanup step.

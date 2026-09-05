@@ -13,13 +13,14 @@ tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write f
 tether remove KEY
 tether status [--no-snapshot]
 tether snapshot
-tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot]
-tether new [REV] [--keep]
+tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-run | --plan FILE]
+tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
+tether new [REV] [--keep] [--dry-run | --plan FILE | --from-plan FILE]
 tether open KEY [-r REV] [--read-only | --writable]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
-tether gc [--dry-run | --no-dry-run]
+tether gc [--dry-run | --no-dry-run] [--prune-workspaces] [--keep-workspace ID]... [--plan FILE | --from-plan FILE]
 ```
 
 Commands run from anywhere inside a dataset: the root is found by walking up to
@@ -46,13 +47,13 @@ shas) in a git repository.
 | --- | --- |
 | `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
 | `PATH`, `JJ_CONFIG` | Used by the `jj` / `git` executables tether shells out to (also configurable via `[vcs] jj_path` / `git_path`). |
-| Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](07-backends.qmd). |
+| Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](08-backends.qmd). |
 
 ## Locator options for `add`
 
 The positional `LOCATOR` becomes the `uri` field. Named options map to locator
 fields; `--set key=value` (repeatable) covers everything else. Which fields a
-backend reads is listed per backend in [Backends](07-backends.qmd).
+backend reads is listed per backend in [Backends](08-backends.qmd).
 
 | Option | Locator field | Typical backends |
 | --- | --- | --- |
@@ -69,8 +70,10 @@ backend reads is listed per backend in [Backends](07-backends.qmd).
 
 Policy options: `--write fork|track` (fork a per-workspace branch on `new`, or
 stay on the base branch), `--file immutable|versioned` (`file` only: treat drift
-as an error, or record object-store version ids), `--pin native|record`
-(`iceberg` only: create a tag, or rely on snapshot retention).
+as an error, or record object-store version ids), `--pin native|record` (any
+backend: create a native ref per commit, or record the state only and fork
+from it while the system retains it -- see
+[Reclaiming storage](05-reclaiming-storage.qmd)).
 
 ## Status labels
 
@@ -96,14 +99,44 @@ suspended); `[snapshot] auto = false` makes that the default.
 1. Snapshot (unless `--no-snapshot`), then quiescence checks for backends that
    need them (Neon refuses while writers are active; `--force` skips).
 2. For each object whose state changed: Pinnable/Forkable backends create the
-   native ref `tether.<pin_id>`; Addressable backends record the state;
-   Observed backends record it with `recoverable = false` (`--strict` fails
-   instead). Unchanged objects are skipped.
+   native ref `tether.<pin_id>`; Addressable and `--pin record` objects record
+   the state; Observed backends record it with `recoverable = false`
+   (`--strict` fails instead). Unchanged objects are skipped.
 3. Write `.tether/objects/<key>.toml` and any `.tether/listings/<hash>.jsonl`,
    then `jj commit` / `git commit` scoped to those paths (`--no-vcs` skips).
 4. With `[new] auto_fork = true`, refork working refs from the new pins.
 
 If a pin fails, pins created by the same commit are released best-effort.
+
+## Plans: `--dry-run`, `--plan`, `--from-plan`
+
+`commit`, `new`, and `gc` are the commands that write to external systems, and
+each is a plan followed by an apply. `--dry-run` runs only the plan and prints
+it (as JSON with `--json`); `--plan FILE` also saves it; `--from-plan FILE`
+skips planning and applies the saved actions. Before applying, tether
+re-fingerprints the planned objects (and, for `new`, re-reads the manifests at
+the target) and refuses with `StalePlanError` if anything differs from what
+the plan recorded. `gc` is a dry run unless `--no-dry-run` or `--from-plan` is
+given.
+
+```
+plan: commit (2 write(s))
+                 pin  zarr/imaging  [icechunk] tether.deb4861eb388  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
+          vcs-commit  jj commit: 'Relabel plate1'
+                      db/metrics: unchanged
+```
+
+Action verbs: `pin`, `record` (commit); `fork`, `track` (new); `unpin`,
+`delete-branch`, `forget-working-ref`, `delete-listing` (gc); `vcs-commit`.
+
+## `gc` scope
+
+Default: pins no manifest in VCS history (or the working tree) references,
+working branches of objects removed with `tether remove`, and unreferenced
+`.tether/listings/` files. `--prune-workspaces` additionally lists each
+system's `tether.ws.*` branches and deletes those belonging to other workspaces
+(pass live ids with `--keep-workspace`, repeatable; this workspace is always
+kept) plus this workspace's branches that no current object uses.
 
 ## What `open` prints
 
@@ -147,9 +180,11 @@ changed object's native diff; `--limit` caps entries printed per object
 | `init` | `{"root": "<absolute path>"}` |
 | `status` | `{"manifest_hash", "stale", "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
 | `snapshot` | `{key: state}` |
-| `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}` |
+| `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan (below) |
+| `new` | `{"working_refs": {key: ref}}`; with `--dry-run`: the plan |
 | `open` | `{"key", "read_only", "address", "type"}` |
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
-| `gc` | `{"dry_run", "unpinned": {kind: [pin_ids]}, "deleted_listings": [names]}` |
+| `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
+| plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |

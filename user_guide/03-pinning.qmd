@@ -247,17 +247,19 @@ collects every pin id mentioned by any manifest in history or the working tree,
 lists what exists natively, and releases the rest:
 
 ```bash
-tether gc                 # dry run: report only
+tether gc                 # dry run: print the plan
 tether gc --no-dry-run    # release orphaned pins, prune unreferenced listings
 ```
 
 ```
-would unpin 1 pin(s)
-  icechunk: 3c80e6bda56d
+plan: gc (1 write(s))
+               unpin  zarr/imaging  [icechunk] tether.3c80e6bda56d  no manifest in history references it
 ```
 
 Run `verify --all-history` first; `gc` trusts history, and a pin that is
-referenced but broken is a `verify` finding, not a `gc` one.
+referenced but broken is a `verify` finding, not a `gc` one. Deliberately
+dropping history to release its pins, and cleaning up working branches, is
+covered in [Reclaiming storage](05-reclaiming-storage.qmd).
 
 ## Recap
 

@@ -69,6 +69,13 @@ reference:
         - GcReport
         - DiffEntry
         - TETHER_REV_ENV
+    - title: Plans
+      desc: >-
+        What a store-writing command would do, as data. `Repo.plan_*` returns a
+        `Plan`; `Repo.apply_*` executes one after re-checking the world matches.
+      contents:
+        - Plan
+        - Action
     - title: Manifest model
       desc: >-
         What is committed to the VCS (`tether.toml`, `.tether/objects/*.toml`)
@@ -83,6 +90,7 @@ reference:
         - compute_pin_id
         - ref_for_pin
         - working_ref_name
+        - working_ref_workspace
         - listing_name
         - manifest_hash
     - title: Handles
@@ -114,6 +122,7 @@ reference:
         - UnpinnedStateError
         - PinDriftError
         - StaleWorkingCopyError
+        - StalePlanError
         - MultiObjectError
 
 skill:
@@ -126,3 +135,5 @@ skill:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
     - "Use `--write track` for production branches that must not be forked (e.g. Neon `main`)."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
+    - "Preview store writes with `--dry-run` on `commit`, `new`, and `gc`; save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
+    - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."

@@ -27,7 +27,8 @@ are therefore the VCS's, not tether's.
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
 | `jj log` | **log**: an object's *native* history (snapshots / versions / commits); ids feed `add --at` |
 | detached head | an object registered `--at` a state that is not a branch head; `commit` pins it, `new` forks from it |
-| -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins) |
+| -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins, dead workspaces' branches) |
+| `jj abandon` / `jj squash` | the VCS's own; what history no longer names, `gc` releases |
 
 ## State, pin, fork
 
@@ -42,9 +43,20 @@ the system must support:
   tag, a Lance tag, a Dolt tag. `pin_id = blake2b(kind, locator identity,
   state)[:12]`, so identical state on the same object yields the same pin and
   re-committing an unchanged object is a no-op.
-- **Fork**: a fresh writable branch created off a pin. `tether new` forks one per
-  Forkable object, named `tether.ws.<workspace-id>.<key>`, so workspaces never
-  collide.
+- **Fork**: a fresh writable branch created off a pin -- or, for objects with
+  `pin = "record"`, straight off the recorded state, skipping the native ref
+  entirely. `tether new` forks one per Forkable object, named
+  `tether.ws.<workspace-id>.<key>`, so workspaces never collide.
+
+## Plans
+
+Every command that writes to an external system (`commit` pins, `new` forks,
+`gc` unpins and deletes branches) is a read-only **plan** followed by an
+**apply**. `--dry-run` prints the plan, `--plan FILE` saves it, `--from-plan
+FILE` applies it later; apply re-checks that states and manifests still match
+what the plan recorded and refuses otherwise (`StalePlanError`). The Python API
+exposes the same pairs: `plan_commit`/`apply_commit`, `plan_new`/`apply_new`,
+`plan_gc`/`apply_gc`.
 
 ## Capability tiers
 

@@ -72,6 +72,8 @@ Where to next:
   from a past commit, drift detection, verification, and garbage collection.
 - [Branching and writing](04-branching-and-writing.qmd) covers `tether new`,
   writable handles, and committing your changes.
+- [Reclaiming storage](05-reclaiming-storage.qmd) covers plans (`--dry-run`),
+  pin-less forks, dropping history, and `gc`.
 - [Concepts](02-concepts.qmd) explains the model (tiers, pins, forks, stale
   working copies) in one page.
 
