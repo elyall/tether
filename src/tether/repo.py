@@ -34,6 +34,7 @@ from tether.errors import (
     ConfigError,
     ImmutableObjectModified,
     MultiObjectError,
+    StalePlanError,
     StaleWorkingCopyError,
     TetherError,
     UnpinnedStateError,
@@ -59,11 +60,13 @@ from tether.manifest import (
     ref_for_pin,
     remove_object,
     working_ref_name,
+    working_ref_workspace,
     write_config,
     write_listing,
     write_object,
     write_workspace,
 )
+from tether.plan import Action, Plan
 from tether.vcs import VcsAdapter, detect_vcs
 
 TETHER_REV_ENV = "TETHER_REV"
@@ -154,11 +157,13 @@ class GcReport:
     unpinned: dict[str, list[str]] = field(default_factory=dict)
     """Backend kind -> pin ids released (or that would be, in a dry run)."""
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
-    """Working refs dropped because their object was removed."""
+    """Object key -> working branches deleted (removed objects, pruned workspaces)."""
     deleted_listings: list[str] = field(default_factory=list)
     """`.tether/listings/` files no manifest references."""
     dry_run: bool = True
     """Whether anything was actually released."""
+    plan: Plan | None = None
+    """The plan that was (or would be) applied."""
 
 
 @dataclass
@@ -177,6 +182,17 @@ class DiffEntry:
     """Native content diff (only with `content=True` and a `DIFF` backend)."""
     detail_error: str | None = None
     """Backend failure while computing `detail`, if any."""
+
+
+def _short_state(state: State | None) -> str:
+    """Compact one-line rendering of a state for plan output."""
+    if not state:
+        return "?"
+    parts = []
+    for k, v in state.items():
+        text = str(v)
+        parts.append(f"{k}={text[:16]}{'…' if len(text) > 16 else ''}")
+    return " ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -424,12 +440,18 @@ class Repo:
         )
         write_object(self.root, manifest)
         self.objects[key] = manifest
+        # A re-registered key starts without a working ref; any branch left by
+        # its previous incarnation is found by `gc --prune-workspaces`.
+        self.workspace.working_refs.pop(key, None)
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
         return manifest
 
     def remove(self, key: str) -> None:
         """Unregister an object; the external system (and its pins) is untouched.
+
+        The object's working branch (if any) stays in the workspace state so a
+        later `gc` can delete it; `remove` itself never writes to a store.
 
         Raises:
             ConfigError: If `key` is not registered.
@@ -438,7 +460,6 @@ class Repo:
             raise ConfigError(f"no such object: {key}")
         remove_object(self.root, key)
         del self.objects[key]
-        self.workspace.working_refs.pop(key, None)
         self.workspace.last_snapshot.pop(key, None)
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
@@ -532,6 +553,202 @@ class Repo:
         )
 
     # -- commit ---------------------------------------------------------- #
+    def plan_commit(
+        self,
+        message: str,
+        *,
+        strict: bool = False,
+        force: bool = False,
+        do_snapshot: bool = True,
+    ) -> Plan:
+        """Compute what `commit` would do without writing anywhere.
+
+        Snapshots (read-only), runs quiescence checks, and decides per object:
+        `pin` (create `tether.<pin_id>`), `record` (Addressable / `pin =
+        "record"`: state only), `record` with `recoverable = false` (Observed),
+        or unchanged (a note). The plan carries the captured states and the
+        manifest hash so `apply_commit` can refuse a stale plan.
+
+        Args:
+            message: VCS commit message (stored in the plan).
+            strict: Fail instead of recording Observed objects unrecoverably.
+            force: Skip quiescence checks (`NEEDS_QUIESCENCE` backends).
+            do_snapshot: Take a fresh `snapshot` first.
+
+        Raises:
+            UnpinnedStateError: `strict` and an Observed object changed.
+            BackendError: A quiescence check failed.
+            MultiObjectError: The snapshot failed for one or more objects.
+        """
+        states = self.snapshot() if do_snapshot else self.workspace.last_snapshot
+        keys = list(self.objects)
+
+        if not force:
+            for key in keys:
+                m = self.objects[key]
+                backend = self.backend_for(m.kind)
+                eff = effective_capabilities(backend, m.locator, m.policy)
+                if Capability.NEEDS_QUIESCENCE in eff:
+                    check = getattr(backend, "check_quiescence", None)
+                    if callable(check):
+                        check(m.locator, self._working_ref(key))
+
+        plan = Plan(
+            command="commit",
+            context={
+                "message": message,
+                "manifest_hash": self.current_manifest_hash(),
+                "states": {k: states[k] for k in keys if k in states},
+                "workspace_id": self.workspace.workspace_id,
+            },
+        )
+        for key in keys:
+            m = self.objects[key]
+            backend = self.backend_for(m.kind)
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            state = states.get(key)
+            if state is None:
+                plan.notes.append(f"{key}: no fingerprint; skipped")
+                continue
+            needs_pin = Capability.PIN in eff
+            if m.state == state and (m.pin is not None or not needs_pin):
+                plan.notes.append(f"{key}: unchanged")
+                continue
+            if tier_of(eff) is Tier.OBSERVED:
+                if strict:
+                    raise UnpinnedStateError(
+                        f"{key!r} is Observed-tier and cannot be pinned",
+                        key=key,
+                        kind=m.kind,
+                    )
+                plan.actions.append(
+                    Action(
+                        "record",
+                        key,
+                        m.kind,
+                        detail="Observed: recorded, not recoverable",
+                        params={"state": state, "recoverable": False},
+                    )
+                )
+            elif needs_pin:
+                pin_id = compute_pin_id(m.kind, backend.identity(m.locator), state)
+                plan.actions.append(
+                    Action(
+                        "pin",
+                        key,
+                        m.kind,
+                        target=ref_for_pin(pin_id),
+                        detail=f"native ref at {_short_state(state)}",
+                        params={"state": state, "pin_id": pin_id},
+                    )
+                )
+            else:
+                why = "pin=record" if m.policy.pin == "record" else "Addressable"
+                plan.actions.append(
+                    Action(
+                        "record",
+                        key,
+                        m.kind,
+                        detail=f"{why}: state {_short_state(state)}, no native ref",
+                        params={"state": state, "recoverable": True},
+                    )
+                )
+        if plan.actions:
+            plan.actions.append(
+                Action("vcs-commit", detail=f"{self.vcs.kind} commit: {message!r}")
+            )
+        return plan
+
+    def apply_commit(
+        self,
+        plan: Plan,
+        *,
+        vcs: bool = True,
+        verify: bool = True,
+    ) -> CommitResult:
+        """Execute a plan from `plan_commit`.
+
+        Args:
+            plan: The plan to apply.
+            vcs: Commit `.tether/` and `tether.toml` to the enclosing repository.
+            verify: Re-fingerprint the planned objects and refuse the plan if
+                any state or the manifest set changed since it was computed.
+
+        Raises:
+            StalePlanError: The plan was computed for a different world.
+            BackendError: A pin failed (pins created by this call are released
+                best-effort).
+        """
+        if plan.command != "commit":
+            raise ConfigError(f"expected a commit plan, got {plan.command!r}")
+        message = str(plan.context.get("message", ""))
+        object_actions = [a for a in plan.actions if a.op in ("pin", "record")]
+        if verify:
+            if plan.context.get("manifest_hash") != self.current_manifest_hash():
+                raise StalePlanError(
+                    "manifests changed since the plan was made; re-run the plan"
+                )
+            current = self.snapshot()
+            for a in object_actions:
+                if current.get(a.key) != a.params.get("state"):
+                    raise StalePlanError(
+                        f"{a.key!r} changed since the plan was made "
+                        f"({_short_state(a.params.get('state'))} -> "
+                        f"{_short_state(current.get(a.key))}); re-run the plan"
+                    )
+
+        result = CommitResult(message=message)
+        for note in plan.notes:
+            key, _, why = note.partition(": ")
+            if why == "unchanged":
+                result.unchanged.append(key)
+
+        created_pins: list[tuple[str, Pin]] = []
+        outcomes: dict[str, tuple[State, Pin | None, bool]] = {}
+        try:
+            for a in object_actions:
+                m = self.objects[a.key]
+                backend = self.backend_for(m.kind)
+                state = dict(a.params["state"])
+                if a.op == "pin":
+                    pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
+                    created_pins.append((a.key, pin))
+                    outcomes[a.key] = (state, pin, True)
+                    result.pinned[a.key] = pin
+                else:
+                    recoverable = bool(a.params.get("recoverable", True))
+                    outcomes[a.key] = (state, None, recoverable)
+                    if recoverable:
+                        result.pinned[a.key] = None
+                    else:
+                        result.unrecoverable.append(a.key)
+        except Exception:
+            self._rollback_pins(created_pins)
+            raise
+
+        # Persist manifests (and listings for backends that provide them).
+        for key, (state, pin, recoverable) in outcomes.items():
+            m = self.objects[key]
+            updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
+            self.objects[key] = updated
+            write_object(self.root, updated)
+            backend = self.backend_for(m.kind)
+            if Capability.DIFF in effective_capabilities(backend, m.locator, m.policy):
+                text = backend.listing(m.locator, state)
+                if text is not None:
+                    name = listing_name(m.kind, backend.identity(m.locator), state)
+                    write_listing(self.root, name, text)
+
+        if vcs and outcomes:
+            result.vcs_commit = self.vcs.commit(self._vcs_paths(), message)
+
+        self.workspace.base = self.current_manifest_hash()
+        write_workspace(self.root, self.workspace)
+        if outcomes and self.config.new_auto_fork:
+            # jj-style: every commit leaves you on a fresh working copy.
+            self.new()
+        return result
+
     def commit(
         self,
         message: str,
@@ -543,12 +760,13 @@ class Repo:
     ) -> CommitResult:
         """Pin and record every object's current state, then commit the manifests.
 
-        For each object whose state changed: `PIN`-capable backends create the
-        native ref `tether.<pin_id>` (idempotent), Addressable backends have
-        their state recorded, and Observed backends are recorded with
-        `recoverable = False`. Backends that provide a listing have it stored
-        under `.tether/listings/`. If any pin fails, pins created by this call
-        are released best-effort. With `config.new_auto_fork`, `new` runs
+        Equivalent to `apply_commit(plan_commit(...))`. For each object whose
+        state changed: `PIN`-capable backends create the native ref
+        `tether.<pin_id>` (idempotent), Addressable and `pin = "record"`
+        objects have their state recorded, and Observed objects are recorded
+        with `recoverable = False`. Backends that provide a listing have it
+        stored under `.tether/listings/`. If any pin fails, pins created by this
+        call are released best-effort. With `config.new_auto_fork`, `new` runs
         afterwards.
 
         Args:
@@ -566,87 +784,10 @@ class Repo:
             BackendError: A quiescence check or pin failed.
             MultiObjectError: The snapshot failed for one or more objects.
         """
-        states = self.snapshot() if do_snapshot else self.workspace.last_snapshot
-        keys = list(self.objects)
-
-        # Quiescence pre-check for backends that need it.
-        if not force:
-            for key in keys:
-                m = self.objects[key]
-                backend = self.backend_for(m.kind)
-                eff = effective_capabilities(backend, m.locator, m.policy)
-                if Capability.NEEDS_QUIESCENCE in eff:
-                    check = getattr(backend, "check_quiescence", None)
-                    if callable(check):
-                        check(m.locator, self._working_ref(key))
-
-        result = CommitResult(message=message)
-        created_pins: list[tuple[str, Pin]] = []
-        plans: dict[str, tuple[State, Pin | None, bool]] = {}
-
-        try:
-            for key in keys:
-                m = self.objects[key]
-                backend = self.backend_for(m.kind)
-                eff = effective_capabilities(backend, m.locator, m.policy)
-                tier = tier_of(eff)
-                state = states.get(key)
-                if state is None:
-                    continue
-                # No-op if unchanged and already properly recorded.
-                needs_pin = Capability.PIN in eff
-                if m.state == state and (m.pin is not None or not needs_pin):
-                    result.unchanged.append(key)
-                    continue
-
-                if tier is Tier.OBSERVED:
-                    if strict:
-                        raise UnpinnedStateError(
-                            f"{key!r} is Observed-tier and cannot be pinned",
-                            key=key,
-                            kind=m.kind,
-                        )
-                    plans[key] = (state, None, False)  # recoverable=False
-                    result.unrecoverable.append(key)
-                elif needs_pin:
-                    pin_id = compute_pin_id(m.kind, backend.identity(m.locator), state)
-                    pin = backend.pin(m.locator, state, pin_id)
-                    created_pins.append((key, pin))
-                    plans[key] = (state, pin, True)
-                    result.pinned[key] = pin
-                else:  # ADDRESSABLE
-                    plans[key] = (state, None, True)
-                    result.pinned[key] = None
-        except MultiObjectError:
-            self._rollback_pins(created_pins)
-            raise
-        except Exception:
-            self._rollback_pins(created_pins)
-            raise
-
-        # Persist manifests (and listings for backends that provide them).
-        for key, (state, pin, recoverable) in plans.items():
-            m = self.objects[key]
-            updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
-            self.objects[key] = updated
-            write_object(self.root, updated)
-            backend = self.backend_for(m.kind)
-            if Capability.DIFF in effective_capabilities(backend, m.locator, m.policy):
-                text = backend.listing(m.locator, state)
-                if text is not None:
-                    name = listing_name(m.kind, backend.identity(m.locator), state)
-                    write_listing(self.root, name, text)
-
-        # VCS commit (only if something changed on disk).
-        if vcs and plans:
-            result.vcs_commit = self.vcs.commit(self._vcs_paths(), message)
-
-        self.workspace.base = self.current_manifest_hash()
-        write_workspace(self.root, self.workspace)
-        if plans and self.config.new_auto_fork:
-            # jj-style: every commit leaves you on a fresh working copy.
-            self.new()
-        return result
+        plan = self.plan_commit(
+            message, strict=strict, force=force, do_snapshot=do_snapshot
+        )
+        return self.apply_commit(plan, vcs=vcs, verify=False)
 
     def _rollback_pins(self, created: list[tuple[str, Pin]]) -> None:
         for key, pin in created:
@@ -658,13 +799,128 @@ class Repo:
                 self.backend_for(m.kind).unpin(m.locator, pin)
 
     # -- new (fork working refs) ---------------------------------------- #
+    def plan_new(self, rev: str | None = None, *, keep: bool = False) -> Plan:
+        """Compute what `new` would do without writing anywhere.
+
+        Reads the manifests at `rev` (or the working tree) and decides per
+        `FORK`-capable object: `track` (use the base branch), `fork` from its
+        pin, `fork` from its recorded state (`pin = "record"`), or skip (no
+        committed state yet). `apply_new` moves the VCS working copy to `rev`
+        first when one is given.
+        """
+        objects = self._objects_at(self.vcs.resolve(rev)) if rev else self.objects
+        plan = Plan(
+            command="new",
+            context={
+                "rev": rev,
+                "keep": keep,
+                "manifest_hash": manifest_hash(objects),
+                "workspace_id": self.workspace.workspace_id,
+            },
+        )
+        if keep:
+            plan.notes.append("keep: refresh the baseline only; working refs unchanged")
+            return plan
+        for key in sorted(objects):
+            m = objects[key]
+            backend = self.backend_for(m.kind)
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            if Capability.FORK not in eff:
+                continue
+            if m.policy.write == "track":
+                branch = str(m.locator.get("branch", "main"))
+                plan.actions.append(
+                    Action("track", key, m.kind, target=branch, detail="write=track")
+                )
+                continue
+            if m.state is None:
+                plan.notes.append(
+                    f"{key}: nothing committed yet; fork after first commit"
+                )
+                continue
+            name = working_ref_name(self.workspace.workspace_id, key)
+            if m.pin is not None:
+                source = {"pin": m.pin.to_dict()}
+                detail = f"from pin {m.pin.ref}"
+            elif Capability.ADDRESSABLE in eff:
+                source = {"state": m.state}
+                detail = f"from recorded state {_short_state(m.state)} (no pin)"
+            else:
+                plan.notes.append(f"{key}: no pin and not addressable; cannot fork")
+                continue
+            plan.actions.append(
+                Action("fork", key, m.kind, target=name, detail=detail, params=source)
+            )
+        return plan
+
+    def apply_new(self, plan: Plan, *, verify: bool = True) -> None:
+        """Execute a plan from `plan_new`: move the VCS working copy, fork, record refs.
+
+        Raises:
+            StalePlanError: The manifests at the target differ from the plan's.
+            MultiObjectError: A pin is missing or a fork failed.
+        """
+        if plan.command != "new":
+            raise ConfigError(f"expected a new plan, got {plan.command!r}")
+        rev = plan.context.get("rev")
+        if rev:
+            self.vcs.new(str(rev))
+            self.objects = read_objects(self.root)
+        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
+            raise StalePlanError(
+                "manifests at the target differ from the plan; re-run the plan"
+            )
+        if plan.context.get("keep"):
+            self.workspace.base = self.current_manifest_hash()
+            write_workspace(self.root, self.workspace)
+            return
+
+        working_refs: dict[str, str] = {}
+        forks = {a.key: a for a in plan.actions if a.op == "fork"}
+        for a in plan.actions:
+            if a.op == "track":
+                working_refs[a.key] = a.target
+
+        def fork_one(key: str) -> str:
+            a = forks[key]
+            m = self.objects[key]
+            backend = self.backend_for(m.kind)
+            assert m.state is not None
+            if "pin" in a.params:
+                pin = Pin.from_dict(a.params["pin"])
+                report = backend.verify(m.locator, m.state, pin, deep=False)
+                if report.status is VerifyStatus.MISSING:
+                    raise TetherError(f"pin missing: {report.message}")
+                return backend.fork(m.locator, pin, a.target)
+            state = dict(a.params["state"])
+            report = backend.verify(m.locator, state, None, deep=True)
+            if report.status is VerifyStatus.MISSING:
+                raise TetherError(f"recorded state is gone: {report.message}")
+            return backend.fork(m.locator, state, a.target)
+
+        try:
+            working_refs.update(self._fanout(fork_one, list(forks)))
+        except MultiObjectError as exc:
+            raise MultiObjectError("could not fork working refs", exc.errors) from None
+
+        # Keep refs of removed objects around until `gc` deletes their branches.
+        leftovers = {
+            k: v
+            for k, v in self.workspace.working_refs.items()
+            if k not in self.objects
+        }
+        self.workspace.working_refs = {**leftovers, **working_refs}
+        self.workspace.base = self.current_manifest_hash()
+        write_workspace(self.root, self.workspace)
+
     def new(self, rev: str | None = None, *, keep: bool = False) -> None:
         """Start working on top of `rev`: fork fresh writable refs off its pins.
 
-        For every `FORK`-capable object, `track` policy uses the locator's
-        branch; otherwise the pin is verified (cheaply) and a branch named
-        `working_ref_name(workspace_id, key)` is forked from it. Objects with no
-        pin yet are skipped until their first commit. Forks run concurrently.
+        Equivalent to `apply_new(plan_new(...))`. For every `FORK`-capable
+        object, `track` policy uses the locator's branch; otherwise a branch
+        named `working_ref_name(workspace_id, key)` is forked from the pin (or,
+        for `pin = "record"` objects, straight from the recorded state).
+        Objects with no committed state yet are skipped. Forks run concurrently.
 
         Args:
             rev: Move the VCS working copy here first (`jj new` / `git checkout`)
@@ -674,50 +930,7 @@ class Repo:
         Raises:
             MultiObjectError: A pin is missing or a fork failed.
         """
-        if rev is not None:
-            self.vcs.new(rev)
-            self.objects = read_objects(self.root)
-
-        if keep:
-            self.workspace.base = self.current_manifest_hash()
-            write_workspace(self.root, self.workspace)
-            return
-
-        # Cheap verify of pins we are about to fork from, then fork -- one
-        # network round-trip chain per object, run concurrently.
-        working_refs: dict[str, str] = {}
-        to_fork: list[str] = []
-        for key in sorted(self.objects):
-            m = self.objects[key]
-            backend = self.backend_for(m.kind)
-            eff = effective_capabilities(backend, m.locator, m.policy)
-            if Capability.FORK not in eff:
-                continue
-            if m.policy.write == "track":
-                working_refs[key] = str(m.locator.get("branch", "main"))
-                continue
-            if m.pin is None or m.state is None:
-                continue  # nothing pinned yet; will fork after first commit
-            to_fork.append(key)
-
-        def fork_one(key: str) -> str:
-            m = self.objects[key]
-            backend = self.backend_for(m.kind)
-            assert m.pin is not None and m.state is not None
-            report = backend.verify(m.locator, m.state, m.pin, deep=False)
-            if report.status is VerifyStatus.MISSING:
-                raise TetherError(f"pin missing: {report.message}")
-            name = working_ref_name(self.workspace.workspace_id, key)
-            return backend.fork(m.locator, m.pin, name)
-
-        try:
-            working_refs.update(self._fanout(fork_one, to_fork))
-        except MultiObjectError as exc:
-            raise MultiObjectError("could not fork working refs", exc.errors) from None
-
-        self.workspace.working_refs = working_refs
-        self.workspace.base = self.current_manifest_hash()
-        write_workspace(self.root, self.workspace)
+        self.apply_new(self.plan_new(rev, keep=keep), verify=False)
 
     # -- open ------------------------------------------------------------ #
     def open(
@@ -932,16 +1145,23 @@ class Repo:
         return self._verify_manifests(targets, deep)
 
     # -- gc -------------------------------------------------------------- #
-    def gc(self, *, dry_run: bool = True) -> GcReport:
-        """Release native pins that no manifest in VCS history references.
+    def plan_gc(
+        self,
+        *,
+        prune_workspaces: bool = False,
+        keep_workspaces: set[str] | None = None,
+    ) -> Plan:
+        """Compute what `gc` would release without writing anywhere.
 
-        Also drops this workspace's working refs for removed objects and
-        deletes `.tether/listings/` files no manifest names.
-
-        Args:
-            dry_run: Only report what would be released.
+        Actions: `unpin` native refs no manifest in VCS history (or the working
+        tree) references; `forget-working-ref` + `delete-branch` for this
+        workspace's refs whose object was removed; `delete-listing` for
+        `.tether/listings/` files no manifest names; and, with
+        `prune_workspaces`, `delete-branch` for every `tether.ws.*` branch in
+        each system whose workspace id is neither this workspace's nor in
+        `keep_workspaces` (pass the ids of live workspaces, e.g. from
+        `jj workspace list`).
         """
-        # Referenced pin ids per (kind, identity-json) across all history + ws.
         referenced: dict[str, set[str]] = {}
 
         def key_for(backend: ObjectBackend, locator: dict) -> str:
@@ -950,10 +1170,12 @@ class Repo:
 
         history_manifests: list[ObjectManifest] = []
         all_manifests: list[ObjectManifest] = []
+        last_seen: dict[str, ObjectManifest] = {}  # key -> newest manifest in history
         seen: set[str] = set()
         for _rev, objects in self._iter_history_objects():
             for m in objects.values():
                 all_manifests.append(m)
+                last_seen.setdefault(m.key, m)
                 if m.pin is None:
                     continue
                 backend = self.backend_for(m.kind)
@@ -962,13 +1184,20 @@ class Repo:
                 if sig not in seen:
                     seen.add(sig)
                     history_manifests.append(m)
-        # Also protect the working-tree manifests.
         for m in self.objects.values():
             if m.pin is not None:
                 backend = self.backend_for(m.kind)
                 referenced.setdefault(key_for(backend, m.locator), set()).add(m.pin.id)
 
-        report = GcReport(dry_run=dry_run)
+        plan = Plan(
+            command="gc",
+            context={
+                "workspace_id": self.workspace.workspace_id,
+                "prune_workspaces": prune_workspaces,
+                "keep_workspaces": sorted(keep_workspaces or ()),
+            },
+        )
+
         # Unpin native refs not referenced by any manifest.
         checked_systems: set[str] = set()
         for m in history_manifests:
@@ -981,40 +1210,180 @@ class Repo:
             checked_systems.add(sys_key)
             live = backend.list_pins(m.locator)
             keep = referenced.get(sys_key, set())
-            orphans = sorted(live - keep)
-            if not orphans:
-                continue
-            report.unpinned.setdefault(m.kind, []).extend(orphans)
-            if not dry_run:
-                for pid in orphans:
-                    backend.unpin(m.locator, Pin(id=pid, ref=ref_for_pin(pid)))
+            for pid in sorted(live - keep):
+                plan.actions.append(
+                    Action(
+                        "unpin",
+                        m.key,
+                        m.kind,
+                        target=ref_for_pin(pid),
+                        detail="no manifest in history references it",
+                        params={"locator": m.locator, "pin_id": pid},
+                    )
+                )
 
-        # Prune this workspace's working refs whose object was removed.
-        dropped: list[str] = []
-        for key, ref in list(self.workspace.working_refs.items()):
+        # This workspace's working refs whose object was removed. The native
+        # branch is deleted too when history still tells us where it lives.
+        for key, ref in sorted(self.workspace.working_refs.items()):
             if key in self.objects:
                 continue
-            report.deleted_working_refs.setdefault("(removed)", []).append(ref)
-            if not dry_run:
-                dropped.append(key)
-        if dropped:
-            for key in dropped:
-                self.workspace.working_refs.pop(key, None)
-            write_workspace(self.root, self.workspace)
+            old = last_seen.get(key)
+            if (
+                old is not None
+                and working_ref_workspace(ref) is not None
+                and Capability.FORK in self.backend_for(old.kind).capabilities
+            ):
+                plan.actions.append(
+                    Action(
+                        "delete-branch",
+                        key,
+                        old.kind,
+                        target=ref,
+                        detail="object removed; working branch deleted and forgotten",
+                        params={"locator": old.locator, "forget": True},
+                    )
+                )
+            else:
+                plan.actions.append(
+                    Action(
+                        "forget-working-ref",
+                        key,
+                        target=ref,
+                        detail="object removed; ref forgotten (branch not managed)",
+                    )
+                )
 
-        # Prune listings no manifest (in history or the working tree) names.
+        # Working branches left behind by other workspaces, plus this
+        # workspace's branches that no current working ref accounts for.
+        if prune_workspaces:
+            mine = self.workspace.workspace_id[:8]
+            keep_ids = {w[:8] for w in (keep_workspaces or ())} | {mine}
+            in_use = set(self.workspace.working_refs.values())
+            planned = {a.target for a in plan.actions if a.op == "delete-branch"}
+            systems_seen: set[str] = set()
+            for key in sorted(self.objects):
+                m = self.objects[key]
+                backend = self.backend_for(m.kind)
+                eff = effective_capabilities(backend, m.locator, m.policy)
+                if Capability.FORK not in eff:
+                    continue
+                sys_key = key_for(backend, m.locator)
+                if sys_key in systems_seen:
+                    continue
+                systems_seen.add(sys_key)
+                for ref in sorted(backend.list_working_refs(m.locator)):
+                    ws = working_ref_workspace(ref)
+                    if ws is None or ref in planned:
+                        continue
+                    if ws == mine:
+                        if ref in in_use:
+                            continue
+                        detail = "this workspace's branch; no object uses it"
+                    elif ws in keep_ids:
+                        continue
+                    else:
+                        detail = f"working branch of workspace {ws} (not kept)"
+                    plan.actions.append(
+                        Action(
+                            "delete-branch",
+                            key,
+                            m.kind,
+                            target=ref,
+                            detail=detail,
+                            params={"locator": m.locator},
+                        )
+                    )
+
+        # Listings no manifest (in history or the working tree) names.
         wanted: set[str] = set()
         for m in [*all_manifests, *self.objects.values()]:
             if m.state is not None:
                 backend = self.backend_for(m.kind)
                 wanted.add(listing_name(m.kind, backend.identity(m.locator), m.state))
         for path in sorted(listings_dir(self.root).glob("*.jsonl")):
-            if path.name in wanted:
-                continue
-            report.deleted_listings.append(path.name)
-            if not dry_run:
-                path.unlink()
+            if path.name not in wanted:
+                plan.actions.append(
+                    Action("delete-listing", target=path.name, detail="unreferenced")
+                )
+        return plan
+
+    def apply_gc(self, plan: Plan) -> GcReport:
+        """Execute a plan from `plan_gc`.
+
+        Unpins, deletes branches, forgets working refs, and deletes listings as
+        planned. Backend failures are aggregated into `MultiObjectError` after
+        every action has been attempted.
+        """
+        if plan.command != "gc":
+            raise ConfigError(f"expected a gc plan, got {plan.command!r}")
+        report = GcReport(dry_run=False, plan=plan)
+        errors: dict[str, Exception] = {}
+        forgot = False
+        for a in plan.actions:
+            try:
+                if a.op == "unpin":
+                    backend = self.backend_for(a.kind)
+                    pid = str(a.params["pin_id"])
+                    backend.unpin(dict(a.params["locator"]), Pin(id=pid, ref=a.target))
+                    report.unpinned.setdefault(a.kind, []).append(pid)
+                elif a.op == "forget-working-ref":
+                    self.workspace.working_refs.pop(a.key, None)
+                    forgot = True
+                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "delete-branch":
+                    backend = self.backend_for(a.kind)
+                    backend.delete_working_ref(dict(a.params["locator"]), a.target)
+                    if a.params.get("forget"):
+                        self.workspace.working_refs.pop(a.key, None)
+                        forgot = True
+                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "delete-listing":
+                    (listings_dir(self.root) / a.target).unlink(missing_ok=True)
+                    report.deleted_listings.append(a.target)
+            except Exception as exc:
+                errors[f"{a.op} {a.target}"] = exc
+        if forgot:
+            write_workspace(self.root, self.workspace)
+        if errors:
+            raise MultiObjectError("gc failed for some actions", errors)
         return report
+
+    def gc(
+        self,
+        *,
+        dry_run: bool = True,
+        prune_workspaces: bool = False,
+        keep_workspaces: set[str] | None = None,
+    ) -> GcReport:
+        """Release native pins that no manifest in VCS history references.
+
+        Equivalent to `plan_gc` followed by `apply_gc` unless `dry_run`. Also
+        drops this workspace's working refs for removed objects, deletes
+        `.tether/listings/` files no manifest names, and with
+        `prune_workspaces` deletes `tether.ws.*` branches of other workspaces
+        (except `keep_workspaces`).
+
+        Args:
+            dry_run: Only report what would be released (the report carries the plan).
+            prune_workspaces: Also delete other workspaces' working branches.
+            keep_workspaces: Workspace ids (or 8-char prefixes) to leave alone.
+        """
+        plan = self.plan_gc(
+            prune_workspaces=prune_workspaces, keep_workspaces=keep_workspaces
+        )
+        if dry_run:
+            report = GcReport(dry_run=True, plan=plan)
+            for a in plan.actions:
+                if a.op == "unpin":
+                    report.unpinned.setdefault(a.kind, []).append(
+                        str(a.params["pin_id"])
+                    )
+                elif a.op in ("forget-working-ref", "delete-branch"):
+                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "delete-listing":
+                    report.deleted_listings.append(a.target)
+            return report
+        return self.apply_gc(plan)
 
     # -- diff ------------------------------------------------------------ #
     def diff(

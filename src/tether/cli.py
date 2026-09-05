@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 try:
@@ -34,6 +35,7 @@ from tether.handles import (
     NeonHandle,
 )
 from tether.manifest import Policy
+from tether.plan import Plan
 from tether.repo import CommitResult, GcReport, Repo, StatusReport
 
 app = typer.Typer(
@@ -175,7 +177,8 @@ def add(
     pin: str = typer.Option(
         "native",
         "--pin",
-        help="iceberg: native (create a tag) or record (rely on snapshot retention).",
+        help="native (default: create a tag/branch per commit) or record (no native "
+        "ref; forks come from the recorded state while the system retains it).",
     ),
     at: str | None = typer.Option(
         None,
@@ -367,9 +370,39 @@ def snapshot(
         typer.echo(f"  {key}: {state}")
 
 
+def _show_plan(plan: Plan, *, as_json: bool) -> None:
+    if as_json:
+        typer.echo(plan.to_json())
+        return
+    typer.echo(f"plan: {plan.command} ({len(plan.writes)} write(s))")
+    for line in plan.render():
+        typer.echo(line)
+
+
+def _save_plan(plan: Plan, path: Path | None) -> None:
+    if path is not None:
+        path.write_text(plan.to_json())
+        typer.secho(f"plan written to {path}", err=True)
+
+
+def _load_plan(path: Path, expected: str) -> Plan:
+    try:
+        plan = Plan.from_json(path.read_text())
+    except (OSError, TetherError) as exc:
+        _fail(exc)
+    if plan.command != expected:
+        _fail(TetherError(f"{path} is a {plan.command!r} plan, expected {expected!r}"))
+    return plan
+
+
 @app.command()
 def commit(
-    message: str = typer.Option(..., "-m", "--message", help="VCS commit message."),
+    message: str | None = typer.Option(
+        None,
+        "-m",
+        "--message",
+        help="VCS commit message (required unless --from-plan).",
+    ),
     no_vcs: bool = typer.Option(
         False, "--no-vcs", help="Write manifests but skip the jj/git commit."
     ),
@@ -384,23 +417,48 @@ def commit(
     no_snapshot: bool = typer.Option(
         False, "--no-snapshot", help="Commit the cached fingerprints as-is."
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be pinned/recorded; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None,
+        "--from-plan",
+        help="Apply a plan saved with --plan instead of replanning.",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Pin mutable objects and record their state in the manifests.
 
     Pinnable/Forkable objects get a native ref `tether.<pin_id>`; Addressable
-    objects are recorded; Observed objects are recorded as unrecoverable.
-    Unchanged objects are skipped. Then the manifests are committed.
+    and `pin = "record"` objects are recorded; Observed objects are recorded as
+    unrecoverable. Unchanged objects are skipped. Then the manifests are
+    committed. `--dry-run` / `--plan` preview the actions; `--from-plan` applies
+    a saved plan after checking nothing changed underneath it.
     """
     repo = _repo()
     try:
-        result: CommitResult = repo.commit(
-            message,
-            vcs=not no_vcs,
-            strict=strict,
-            force=force,
-            do_snapshot=_snapshot_default(repo, no_snapshot),
-        )
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "commit")
+            if message is not None:
+                plan.context["message"] = message
+            result: CommitResult = repo.apply_commit(plan, vcs=not no_vcs)
+        else:
+            if message is None:
+                _fail(TetherError("a message is required: -m/--message"))
+            plan = repo.plan_commit(
+                message,
+                strict=strict,
+                force=force,
+                do_snapshot=_snapshot_default(repo, no_snapshot),
+            )
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+            result = repo.apply_commit(plan, vcs=not no_vcs, verify=False)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -428,19 +486,49 @@ def new(
     keep: bool = typer.Option(
         False, "--keep", help="Keep current working refs; only refresh the baseline."
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show which branches would be forked; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None,
+        "--from-plan",
+        help="Apply a plan saved with --plan instead of replanning.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Fork fresh writable branches off the pinned state at REV.
 
     Moves the VCS working copy to REV if given, then creates a
-    `tether.ws.<workspace>.<key>` branch per Forkable object (track-policy
-    objects stay on their base branch).
+    `tether.ws.<workspace>.<key>` branch per Forkable object from its pin (or
+    from the recorded state for `pin = "record"` objects); track-policy objects
+    stay on their base branch. `--dry-run` / `--plan` preview; `--from-plan`
+    applies a saved plan.
     """
     repo = _repo()
     try:
-        repo.new(rev, keep=keep)
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "new")
+            repo.apply_new(plan)
+        else:
+            plan = repo.plan_new(rev, keep=keep)
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+            repo.apply_new(plan, verify=False)
     except TetherError as exc:
         _fail(exc)
-    typer.echo("forked working refs" if not keep else "kept working refs")
+    if json_out:
+        _emit({"working_refs": repo.workspace.working_refs}, as_json=True)
+        return
+    typer.echo(
+        "forked working refs" if not plan.context.get("keep") else "kept working refs"
+    )
+    for key, ref in sorted(repo.workspace.working_refs.items()):
+        typer.echo(f"  {key} -> {ref}")
 
 
 @app.command(name="open")
@@ -581,17 +669,49 @@ def diff(
 @app.command()
 def gc(
     dry_run: bool = typer.Option(
-        True, "--dry-run/--no-dry-run", help="Report only (default) or release."
+        True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."
+    ),
+    prune_workspaces: bool = typer.Option(
+        False,
+        "--prune-workspaces",
+        help="Also delete `tether.ws.*` branches left by other workspaces.",
+    ),
+    keep_workspace: list[str] = typer.Option(
+        [],
+        "--keep-workspace",
+        help="Workspace id (or 8-char prefix) whose branches --prune-workspaces "
+        "must keep; repeatable. This workspace is always kept.",
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None, "--from-plan", help="Apply a plan saved with --plan."
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Release native pins that no manifest in VCS history references.
 
-    Also drops working refs of removed objects and unreferenced listings.
+    Also deletes this workspace's working branches for removed objects,
+    unreferenced listings, and with `--prune-workspaces` the working branches
+    of workspaces that no longer exist. Dry-run by default: pass `--no-dry-run`
+    (or `--from-plan`) to release.
     """
     repo = _repo()
     try:
-        report: GcReport = repo.gc(dry_run=dry_run)
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "gc")
+            report: GcReport = repo.apply_gc(plan)
+        else:
+            plan = repo.plan_gc(
+                prune_workspaces=prune_workspaces,
+                keep_workspaces=set(keep_workspace) or None,
+            )
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+            report = repo.apply_gc(plan)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -599,20 +719,25 @@ def gc(
             {
                 "dry_run": report.dry_run,
                 "unpinned": report.unpinned,
+                "deleted_working_refs": report.deleted_working_refs,
                 "deleted_listings": report.deleted_listings,
             },
             as_json=True,
         )
         return
-    verb = "would unpin" if report.dry_run else "unpinned"
     total = sum(len(v) for v in report.unpinned.values())
-    typer.echo(f"{verb} {total} pin(s)")
+    typer.echo(f"unpinned {total} pin(s)")
     for kind, ids in report.unpinned.items():
         for pid in ids:
             typer.echo(f"  {kind}: {pid}")
+    branches = sum(len(v) for v in report.deleted_working_refs.values())
+    if branches:
+        typer.echo(f"deleted {branches} working branch(es)")
+        for key, refs in report.deleted_working_refs.items():
+            for ref in refs:
+                typer.echo(f"  {key}: {ref}")
     if report.deleted_listings:
-        verb = "would delete" if report.dry_run else "deleted"
-        typer.echo(f"{verb} {len(report.deleted_listings)} orphan listing(s)")
+        typer.echo(f"deleted {len(report.deleted_listings)} orphan listing(s)")
 
 
 def main() -> None:

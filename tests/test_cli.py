@@ -60,7 +60,7 @@ def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
     r = runner.invoke(app, ["gc", "--json"])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["dry_run"] is True
+    assert json.loads(r.output)["command"] == "gc"  # dry run prints the plan
 
     # Content diff between the baseline and a second commit (written through
     # the forked working branch, which is what `new` made current).
@@ -155,3 +155,98 @@ def test_cli_snapshot_auto_config(
     assert runner.invoke(app, ["snapshot"]).exit_code == 0
     r = runner.invoke(app, ["status", "--json"])
     assert json.loads(r.output)["objects"][0]["state"] == "modified"
+
+
+def test_cli_plans_dry_run_and_from_plan(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"v": 1})
+
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app,
+        [
+            "add",
+            "db",
+            "--kind",
+            "memory",
+            "--set",
+            f"system={system}",
+            "--pin",
+            "record",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+
+    # -m is required unless applying a saved plan.
+    r = runner.invoke(app, ["commit"])
+    assert r.exit_code == 1 and "message is required" in r.output
+
+    # Dry run prints the plan and writes nothing.
+    r = runner.invoke(app, ["commit", "-m", "baseline", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert (
+        "plan: commit" in r.output and "record" in r.output and "pin=record" in r.output
+    )
+    assert store.system(system).tags == {}
+    assert not (vcs_root / ".tether" / "objects" / "db.toml").read_text().count("state")
+
+    # --plan saves it; --from-plan applies exactly that plan.
+    plan_file = vcs_root / "commit.json"
+    r = runner.invoke(
+        app, ["commit", "-m", "baseline", "--plan", str(plan_file), "--json"]
+    )
+    assert r.exit_code == 0, r.output
+    saved = json.loads(plan_file.read_text())
+    assert saved["command"] == "commit"
+    assert [a["op"] for a in saved["actions"]] == ["record", "vcs-commit"]
+    r = runner.invoke(app, ["commit", "--from-plan", str(plan_file), "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["pinned"] == {"db": None} and payload["vcs_commit"]
+    assert store.system(system).tags == {}  # pin-less: still no native ref
+
+    # A stale plan is refused (the object moved after planning).
+    store.write(system, "main", {"v": 2})
+    r = runner.invoke(app, ["commit", "-m", "next", "--plan", str(plan_file)])
+    assert r.exit_code == 0, r.output
+    store.write(system, "main", {"v": 3})
+    r = runner.invoke(app, ["commit", "--from-plan", str(plan_file)])
+    assert r.exit_code == 1 and "changed since the plan" in r.output
+
+    # Wrong plan kind for the command.
+    r = runner.invoke(app, ["new", "--from-plan", str(plan_file)])
+    assert r.exit_code == 1 and "expected 'new'" in r.output
+
+    # `new --dry-run` shows the pin-less fork; applying it forks from state.
+    r = runner.invoke(app, ["new", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "fork" in r.output and "recorded state" in r.output
+    r = runner.invoke(app, ["new", "--json"])
+    assert r.exit_code == 0, r.output
+    wref = json.loads(r.output)["working_refs"]["db"]
+    assert wref.startswith("tether.ws.")
+    assert store.read(system, wref) == {"v": 1}
+
+    # gc: dry run by default, plan file, prune other workspaces.
+    sid = store.system(system).branches["main"]
+    store.system(system).branches["tether.ws.deadbeef.db"] = sid
+    r = runner.invoke(app, ["gc"])
+    assert r.exit_code == 0, r.output
+    assert "deadbeef" not in r.output  # not without --prune-workspaces
+    gc_plan = vcs_root / "gc.json"
+    r = runner.invoke(app, ["gc", "--prune-workspaces", "--plan", str(gc_plan)])
+    assert r.exit_code == 0, r.output
+    assert "tether.ws.deadbeef.db" in r.output
+    assert "tether.ws.deadbeef.db" in store.system(system).branches
+    r = runner.invoke(app, ["gc", "--from-plan", str(gc_plan), "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["deleted_working_refs"] == {
+        "db": ["tether.ws.deadbeef.db"]
+    }
+    assert "tether.ws.deadbeef.db" not in store.system(system).branches
+    assert wref in store.system(system).branches  # ours survives

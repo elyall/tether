@@ -310,6 +310,172 @@ def test_history_and_detached_base(vcs_root: Path) -> None:
         repo.history("nope")
 
 
+def test_pinless_record_policy_forks_from_state(vcs_root: Path) -> None:
+    """`pin = "record"` on a Forkable backend: no native ref, fork from state."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    repo.add(
+        "db",
+        "memory",
+        {"system": system, "branch": "main"},
+        policy=Policy(pin="record"),
+    )
+
+    plan = repo.plan_commit("baseline")
+    (action,) = [a for a in plan.actions if a.key == "db"]
+    assert action.op == "record" and action.params["recoverable"] is True
+    assert "pin=record" in action.detail
+
+    res = repo.commit("baseline")
+    assert res.pinned["db"] is None  # recorded, not pinned
+    assert store.system(system).tags == {}  # no native ref was created
+    assert repo.objects["db"].state == {"snapshot_id": s1}
+    assert repo.objects["db"].recoverable
+
+    new_plan = repo.plan_new()
+    (fork,) = [a for a in new_plan.actions if a.op == "fork"]
+    assert fork.params == {"state": {"snapshot_id": s1}}
+    repo.new()
+    wref = repo.workspace.working_refs["db"]
+    assert store.system(system).branches[wref] == s1
+
+    # Writes on the fork are isolated; the recorded state opens at the old rev.
+    store.write(system, wref, {"v": 2})
+    assert store.read(system, "main") == {"v": 1}
+    assert res.vcs_commit is not None
+    ro = repo.open("db", rev=res.vcs_commit)
+    assert isinstance(ro, MemoryHandle) and ro.read() == {"v": 1}
+    assert repo.verify()["db"].status.value in ("ok", "unknown")
+
+
+def test_commit_plan_roundtrip_and_stale_detection(vcs_root: Path) -> None:
+    from tether.errors import StalePlanError
+    from tether.plan import Plan
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 1})
+
+    plan = repo.plan_commit("baseline")
+    assert plan.command == "commit"
+    assert [a.op for a in plan.actions] == ["pin", "vcs-commit"]
+    assert store.system(system).tags == {}  # planning wrote nothing
+    assert any("db" in line and "pin" in line for line in plan.render())
+
+    # Serialize -> deserialize -> apply, exactly like `--plan` / `--from-plan`.
+    restored = Plan.from_json(plan.to_json())
+    assert restored.to_dict() == plan.to_dict()
+    res = repo.apply_commit(restored)
+    pin = res.pinned["db"]
+    assert pin is not None and pin.id == plan.actions[0].params["pin_id"]
+    assert res.vcs_commit is not None
+
+    # A plan computed before the object moved must be refused.
+    stale = repo.plan_commit("next")
+    assert stale.is_empty  # unchanged since the commit
+    store.write(system, "main", {"v": 2})
+    stale = repo.plan_commit("next")
+    store.write(system, "main", {"v": 3})
+    with pytest.raises(StalePlanError):
+        repo.apply_commit(stale)
+    assert len(store.system(system).tags) == 1  # nothing extra pinned
+
+    # And one computed against a different manifest set.
+    fresh = repo.plan_commit("next")
+    repo.add("other", "memory", {"system": _mem_object(repo, "tmp"), "branch": "main"})
+    with pytest.raises(StalePlanError):
+        repo.apply_commit(fresh)
+
+    # Wrong plan kind is a config error.
+    with pytest.raises(ConfigError):
+        repo.apply_new(fresh)
+
+
+def test_new_plan_and_apply(vcs_root: Path) -> None:
+    from tether.plan import Plan
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    tracked = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(tracked)
+    repo.add(
+        "tracked",
+        "memory",
+        {"system": tracked, "branch": "main"},
+        policy=Policy(write="track"),
+    )
+    plan = repo.plan_new()
+    assert plan.is_empty  # nothing committed yet
+    assert any("nothing committed yet" in n for n in plan.notes)
+
+    res = repo.commit("baseline")
+    plan = repo.plan_new()
+    ops = {a.key: a.op for a in plan.actions}
+    assert ops == {"db": "fork", "tracked": "track"}
+    assert ops and not plan.is_empty
+    assert not any(
+        b.startswith("tether.ws.") for b in default_store().system(system).branches
+    )
+
+    repo.apply_new(Plan.from_json(plan.to_json()))
+    assert repo.workspace.working_refs["tracked"] == "main"
+    assert repo.workspace.working_refs["db"].startswith("tether.ws.")
+
+    # Planning against a revision reads the manifests there without moving.
+    assert res.vcs_commit is not None
+    plan_at = repo.plan_new(res.vcs_commit)
+    assert plan_at.context["rev"] == res.vcs_commit
+    assert {a.key for a in plan_at.actions} == {"db", "tracked"}
+
+
+def test_gc_prunes_other_workspaces_and_removed_objects(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new()
+    mine = repo.workspace.working_refs["db"]
+    sid = store.system(system).branches["main"]
+    # Branches left behind by two other workspaces (one we still want).
+    store.system(system).branches["tether.ws.deadbeef.db"] = sid
+    store.system(system).branches["tether.ws.cafef00d.db"] = sid
+    store.system(system).branches["feature-x"] = sid  # not ours; never touched
+
+    plan = repo.plan_gc()
+    assert not [a for a in plan.actions if a.op == "delete-branch"]
+
+    plan = repo.plan_gc(prune_workspaces=True, keep_workspaces={"cafef00d"})
+    deletes = [a.target for a in plan.actions if a.op == "delete-branch"]
+    assert deletes == ["tether.ws.deadbeef.db"]
+
+    report = repo.gc(dry_run=True, prune_workspaces=True)
+    assert set(report.deleted_working_refs["db"]) == {
+        "tether.ws.deadbeef.db",
+        "tether.ws.cafef00d.db",
+    }
+    assert "tether.ws.deadbeef.db" in store.system(system).branches  # dry run
+
+    report = repo.gc(dry_run=False, prune_workspaces=True, keep_workspaces={"cafef00d"})
+    branches = store.system(system).branches
+    assert "tether.ws.deadbeef.db" not in branches
+    assert "tether.ws.cafef00d.db" in branches and mine in branches
+    assert "feature-x" in branches
+    assert report.deleted_working_refs == {"db": ["tether.ws.deadbeef.db"]}
+
+    # Removing the object: its working branch is deleted and forgotten.
+    repo.remove("db")
+    plan = repo.plan_gc()
+    (delete,) = [a for a in plan.actions if a.op == "delete-branch"]
+    assert delete.target == mine and delete.params["forget"] is True
+    repo.apply_gc(plan)
+    assert mine not in store.system(system).branches
+    assert "db" not in repo.workspace.working_refs
+
+
 def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
     # Guard against accidental prefix drift between pin() and gc().
     assert ref_for_pin("abc") == "tether.abc"

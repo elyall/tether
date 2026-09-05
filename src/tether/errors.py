@@ -67,6 +67,14 @@ class StaleWorkingCopyError(TetherError):
     """
 
 
+class StalePlanError(TetherError):
+    """A saved plan no longer matches the world it was computed from.
+
+    Raised by ``apply_*`` when object states, manifests, or the revision differ
+    from what the plan recorded; re-plan instead of applying stale actions.
+    """
+
+
 class MultiObjectError(TetherError):
     """Aggregates per-object failures from a fan-out operation."""
 

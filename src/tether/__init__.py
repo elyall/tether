@@ -34,6 +34,7 @@ from tether.errors import (
     ImmutableObjectModified,
     MultiObjectError,
     PinDriftError,
+    StalePlanError,
     StaleWorkingCopyError,
     TetherError,
     UnpinnedStateError,
@@ -50,7 +51,9 @@ from tether.manifest import (
     manifest_hash,
     ref_for_pin,
     working_ref_name,
+    working_ref_workspace,
 )
+from tether.plan import Action, Plan
 from tether.repo import (
     TETHER_REV_ENV,
     CommitResult,
@@ -63,6 +66,7 @@ from tether.repo import (
 
 __all__ = [
     "TETHER_REV_ENV",
+    "Action",
     "BackendError",
     "CapabilityError",
     "CommitResult",
@@ -75,9 +79,11 @@ __all__ = [
     "ObjectStatus",
     "Pin",
     "PinDriftError",
+    "Plan",
     "Policy",
     "Repo",
     "RepoConfig",
+    "StalePlanError",
     "StaleWorkingCopyError",
     "StatusReport",
     "TetherError",
@@ -93,6 +99,7 @@ __all__ = [
     "testing",
     "vcs",
     "working_ref_name",
+    "working_ref_workspace",
 ]
 
 try:
