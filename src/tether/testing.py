@@ -19,6 +19,8 @@ from tether.manifest import (
     working_ref_name,
 )
 
+__all__ = ["BackendHarness", "assert_backend_conforms", "run_conformance"]
+
 
 @runtime_checkable
 class BackendHarness(Protocol):

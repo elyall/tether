@@ -27,6 +27,8 @@ from typing import Protocol, runtime_checkable
 
 from tether.errors import VcsError
 
+__all__ = ["GitAdapter", "GitObjectReader", "JjAdapter", "VcsAdapter", "detect_vcs"]
+
 _TREE_MODE = "40000"
 _BLOB_MODES = frozenset({"100644", "100755"})
 

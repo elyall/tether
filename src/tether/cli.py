@@ -120,7 +120,7 @@ def _status_payload(report: StatusReport) -> dict:
 @app.command()
 def init(
     path: str = typer.Argument(".", help="Dataset root."),
-    json_out: bool = typer.Option(False, "--json"),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Initialize a tether dataset in an existing git/jj repository."""
     try:
@@ -135,13 +135,22 @@ def init(
 def add(
     key: str = typer.Argument(..., help="Object key (may contain '/')."),
     locator: str | None = typer.Argument(None, help="Primary locator (uri / path)."),
-    kind: str = typer.Option(..., "--kind", help="Backend kind."),
-    project_id: str | None = typer.Option(None, "--project-id"),
-    database: str | None = typer.Option(None, "--database"),
-    role: str | None = typer.Option(None, "--role"),
-    branch: str | None = typer.Option(None, "--branch"),
-    remote: str | None = typer.Option(None, "--remote"),
-    region: str | None = typer.Option(None, "--region"),
+    kind: str = typer.Option(
+        ...,
+        "--kind",
+        help="Backend kind: file, icechunk, neon, git, iceberg, delta, lance, "
+        "lakefs, ducklake, dolt.",
+    ),
+    project_id: str | None = typer.Option(None, "--project-id", help="Neon project."),
+    database: str | None = typer.Option(None, "--database", help="Neon/Dolt database."),
+    role: str | None = typer.Option(None, "--role", help="Neon role for connections."),
+    branch: str | None = typer.Option(
+        None, "--branch", help="Base branch (default main) for branching backends."
+    ),
+    remote: str | None = typer.Option(
+        None, "--remote", help="git remote to push pins to."
+    ),
+    region: str | None = typer.Option(None, "--region", help="Object-store region."),
     repository: str | None = typer.Option(None, "--repository", help="lakeFS repo."),
     prefix: str | None = typer.Option(None, "--prefix", help="Path scope in a repo."),
     host: str | None = typer.Option(None, "--host", help="Dolt server host."),
@@ -150,11 +159,29 @@ def add(
     set_: list[str] = typer.Option(
         [], "--set", help="Extra locator field key=value (repeatable)."
     ),
-    write: str = typer.Option("fork", "--write", help="fork | track"),
-    file: str = typer.Option("immutable", "--file", help="immutable | versioned"),
-    pin: str = typer.Option("native", "--pin", help="native | record"),
+    write: str = typer.Option(
+        "fork",
+        "--write",
+        help="fork: `new` forks a per-workspace branch off the pin; "
+        "track: the working ref stays the base branch.",
+    ),
+    file: str = typer.Option(
+        "immutable",
+        "--file",
+        help="file backend: immutable (drift is an error) or versioned "
+        "(Addressable via object-store version ids).",
+    ),
+    pin: str = typer.Option(
+        "native",
+        "--pin",
+        help="iceberg: native (create a tag) or record (rely on snapshot retention).",
+    ),
 ) -> None:
-    """Register an object in the working copy."""
+    """Register an object in the working copy.
+
+    The positional LOCATOR is stored as the `uri` field; named options set
+    other locator fields. Nothing is contacted until the next status/commit.
+    """
     repo = _repo()
     loc: dict[str, object] = {}
     if locator is not None:
@@ -188,7 +215,7 @@ def add(
 
 
 @app.command()
-def remove(key: str = typer.Argument(...)) -> None:
+def remove(key: str = typer.Argument(..., help="Object key.")) -> None:
     """Unregister an object (does not touch the external system)."""
     repo = _repo()
     try:
@@ -200,10 +227,16 @@ def remove(key: str = typer.Argument(...)) -> None:
 
 @app.command()
 def status(
-    no_snapshot: bool = typer.Option(False, "--no-snapshot"),
-    json_out: bool = typer.Option(False, "--json"),
+    no_snapshot: bool = typer.Option(
+        False, "--no-snapshot", help="Reuse the cached fingerprints; contact nothing."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Fan out, fingerprint every object, and classify each one."""
+    """Fan out, fingerprint every object, and classify each one.
+
+    Labels: new (never committed), modified, clean, error. `(STALE)` means
+    HEAD's manifests changed since this workspace forked; run `tether new`.
+    """
     repo = _repo()
     try:
         report = repo.status(do_snapshot=_snapshot_default(repo, no_snapshot))
@@ -221,7 +254,9 @@ def status(
 
 
 @app.command()
-def snapshot(json_out: bool = typer.Option(False, "--json")) -> None:
+def snapshot(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
     """Fingerprint every object and cache the result in the workspace."""
     repo = _repo()
     try:
@@ -237,14 +272,29 @@ def snapshot(json_out: bool = typer.Option(False, "--json")) -> None:
 
 @app.command()
 def commit(
-    message: str = typer.Option(..., "-m", "--message"),
-    no_vcs: bool = typer.Option(False, "--no-vcs"),
-    strict: bool = typer.Option(False, "--strict"),
-    force: bool = typer.Option(False, "--force"),
-    no_snapshot: bool = typer.Option(False, "--no-snapshot"),
-    json_out: bool = typer.Option(False, "--json"),
+    message: str = typer.Option(..., "-m", "--message", help="VCS commit message."),
+    no_vcs: bool = typer.Option(
+        False, "--no-vcs", help="Write manifests but skip the jj/git commit."
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail instead of recording Observed objects unrecoverably.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Skip quiescence checks (e.g. active Neon writers)."
+    ),
+    no_snapshot: bool = typer.Option(
+        False, "--no-snapshot", help="Commit the cached fingerprints as-is."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Pin mutable objects and record their state in the manifests."""
+    """Pin mutable objects and record their state in the manifests.
+
+    Pinnable/Forkable objects get a native ref `tether.<pin_id>`; Addressable
+    objects are recorded; Observed objects are recorded as unrecoverable.
+    Unchanged objects are skipped. Then the manifests are committed.
+    """
     repo = _repo()
     try:
         result: CommitResult = repo.commit(
@@ -278,9 +328,16 @@ def commit(
 @app.command()
 def new(
     rev: str | None = typer.Argument(None, help="Revision to fork from."),
-    keep: bool = typer.Option(False, "--keep"),
+    keep: bool = typer.Option(
+        False, "--keep", help="Keep current working refs; only refresh the baseline."
+    ),
 ) -> None:
-    """Fork fresh writable branches off the pinned state at ``rev``."""
+    """Fork fresh writable branches off the pinned state at REV.
+
+    Moves the VCS working copy to REV if given, then creates a
+    `tether.ws.<workspace>.<key>` branch per Forkable object (track-policy
+    objects stay on their base branch).
+    """
     repo = _repo()
     try:
         repo.new(rev, keep=keep)
@@ -291,14 +348,23 @@ def new(
 
 @app.command(name="open")
 def open_(
-    key: str = typer.Argument(...),
-    rev: str | None = typer.Option(None, "-r", "--rev"),
+    key: str = typer.Argument(..., help="Object key."),
+    rev: str | None = typer.Option(
+        None,
+        "-r",
+        "--rev",
+        help="Open read-only at this revision's pinned state (default: $TETHER_REV).",
+    ),
     read_only: bool | None = typer.Option(
         None, "--read-only/--writable", help="Force read-only or writable."
     ),
-    json_out: bool = typer.Option(False, "--json"),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Print a native handle for an object (address on stdout)."""
+    """Print a native handle for an object (address on stdout).
+
+    Without --rev, Forkable objects open writable at their working ref and
+    everything else read-only at the base.
+    """
     repo = _repo()
     try:
         handle = repo.open(key, rev=rev, read_only=read_only)
@@ -320,12 +386,22 @@ def open_(
 
 @app.command()
 def verify(
-    rev: str | None = typer.Option(None, "-r", "--rev"),
-    all_history: bool = typer.Option(False, "--all-history"),
-    deep: bool = typer.Option(False, "--deep"),
-    json_out: bool = typer.Option(False, "--json"),
+    rev: str | None = typer.Option(
+        None, "-r", "--rev", help="Verify the manifests at this revision."
+    ),
+    all_history: bool = typer.Option(
+        False, "--all-history", help="Verify every commit in the repository."
+    ),
+    deep: bool = typer.Option(
+        False, "--deep", help="Actually open recorded states (resolves `unknown`)."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Check that recorded states and pins still resolve."""
+    """Check that recorded states and pins still resolve.
+
+    Reports ok, drifted, missing, or unknown per object; exits 1 if anything
+    is not ok.
+    """
     repo = _repo()
     try:
         reports = repo.verify(rev=rev, deep=deep, all_history=all_history)
@@ -349,13 +425,15 @@ def verify(
 
 @app.command()
 def diff(
-    rev_a: str | None = typer.Argument(None),
-    rev_b: str | None = typer.Argument(None),
+    rev_a: str | None = typer.Argument(None, help="From revision (default: HEAD)."),
+    rev_b: str | None = typer.Argument(
+        None, help="To revision (default: working tree)."
+    ),
     content: bool = typer.Option(
         False, "--content", "-c", help="Also describe what changed inside each object."
     ),
     limit: int = typer.Option(20, "--limit", help="Max entries shown per object."),
-    json_out: bool = typer.Option(False, "--json"),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Show object-level manifest differences between two revisions.
 
@@ -405,10 +483,15 @@ def diff(
 
 @app.command()
 def gc(
-    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
-    json_out: bool = typer.Option(False, "--json"),
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--no-dry-run", help="Report only (default) or release."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Release native pins that no manifest in VCS history references."""
+    """Release native pins that no manifest in VCS history references.
+
+    Also drops working refs of removed objects and unreferenced listings.
+    """
     repo = _repo()
     try:
         report: GcReport = repo.gc(dry_run=dry_run)

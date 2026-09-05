@@ -1,31 +1,44 @@
-"""Built-in backends.
+"""Backend protocol, capability tiers, reports, and the registry.
 
-Backends register themselves on import. :func:`tether.backends.base.build_backend`
-imports the built-in modules lazily, so importing this package does not pull in
-optional third-party dependencies.
+A backend maps tether's operations onto one class of system. Built-in kinds
+(`file`, `icechunk`, `neon`, `git`, `iceberg`, `delta`, `lance`, `lakefs`,
+`ducklake`, `dolt`, `memory`) live in `tether.backends.<kind>` and register
+themselves on import; `build_backend` imports them lazily so importing this
+package does not pull in optional third-party dependencies. Third-party
+backends implement `ObjectBackend` and call `register_backend`.
 """
 
 from __future__ import annotations
 
 from tether.backends.base import (
+    MAX_DIFF_ENTRIES,
     Capability,
+    ChangeEntry,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     Tier,
     VerifyReport,
     VerifyStatus,
     build_backend,
+    effective_capabilities,
     known_kinds,
     register_backend,
     tier_of,
 )
 
 __all__ = [
+    "MAX_DIFF_ENTRIES",
     "Capability",
+    "ChangeEntry",
+    "Listings",
     "ObjectBackend",
+    "ObjectDiff",
     "Tier",
     "VerifyReport",
     "VerifyStatus",
     "build_backend",
+    "effective_capabilities",
     "known_kinds",
     "register_backend",
     "tier_of",

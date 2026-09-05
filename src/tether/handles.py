@@ -16,21 +16,40 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
+__all__ = [
+    "DeltaHandle",
+    "DoltHandle",
+    "DuckLakeHandle",
+    "FileHandle",
+    "GitHandle",
+    "Handle",
+    "IcebergHandle",
+    "IcechunkHandle",
+    "LakeFSHandle",
+    "LanceHandle",
+    "MemoryHandle",
+    "NeonHandle",
+]
+
 
 @dataclass
 class Handle:
     """Base class for all native handles."""
 
     key: str
+    """The object's native identity (URI, repository, database, ...)."""
     read_only: bool
+    """Whether writes through this handle are allowed."""
 
 
 @dataclass
 class FileHandle(Handle):
-    """A plain file or object-store artifact."""
+    """A plain file or object-store artifact (always read-only)."""
 
     uri: str
+    """Local path or object URI (`s3://`, `gs://`, `az://`, ...)."""
     version_id: str | None = None
+    """Object-store version id when opened at a versioned state."""
 
 
 @dataclass
@@ -42,11 +61,16 @@ class IcechunkHandle(Handle):
     want to open their own sessions.
     """
 
-    repository: Any  # icechunk.Repository (avoids a hard import)
-    session: Any = None  # icechunk.Session
+    repository: Any
+    """The `icechunk.Repository`."""
+    session: Any = None
+    """An `icechunk.Session`: writable for a branch, read-only for a tag/snapshot."""
     branch: str | None = None
+    """Branch the session is on (writable handles)."""
     tag: str | None = None
+    """Tag the session was opened at (pinned reads)."""
     snapshot_id: str | None = None
+    """Snapshot the session is positioned at."""
 
 
 @dataclass
@@ -54,7 +78,9 @@ class NeonHandle(Handle):
     """A Neon Postgres connection URL for a branch or a pinned point in time."""
 
     url: str
+    """`postgresql://...` connection URL (credentials per the Neon API)."""
     branch: str
+    """Neon branch name the URL points at."""
 
 
 @dataclass
@@ -62,17 +88,23 @@ class GitHandle(Handle):
     """A git/jj repository positioned at a sha (and optional worktree path)."""
 
     path: str
+    """Absolute path of the repository."""
     sha: str
+    """Commit the handle refers to."""
     worktree: str | None = None
+    """Path of a checked-out worktree, when one was created."""
 
 
 @dataclass
 class IcebergHandle(Handle):
     """A pyiceberg table positioned at a branch (write) or tag (read)."""
 
-    table: Any  # pyiceberg Table
+    table: Any
+    """The `pyiceberg.table.Table`."""
     ref: str | None = None
+    """Branch or tag name."""
     snapshot_id: int | None = None
+    """Snapshot id when opened at a recorded state."""
 
 
 @dataclass
@@ -84,8 +116,11 @@ class DeltaHandle(Handle):
     """
 
     uri: str
+    """Table location."""
     version: int
-    table: Any  # deltalake.DeltaTable
+    """Delta version the table is loaded at."""
+    table: Any
+    """The `deltalake.DeltaTable`."""
 
 
 @dataclass
@@ -97,10 +132,15 @@ class LanceHandle(Handle):
     """
 
     uri: str
-    dataset: Any  # lance.LanceDataset
+    """Dataset location."""
+    dataset: Any
+    """The `lance.LanceDataset`, checked out at the branch or tag."""
     version: int
+    """Version number (branch-scoped in Lance)."""
     branch: str | None = None
+    """Branch the dataset is checked out on."""
     tag: str | None = None
+    """Tag the dataset was opened at (pinned reads)."""
 
 
 @dataclass
@@ -112,10 +152,15 @@ class LakeFSHandle(Handle):
     """
 
     uri: str
+    """`lakefs://repo/ref/prefix/`."""
     repository: str
+    """lakeFS repository id."""
     ref: str
+    """Branch (writable) or tag / commit id (read-only)."""
     commit_id: str | None = None
+    """Commit the ref resolved to, when known."""
     prefix: str = ""
+    """Path prefix the object is scoped to."""
 
 
 @dataclass
@@ -130,12 +175,19 @@ class DuckLakeHandle(Handle):
     """
 
     metadata: str
+    """The `ducklake:...` metadata connection string."""
     alias: str
-    connection: Any  # duckdb.DuckDBPyConnection
+    """Catalog alias inside `connection`."""
+    connection: Any
+    """A `duckdb.DuckDBPyConnection` with the catalog attached (read-only)."""
     snapshot_id: int
+    """Snapshot the attachment is positioned at."""
     attach_sql: str
+    """The exact `ATTACH` statement used; reuse it in your own DuckDB."""
     data_path: str | None = None
+    """`DATA_PATH` passed to `ATTACH`, when set in the locator."""
     table: str | None = None
+    """Table the locator scopes the handle to (see `table_ref`)."""
 
     def table_ref(self, table: str | None = None) -> str:
         """Qualified table reference (``alias.table``) for SQL."""
@@ -170,12 +222,17 @@ class DoltHandle(Handle):
     """
 
     url: str
+    """`mysql://user@host:port/db/ref` (no password)."""
     database: str
+    """Dolt database name."""
     ref: str
+    """Branch (writable) or tag / commit hash (read-only)."""
     commit: str | None = None
+    """Commit the ref resolved to, when known."""
 
     @property
     def database_ref(self) -> str:
+        """`db/ref`, the revision database to `USE` or connect to."""
         return f"{self.database}/{self.ref}"
 
 
@@ -184,13 +241,18 @@ class MemoryHandle(Handle):
     """In-memory reference handle used by the conformance suite and tests."""
 
     store: Any
+    """The `MemoryStore`."""
     system: str
+    """System name inside the store."""
     ref: str
+    """Branch, tag, or snapshot id."""
 
     def read(self) -> dict[str, Any]:
+        """Return the payload at `ref`."""
         return self.store.read(self.system, self.ref)
 
     def write(self, payload: dict[str, Any]) -> str:
+        """Write `payload` as a new snapshot on the branch; return its id."""
         if self.read_only:
             raise PermissionError(f"handle for {self.key!r} is read-only")
         return self.store.write(self.system, self.ref, payload)

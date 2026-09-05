@@ -65,6 +65,11 @@ from tether.manifest import (
 from tether.vcs import VcsAdapter, detect_vcs
 
 TETHER_REV_ENV = "TETHER_REV"
+"""Environment variable `Repo.open` reads for its default revision.
+
+When set, `open(key)` returns a read-only handle at that commit's pinned state,
+so reproducible jobs pin their inputs without code changes.
+"""
 # Fan-out is network-bound (S3 HEADs, control-plane calls, catalog reads); the
 # Python work per object is microseconds, so threads -- not asyncio -- are the
 # right tool and a generous pool costs nothing when idle.
@@ -76,19 +81,32 @@ _MAX_WORKERS = 16
 # --------------------------------------------------------------------------- #
 @dataclass
 class ObjectStatus:
+    """One object's classification in a `StatusReport`."""
+
     key: str
+    """Object key."""
     kind: str
+    """Backend kind."""
     tier: Tier
+    """Effective capability tier for this object."""
     committed: bool
+    """Whether the manifest has a committed state."""
     pinned: bool
+    """Whether the manifest carries a native pin."""
     recoverable: bool
+    """Whether the committed state can be reconstructed later."""
     changed: bool
+    """Whether the current state differs from the committed one."""
     current_state: State | None
+    """The fingerprint taken by this status (or the cached one)."""
     verify: VerifyReport | None = None
+    """Cheap verify result when `RepoConfig.verify_on_status` is set."""
     error: str | None = None
+    """Fingerprint failure message, if any."""
 
     @property
     def state_label(self) -> str:
+        """`"new"`, `"modified"`, `"clean"`, or `"error"`."""
         if self.error is not None:
             return "error"
         if not self.committed:
@@ -100,42 +118,83 @@ class ObjectStatus:
 
 @dataclass
 class StatusReport:
+    """Result of `Repo.status`."""
+
     manifest_hash: str
+    """Hash of the committed object set (the dataset's "tree id")."""
     stale: bool
+    """Working refs were forked from a different manifest hash than HEAD's."""
     objects: list[ObjectStatus] = field(default_factory=list)
+    """Per-object classifications, sorted by key."""
 
 
 @dataclass
 class CommitResult:
+    """Result of `Repo.commit`."""
+
     message: str
+    """The commit message."""
     pinned: dict[str, Pin | None] = field(default_factory=dict)
+    """Objects whose state was recorded: the `Pin` created, or `None` for
+    Addressable objects (recorded without a native ref)."""
     unrecoverable: list[str] = field(default_factory=list)
+    """Observed-tier objects recorded with `recoverable = False`."""
     unchanged: list[str] = field(default_factory=list)
+    """Objects skipped because their state was already recorded."""
     vcs_commit: str | None = None
+    """Commit id of the VCS commit, or `None` if nothing changed / `vcs=False`."""
 
 
 @dataclass
 class GcReport:
+    """Result of `Repo.gc`."""
+
     unpinned: dict[str, list[str]] = field(default_factory=dict)
+    """Backend kind -> pin ids released (or that would be, in a dry run)."""
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    """Working refs dropped because their object was removed."""
     deleted_listings: list[str] = field(default_factory=list)
+    """`.tether/listings/` files no manifest references."""
     dry_run: bool = True
+    """Whether anything was actually released."""
 
 
 @dataclass
 class DiffEntry:
+    """One object's row in `Repo.diff`."""
+
     key: str
-    change: str  # added | removed | changed | unchanged
+    """Object key."""
+    change: str
+    """`"added"`, `"removed"`, `"changed"`, or `"unchanged"`."""
     a_pin: str | None = None
+    """Pin id on side A."""
     b_pin: str | None = None
-    detail: ObjectDiff | None = None  # content diff (``diff(content=True)``)
+    """Pin id on side B."""
+    detail: ObjectDiff | None = None
+    """Native content diff (only with `content=True` and a `DIFF` backend)."""
     detail_error: str | None = None
+    """Backend failure while computing `detail`, if any."""
 
 
 # --------------------------------------------------------------------------- #
 # Repo
 # --------------------------------------------------------------------------- #
 class Repo:
+    """A tether dataset: manifests in a VCS working tree plus the systems they name.
+
+    Construct with `Repo.init` (new dataset) or `Repo.find` (existing one).
+    Every method that touches external systems fans out concurrently across
+    objects and aggregates failures into `MultiObjectError`.
+
+    Attributes:
+        root: Dataset root (the directory holding `tether.toml`).
+        config: The committed `RepoConfig`.
+        vcs: Adapter for the enclosing jj or git repository.
+        objects: Committed manifests in the working tree, by key.
+        workspace: Untracked per-workspace state (working refs, cached snapshot).
+    """
+
     def __init__(
         self,
         root: Path,
@@ -160,6 +219,22 @@ class Repo:
         *,
         config: RepoConfig | None = None,
     ) -> Repo:
+        """Initialize a dataset at `path` inside an existing git/jj repository.
+
+        Creates `tether.toml`, `.tether/objects/`, and `.tether/.gitignore`
+        (which ignores the untracked `workspace.toml`).
+
+        Args:
+            path: Dataset root; created if it does not exist.
+            config: Repository configuration; defaults to `RepoConfig()`.
+
+        Returns:
+            The initialized repository.
+
+        Raises:
+            ConfigError: If `tether.toml` already exists at `path`.
+            VcsError: If no git or jj repository encloses `path`.
+        """
         root = Path(path).resolve()
         root.mkdir(parents=True, exist_ok=True)
         if _m.config_path(root).exists():
@@ -180,6 +255,11 @@ class Repo:
 
     @classmethod
     def find(cls, path: Path | str = ".") -> Repo:
+        """Open the dataset whose `tether.toml` is at or above `path`.
+
+        Raises:
+            ConfigError: If no dataset root is found.
+        """
         root = find_dataset_root(Path(path))
         if root is None:
             raise ConfigError(f"no tether dataset found at or above {path}")
@@ -194,6 +274,13 @@ class Repo:
 
     # -- internals ------------------------------------------------------- #
     def backend_for(self, kind: str) -> ObjectBackend:
+        """Return the (cached) backend instance for `kind`.
+
+        Built with `config.backends[kind]` on first use.
+
+        Raises:
+            ConfigError: If the kind is unknown or its optional extra is missing.
+        """
         backend = self._backends.get(kind)
         if backend is None:
             backend = build_backend(kind, self.config.backends.get(kind, {}))
@@ -262,9 +349,14 @@ class Repo:
             yield rev, self._parse_manifests(files)
 
     def current_manifest_hash(self) -> str:
+        """Hash of the committed object set in the working tree."""
         return manifest_hash(self.objects)
 
     def is_stale(self) -> bool:
+        """Whether HEAD's manifests changed since this workspace forked its refs.
+
+        A stale workspace refuses writable handles until `new` reforks.
+        """
         base = self.workspace.base
         return base is not None and base != self.current_manifest_hash()
 
@@ -300,6 +392,24 @@ class Repo:
         *,
         policy: Policy | None = None,
     ) -> ObjectManifest:
+        """Register an object in the working copy.
+
+        Writes a manifest with no state yet; the external system is not
+        contacted until the next `snapshot`, `status`, or `commit`.
+
+        Args:
+            key: Free-form, path-like object key (`"zarr/imaging"`).
+            kind: Backend kind (see `tether.backends.known_kinds`).
+            locator: Backend-specific fields naming the object (`uri`, `branch`,
+                `project_id`, ...); see the backends guide.
+            policy: Per-object `Policy`; defaults to `config.defaults`.
+
+        Returns:
+            The new manifest.
+
+        Raises:
+            ConfigError: If `key` exists, is unsafe, or `kind` cannot be built.
+        """
         if key in self.objects:
             raise ConfigError(f"object already exists: {key}")
         # Validate the backend kind eagerly.
@@ -317,6 +427,11 @@ class Repo:
         return manifest
 
     def remove(self, key: str) -> None:
+        """Unregister an object; the external system (and its pins) is untouched.
+
+        Raises:
+            ConfigError: If `key` is not registered.
+        """
         if key not in self.objects:
             raise ConfigError(f"no such object: {key}")
         remove_object(self.root, key)
@@ -328,6 +443,19 @@ class Repo:
 
     # -- snapshot / status ---------------------------------------------- #
     def snapshot(self) -> dict[str, State]:
+        """Fingerprint every object concurrently and cache the result.
+
+        Each object is read at its working ref (or its base ref). The states are
+        stored in `workspace.last_snapshot`.
+
+        Returns:
+            Current state per object key.
+
+        Raises:
+            ImmutableObjectModified: An Observed object with `policy.file ==
+                "immutable"` changed since it was committed.
+            MultiObjectError: One or more fingerprints failed.
+        """
         keys = list(self.objects)
 
         def fp(key: str) -> State:
@@ -358,6 +486,15 @@ class Repo:
         return states
 
     def status(self, *, do_snapshot: bool = True) -> StatusReport:
+        """Classify every object against its committed manifest.
+
+        Args:
+            do_snapshot: Take a fresh `snapshot` first; otherwise reuse the
+                cached one (no external systems are contacted).
+
+        Returns:
+            The report; `objects` are sorted by key.
+        """
         states = self.snapshot() if do_snapshot else self.workspace.last_snapshot
         objects: list[ObjectStatus] = []
         for key in sorted(self.objects):
@@ -402,6 +539,31 @@ class Repo:
         force: bool = False,
         do_snapshot: bool = True,
     ) -> CommitResult:
+        """Pin and record every object's current state, then commit the manifests.
+
+        For each object whose state changed: `PIN`-capable backends create the
+        native ref `tether.<pin_id>` (idempotent), Addressable backends have
+        their state recorded, and Observed backends are recorded with
+        `recoverable = False`. Backends that provide a listing have it stored
+        under `.tether/listings/`. If any pin fails, pins created by this call
+        are released best-effort. With `config.new_auto_fork`, `new` runs
+        afterwards.
+
+        Args:
+            message: VCS commit message.
+            vcs: Commit `.tether/` and `tether.toml` to the enclosing repository.
+            strict: Fail instead of recording Observed objects unrecoverably.
+            force: Skip quiescence checks (`NEEDS_QUIESCENCE` backends).
+            do_snapshot: Take a fresh `snapshot` first.
+
+        Returns:
+            What was pinned, recorded, or skipped, and the VCS commit id.
+
+        Raises:
+            UnpinnedStateError: `strict` and an Observed object changed.
+            BackendError: A quiescence check or pin failed.
+            MultiObjectError: The snapshot failed for one or more objects.
+        """
         states = self.snapshot() if do_snapshot else self.workspace.last_snapshot
         keys = list(self.objects)
 
@@ -495,6 +657,21 @@ class Repo:
 
     # -- new (fork working refs) ---------------------------------------- #
     def new(self, rev: str | None = None, *, keep: bool = False) -> None:
+        """Start working on top of `rev`: fork fresh writable refs off its pins.
+
+        For every `FORK`-capable object, `track` policy uses the locator's
+        branch; otherwise the pin is verified (cheaply) and a branch named
+        `working_ref_name(workspace_id, key)` is forked from it. Objects with no
+        pin yet are skipped until their first commit. Forks run concurrently.
+
+        Args:
+            rev: Move the VCS working copy here first (`jj new` / `git checkout`)
+                and reload the manifests; `None` keeps the current commit.
+            keep: Only refresh the stale-detection baseline; keep working refs.
+
+        Raises:
+            MultiObjectError: A pin is missing or a fork failed.
+        """
         if rev is not None:
             self.vcs.new(rev)
             self.objects = read_objects(self.root)
@@ -548,6 +725,26 @@ class Repo:
         rev: str | None = None,
         read_only: bool | None = None,
     ) -> Handle:
+        """Return a native handle for an object.
+
+        Args:
+            key: Object key.
+            rev: VCS revision whose pinned (or recorded Addressable) state to
+                open read-only. Defaults to `$TETHER_REV` when set.
+            read_only: Force read-only or writable. Defaults to writable for
+                Forkable objects (at their working ref) and read-only otherwise.
+
+        Returns:
+            A backend-specific `tether.handles.Handle`.
+
+        Raises:
+            ConfigError: Unknown key (or absent at `rev`).
+            StaleWorkingCopyError: Writable open while `is_stale`, or no
+                working ref exists yet (run `new`).
+            CapabilityError: Writable open on a non-Forkable object, or a
+                revision open on an Observed object.
+            TetherError: The object has no committed state at `rev`.
+        """
         if key not in self.objects and rev is None:
             raise ConfigError(f"no such object: {key}")
         rev = rev if rev is not None else os.environ.get(TETHER_REV_ENV)
@@ -612,6 +809,20 @@ class Repo:
         deep: bool = False,
         all_history: bool = False,
     ) -> dict[str, VerifyReport]:
+        """Check that recorded states and pins still resolve.
+
+        Args:
+            rev: Verify the manifests at this revision instead of the working tree.
+            deep: Actually open recorded states instead of the cheap check
+                (turns `UNKNOWN` into `OK` / `MISSING`).
+            all_history: Verify every commit in the repository; labels become
+                `"<commit12>:<key>"`. History is streamed through one object
+                reader and each distinct record is verified once.
+
+        Returns:
+            A `VerifyReport` per label (object key, or commit-prefixed key).
+            Backend `TetherError`s are reported as `UNKNOWN`.
+        """
         if all_history:
             return self._verify_all_history(deep)
         objects = (
@@ -670,6 +881,14 @@ class Repo:
 
     # -- gc -------------------------------------------------------------- #
     def gc(self, *, dry_run: bool = True) -> GcReport:
+        """Release native pins that no manifest in VCS history references.
+
+        Also drops this workspace's working refs for removed objects and
+        deletes `.tether/listings/` files no manifest names.
+
+        Args:
+            dry_run: Only report what would be released.
+        """
         # Referenced pin ids per (kind, identity-json) across all history + ws.
         referenced: dict[str, set[str]] = {}
 

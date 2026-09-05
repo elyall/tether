@@ -23,27 +23,46 @@ from tether.manifest import Locator, Pin, State
 
 
 class Capability(Flag):
-    """What a backend can do. The first four are cumulative tiers."""
+    """What a backend can do.
+
+    The first four flags are cumulative tiers (see `Tier` and `tier_of`); the
+    rest are orthogonal refinements the engine and the docs use to explain
+    behavior.
+    """
 
     NONE = 0
-    # Cumulative tiers -----------------------------------------------------
-    FINGERPRINT = auto()  # can read current state (drift detection)
-    ADDRESSABLE = auto()  # recorded state is self-addressing (read later)
-    PIN = auto()  # can create/delete a durable, GC-proof ref
-    FORK = auto()  # can create a writable branch off a pin
-    # Orthogonal flags -----------------------------------------------------
-    CHEAP_FINGERPRINT = auto()  # metadata-only; no heavy connection
-    RETENTION_BOUND = auto()  # pin validity bounded by a retention window
-    NEEDS_QUIESCENCE = auto()  # commit should check for active writers
-    ATOMIC_REF = auto()  # create-if-absent semantics for pins
-    DIFF = auto()  # can describe what changed between two recorded states
+    """No capabilities."""
+    FINGERPRINT = auto()
+    """Can read the current state (drift detection). Every backend has this."""
+    ADDRESSABLE = auto()
+    """A recorded state can be read back later without a native ref."""
+    PIN = auto()
+    """Can create and delete a durable, GC-proof native ref for a state."""
+    FORK = auto()
+    """Can create a writable branch off a pin."""
+    CHEAP_FINGERPRINT = auto()
+    """Fingerprints are metadata-only; no heavy connection is opened."""
+    RETENTION_BOUND = auto()
+    """Recorded/pinned states expire with the system's retention window."""
+    NEEDS_QUIESCENCE = auto()
+    """`commit` should check for active writers first."""
+    ATOMIC_REF = auto()
+    """Pins have create-if-absent semantics."""
+    DIFF = auto()
+    """Can describe what changed between two recorded states."""
 
 
 class Tier(Enum):
+    """The cumulative capability tier of a backend (or of one object)."""
+
     OBSERVED = "observed"
+    """Drift detection only; committed state is not recoverable."""
     ADDRESSABLE = "addressable"
+    """Committed state can be read back; nothing to create or GC."""
     PINNABLE = "pinnable"
+    """Commit creates a durable native ref; `verify` and `gc` apply."""
     FORKABLE = "forkable"
+    """`new` forks writable branches; `open` returns writable handles."""
 
 
 def tier_of(caps: Capability) -> Tier:
@@ -57,19 +76,30 @@ def tier_of(caps: Capability) -> Tier:
 
 
 class VerifyStatus(Enum):
+    """Outcome of `ObjectBackend.verify`."""
+
     OK = "ok"
+    """The pin (or recorded state) resolves to what the manifest says."""
     DRIFTED = "drifted"
+    """The pin exists but points at a different state."""
     MISSING = "missing"
-    UNKNOWN = "unknown"  # cannot determine cheaply; use --deep
+    """The pin or recorded state is gone (deleted, expired)."""
+    UNKNOWN = "unknown"
+    """Cannot tell cheaply; verify with `deep=True`."""
 
 
 @dataclass
 class VerifyReport:
+    """Result of `ObjectBackend.verify` for one object."""
+
     status: VerifyStatus
+    """The outcome."""
     message: str = ""
+    """Human-readable detail (what it points at, why it is unknown, ...)."""
 
     @property
     def ok(self) -> bool:
+        """`True` when `status` is `VerifyStatus.OK`."""
         return self.status is VerifyStatus.OK
 
 
@@ -84,8 +114,11 @@ class ChangeEntry:
     """One changed thing inside an object: a file, table, array, key, ..."""
 
     path: str
-    change: str  # added | removed | modified | renamed
+    """What changed (file path, table name, array path, ...)."""
+    change: str
+    """`"added"`, `"removed"`, `"modified"`, or `"renamed"`."""
     detail: str = ""
+    """Backend-specific detail (`"+2 rows"`, `"+1 -1"`, `"12 chunks"`)."""
 
     def to_dict(self) -> dict[str, str]:
         d = {"path": self.path, "change": self.change}
@@ -104,14 +137,22 @@ class ObjectDiff:
     """
 
     unit: str = "entries"
+    """What is being counted: files, tables, arrays, fragments, commits, ..."""
     added: int = 0
+    """Exact count of added units."""
     removed: int = 0
+    """Exact count of removed units."""
     modified: int = 0
+    """Exact count of modified (or renamed) units."""
     entries: list[ChangeEntry] = field(default_factory=list)
+    """Per-unit entries, capped at `MAX_DIFF_ENTRIES`."""
     truncated: bool = False
-    note: str = ""  # context the counts alone do not convey
+    """Whether entries were dropped because of the cap."""
+    note: str = ""
+    """Context the counts alone do not convey (e.g. a missing listing)."""
 
     def add(self, path: str, change: str, detail: str = "") -> None:
+        """Record one change: bump the matching counter and append an entry."""
         if change == "added":
             self.added += 1
         elif change == "removed":
@@ -125,10 +166,12 @@ class ObjectDiff:
 
     @property
     def is_empty(self) -> bool:
+        """`True` when nothing changed."""
         return not (self.added or self.removed or self.modified or self.entries)
 
     @property
     def summary(self) -> str:
+        """One line: `"+A -R ~M <unit>"` plus truncation and note."""
         text = f"+{self.added} -{self.removed} ~{self.modified} {self.unit}"
         if self.truncated:
             text += f" (first {len(self.entries)} shown)"
