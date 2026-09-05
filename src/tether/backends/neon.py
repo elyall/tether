@@ -77,6 +77,7 @@ class NeonBackend(ObjectBackend):
         | Capability.FORK
         | Capability.NEEDS_QUIESCENCE
         | Capability.RETENTION_BOUND
+        | Capability.BRANCH_IS_STORAGE
     )
 
     def __init__(self, config: dict | None = None) -> None:

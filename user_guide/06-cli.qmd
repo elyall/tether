@@ -20,7 +20,7 @@ tether open KEY [-r REV] [--read-only | --writable]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
-tether gc [--dry-run | --no-dry-run] [--prune-workspaces] [--keep-workspace ID]... [--plan FILE | --from-plan FILE]
+tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
 ```
 
 Commands run from anywhere inside a dataset: the root is found by walking up to
@@ -127,16 +127,26 @@ plan: commit (2 write(s))
 ```
 
 Action verbs: `pin`, `record` (commit); `fork`, `track` (new); `unpin`,
-`delete-branch`, `forget-working-ref`, `delete-listing` (gc); `vcs-commit`.
+`delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
+`vcs-commit`. `track` and `keep-branch` are informational -- they write nothing.
 
 ## `gc` scope
 
-Default: pins no manifest in VCS history (or the working tree) references,
-working branches of objects removed with `tether remove`, and unreferenced
-`.tether/listings/` files. `--prune-workspaces` additionally lists each
-system's `tether.ws.*` branches and deletes those belonging to other workspaces
-(pass live ids with `--keep-workspace`, repeatable; this workspace is always
-kept) plus this workspace's branches that no current object uses.
+Default: release pins no manifest in VCS history (or the working tree)
+references, forget the working refs of objects removed with `tether remove`
+(the native branch is left alone), and delete unreferenced
+`.tether/listings/` files. No branch is ever deleted by a plain `gc`.
+
+`--prune-workspaces` additionally lists each system's `tether.ws.*` branches
+and evaluates those belonging to other workspaces (pass live ids with
+`--keep-workspace`, repeatable; this workspace's live refs are always kept)
+plus this workspace's branches that no current object uses. A branch is
+`delete-branch` only if its head state is natively pinned by some commit or
+equals the base branch's head; a branch with unpinned writes, a pin-less
+(`--pin record`) state, or on a backend whose branches are the storage itself
+(Neon, `BRANCH_IS_STORAGE`) is `keep-branch`. `--force-prune` turns every
+`keep-branch` into a `delete-branch` marked `FORCED`; the data on those
+branches is lost.
 
 ## What `open` prints
 
@@ -186,5 +196,5 @@ changed object's native diff; `--limit` caps entries printed per object
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
-| `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
+| `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
 | plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |

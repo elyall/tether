@@ -77,7 +77,9 @@ Backends declare capabilities; commands degrade explicitly by tier.
 Orthogonal flags refine behavior: `CHEAP_FINGERPRINT` (metadata only),
 `RETENTION_BOUND` (recoverability expires with a retention window),
 `NEEDS_QUIESCENCE` (commit checks for active writers), `ATOMIC_REF`
-(create-if-absent pins), `DIFF` (native content diffs).
+(create-if-absent pins), `DIFF` (native content diffs), `HISTORY` (native
+log), `BRANCH_IS_STORAGE` (deleting a branch reclaims its data; `gc` never
+prunes such a branch without force).
 
 ## Handles, not data
 

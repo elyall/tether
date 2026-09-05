@@ -52,6 +52,9 @@ class Capability(Flag):
     """Can describe what changed between two recorded states."""
     HISTORY = auto()
     """Can list the system's native history (`ObjectBackend.history`)."""
+    BRANCH_IS_STORAGE = auto()
+    """Deleting a branch reclaims its data immediately (Neon); `gc` never
+    deletes such a working branch without `force_prune`."""
 
 
 class Tier(Enum):

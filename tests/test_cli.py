@@ -233,20 +233,32 @@ def test_cli_plans_dry_run_and_from_plan(
     assert store.read(system, wref) == {"v": 1}
 
     # gc: dry run by default, plan file, prune other workspaces.
-    sid = store.system(system).branches["main"]
-    store.system(system).branches["tether.ws.deadbeef.db"] = sid
+    branches = store.system(system).branches
+    branches["tether.ws.deadbeef.db"] = branches["main"]  # no writes: safe
+    branches["tether.ws.0badf00d.db"] = branches["main"]
+    store.write(system, "tether.ws.0badf00d.db", {"v": 7})  # has data: kept
     r = runner.invoke(app, ["gc"])
     assert r.exit_code == 0, r.output
     assert "deadbeef" not in r.output  # not without --prune-workspaces
+    r = runner.invoke(app, ["gc", "--force-prune"])
+    assert r.exit_code == 1 and "requires --prune-workspaces" in r.output
     gc_plan = vcs_root / "gc.json"
     r = runner.invoke(app, ["gc", "--prune-workspaces", "--plan", str(gc_plan)])
     assert r.exit_code == 0, r.output
-    assert "tether.ws.deadbeef.db" in r.output
-    assert "tether.ws.deadbeef.db" in store.system(system).branches
+    assert "delete-branch" in r.output and "tether.ws.deadbeef.db" in r.output
+    assert "keep-branch" in r.output and "tether.ws.0badf00d.db" in r.output
+    assert "tether.ws.deadbeef.db" in branches  # plan only
     r = runner.invoke(app, ["gc", "--from-plan", str(gc_plan), "--json"])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["deleted_working_refs"] == {
-        "db": ["tether.ws.deadbeef.db"]
-    }
-    assert "tether.ws.deadbeef.db" not in store.system(system).branches
-    assert wref in store.system(system).branches  # ours survives
+    payload = json.loads(r.output)
+    assert payload["deleted_working_refs"] == {"db": ["tether.ws.deadbeef.db"]}
+    assert payload["kept_working_refs"] == {"db": ["tether.ws.0badf00d.db"]}
+    assert "tether.ws.deadbeef.db" not in branches
+    assert "tether.ws.0badf00d.db" in branches
+    assert wref in branches  # ours survives
+    r = runner.invoke(
+        app, ["gc", "--prune-workspaces", "--force-prune", "--no-dry-run"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "tether.ws.0badf00d.db" not in branches
+    assert wref in branches

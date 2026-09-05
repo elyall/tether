@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a4] - 2026-09-05
+
+### Changed
+
+- `gc` never deletes branches on its own again. `0.1.0a3` deleted the working
+  branch of a `tether remove`d object by default and, with
+  `--prune-workspaces`, every stray `tether.ws.*` branch unconditionally. Now
+  a plain `gc` only forgets the removed object's ref (the branch is left for
+  `--prune-workspaces`), and `--prune-workspaces` fingerprints each stray
+  branch and deletes it only when nothing on it would be lost: its head state
+  is natively pinned by some commit, or equals the base branch's head.
+  Branches with unpinned writes, with a pin-less (`--pin record`) state, or on
+  a backend whose branches are the storage itself are reported as
+  `keep-branch` instead.
+- New `--force-prune` (`Repo.gc(force_prune=True)`, `plan_gc(force_prune=)`)
+  deletes kept branches anyway; the plan marks them `FORCED`.
+- New `Capability.BRANCH_IS_STORAGE` (declared by `neon`): deleting a branch
+  reclaims its data immediately, so such branches are never pruned without
+  force.
+- `GcReport` gains `kept_working_refs` and `forgotten_working_refs`;
+  `deleted_working_refs` now lists only native branches actually deleted.
+  `keep-branch` joins `track` as an informational plan action (`Plan.writes`
+  excludes both).
+
 ## [0.1.0a3] - 2026-09-05
 
 ### Added

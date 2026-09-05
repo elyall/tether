@@ -25,7 +25,7 @@ class Action:
     """One store-writing step in a `Plan`."""
 
     op: str
-    """`pin`, `record`, `fork`, `track`, `unpin`, `delete-branch`,
+    """`pin`, `record`, `fork`, `track`, `unpin`, `delete-branch`, `keep-branch`,
     `forget-working-ref`, `delete-listing`, or `vcs-commit`."""
     key: str = ""
     """Object key the action concerns (empty for repository-level steps)."""
@@ -77,10 +77,13 @@ class Plan:
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
 
+    NON_WRITES = frozenset({"track", "keep-branch"})
+    """Informational actions: nothing is written when they are applied."""
+
     @property
     def writes(self) -> list[Action]:
-        """Actions that touch an external system (everything but `track`)."""
-        return [a for a in self.actions if a.op != "track"]
+        """Actions that touch an external system or the working tree."""
+        return [a for a in self.actions if a.op not in self.NON_WRITES]
 
     @property
     def is_empty(self) -> bool:

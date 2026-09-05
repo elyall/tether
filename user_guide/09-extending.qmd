@@ -52,7 +52,7 @@ Method by method:
 | `verify(locator, state, pin, deep)` | With a pin: `OK` if it resolves to `state`, `DRIFTED` if it points elsewhere, `MISSING` if gone. Without: `UNKNOWN` unless `deep`, then actually open the state. |
 | `fork(locator, source, name)` | Create writable branch `name` and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). `source` is a `Pin` (branch from the native ref) or a recorded `State` (branch straight from the snapshot / version / commit -- used by `pin = "record"` objects; raise `BackendError` if the state is no longer reachable). Reset semantics if it already exists. |
 | `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. Ignore "already gone". |
-| `list_working_refs(locator)` | Native branches named `tether.ws.*` (`WORKING_REF_PREFIX`) in this system; `gc --prune-workspaces` deletes the ones belonging to dead workspaces. Default: none. |
+| `list_working_refs(locator)` | Native branches named `tether.ws.*` (`WORKING_REF_PREFIX`) in this system. `gc --prune-workspaces` fingerprints each stray one and deletes it only if its head is pinned or equals the base head (`--force-prune` overrides). Default: none. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
 
 Optional members:
@@ -92,6 +92,7 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `ATOMIC_REF` | (informational) pins are create-if-absent |
 | `DIFF` | call `diff` for `diff --content`, `listing` at commit |
 | `HISTORY` | call `history` for `tether log` and `add --pick` |
+| `BRANCH_IS_STORAGE` | never delete a stray working branch in `gc --prune-workspaces` without `--force-prune` (deleting reclaims the data, as in Neon) |
 
 ## Content diffs and listings
 

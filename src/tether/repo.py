@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,7 +157,11 @@ class GcReport:
     unpinned: dict[str, list[str]] = field(default_factory=dict)
     """Backend kind -> pin ids released (or that would be, in a dry run)."""
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
-    """Object key -> working branches deleted (removed objects, pruned workspaces)."""
+    """Object key -> native working branches deleted (`--prune-workspaces`)."""
+    kept_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    """Object key -> stray branches kept because they hold unpinned data."""
+    forgotten_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    """Object key -> refs dropped from the workspace state (object removed)."""
     deleted_listings: list[str] = field(default_factory=list)
     """`.tether/listings/` files no manifest references."""
     dry_run: bool = True
@@ -1150,17 +1154,25 @@ class Repo:
         *,
         prune_workspaces: bool = False,
         keep_workspaces: set[str] | None = None,
+        force_prune: bool = False,
     ) -> Plan:
         """Compute what `gc` would release without writing anywhere.
 
-        Actions: `unpin` native refs no manifest in VCS history (or the working
-        tree) references; `forget-working-ref` + `delete-branch` for this
-        workspace's refs whose object was removed; `delete-listing` for
-        `.tether/listings/` files no manifest names; and, with
-        `prune_workspaces`, `delete-branch` for every `tether.ws.*` branch in
-        each system whose workspace id is neither this workspace's nor in
-        `keep_workspaces` (pass the ids of live workspaces, e.g. from
-        `jj workspace list`).
+        By default `gc` releases only tether's own *refs*: `unpin` native pins
+        no manifest in VCS history (or the working tree) references,
+        `forget-working-ref` for this workspace's refs whose object was
+        removed (the native branch is left alone), and `delete-listing` for
+        `.tether/listings/` files no manifest names.
+
+        With `prune_workspaces`, every `tether.ws.*` branch in each system is
+        considered: branches of other workspaces (except `keep_workspaces` --
+        pass the ids of live workspaces, e.g. from `jj workspace list`) and this
+        workspace's branches no current object uses. A branch is planned for
+        `delete-branch` only when nothing on it would be lost: its head state is
+        natively pinned by some manifest in history, or equals the base
+        branch's head. Otherwise it gets a `keep-branch` note (unpinned writes,
+        a pin-less recorded state, or a `BRANCH_IS_STORAGE` backend such as
+        Neon). `force_prune` deletes those too.
         """
         referenced: dict[str, set[str]] = {}
 
@@ -1170,12 +1182,10 @@ class Repo:
 
         history_manifests: list[ObjectManifest] = []
         all_manifests: list[ObjectManifest] = []
-        last_seen: dict[str, ObjectManifest] = {}  # key -> newest manifest in history
         seen: set[str] = set()
         for _rev, objects in self._iter_history_objects():
             for m in objects.values():
                 all_manifests.append(m)
-                last_seen.setdefault(m.key, m)
                 if m.pin is None:
                     continue
                 backend = self.backend_for(m.kind)
@@ -1195,6 +1205,7 @@ class Repo:
                 "workspace_id": self.workspace.workspace_id,
                 "prune_workspaces": prune_workspaces,
                 "keep_workspaces": sorted(keep_workspaces or ()),
+                "force_prune": force_prune,
             },
         )
 
@@ -1222,77 +1233,29 @@ class Repo:
                     )
                 )
 
-        # This workspace's working refs whose object was removed. The native
-        # branch is deleted too when history still tells us where it lives.
+        # This workspace's working refs whose object was removed: forget the
+        # ref; the native branch is only deleted by --prune-workspaces.
         for key, ref in sorted(self.workspace.working_refs.items()):
             if key in self.objects:
                 continue
-            old = last_seen.get(key)
-            if (
-                old is not None
-                and working_ref_workspace(ref) is not None
-                and Capability.FORK in self.backend_for(old.kind).capabilities
-            ):
-                plan.actions.append(
-                    Action(
-                        "delete-branch",
-                        key,
-                        old.kind,
-                        target=ref,
-                        detail="object removed; working branch deleted and forgotten",
-                        params={"locator": old.locator, "forget": True},
-                    )
+            plan.actions.append(
+                Action(
+                    "forget-working-ref",
+                    key,
+                    target=ref,
+                    detail="object removed; branch left in place "
+                    "(gc --prune-workspaces evaluates it)",
                 )
-            else:
-                plan.actions.append(
-                    Action(
-                        "forget-working-ref",
-                        key,
-                        target=ref,
-                        detail="object removed; ref forgotten (branch not managed)",
-                    )
-                )
+            )
 
-        # Working branches left behind by other workspaces, plus this
-        # workspace's branches that no current working ref accounts for.
         if prune_workspaces:
-            mine = self.workspace.workspace_id[:8]
-            keep_ids = {w[:8] for w in (keep_workspaces or ())} | {mine}
-            in_use = set(self.workspace.working_refs.values())
-            planned = {a.target for a in plan.actions if a.op == "delete-branch"}
-            systems_seen: set[str] = set()
-            for key in sorted(self.objects):
-                m = self.objects[key]
-                backend = self.backend_for(m.kind)
-                eff = effective_capabilities(backend, m.locator, m.policy)
-                if Capability.FORK not in eff:
-                    continue
-                sys_key = key_for(backend, m.locator)
-                if sys_key in systems_seen:
-                    continue
-                systems_seen.add(sys_key)
-                for ref in sorted(backend.list_working_refs(m.locator)):
-                    ws = working_ref_workspace(ref)
-                    if ws is None or ref in planned:
-                        continue
-                    if ws == mine:
-                        if ref in in_use:
-                            continue
-                        detail = "this workspace's branch; no object uses it"
-                    elif ws in keep_ids:
-                        continue
-                    else:
-                        detail = f"working branch of workspace {ws} (not kept)"
-                    plan.actions.append(
-                        Action(
-                            "delete-branch",
-                            key,
-                            m.kind,
-                            target=ref,
-                            detail=detail,
-                            params={"locator": m.locator},
-                        )
-                    )
+            self._plan_prune_workspaces(
+                plan,
+                [*all_manifests, *self.objects.values()],
+                key_for,
+                keep_workspaces or set(),
+                force_prune,
+            )
 
         # Listings no manifest (in history or the working tree) names.
         wanted: set[str] = set()
@@ -1307,12 +1270,132 @@ class Repo:
                 )
         return plan
 
+    def _plan_prune_workspaces(
+        self,
+        plan: Plan,
+        manifests: list[ObjectManifest],
+        key_for: Callable[[ObjectBackend, dict], str],
+        keep_workspaces: set[str],
+        force: bool,
+    ) -> None:
+        """Add `delete-branch` / `keep-branch` actions for stray `tether.ws.*` branches.
+
+        A branch is safe to delete when its head state is natively pinned by
+        some manifest (a tag holds everything on it) or equals the base
+        branch's head (nothing was written). Anything else -- unpinned writes,
+        a state that is only *recorded* (`pin = "record"`), or a backend whose
+        branches are the storage itself -- is kept unless ``force``.
+        """
+        mine = self.workspace.workspace_id[:8]
+        keep_ids = {w[:8] for w in keep_workspaces} | {mine}
+        in_use = {
+            ref
+            for key, ref in self.workspace.working_refs.items()
+            if key in self.objects
+        }
+
+        # States that hold data per system: pinned (safe) vs merely recorded.
+        pinned: dict[str, list[State]] = {}
+        recorded: dict[str, list[State]] = {}
+        for m in manifests:
+            if m.state is None:
+                continue
+            sys_key = key_for(self.backend_for(m.kind), m.locator)
+            bucket = pinned if m.pin is not None else recorded
+            if m.state not in bucket.setdefault(sys_key, []):
+                bucket[sys_key].append(m.state)
+
+        systems_seen: set[str] = set()
+        for key in sorted(self.objects):
+            m = self.objects[key]
+            backend = self.backend_for(m.kind)
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            if Capability.FORK not in eff:
+                continue
+            sys_key = key_for(backend, m.locator)
+            if sys_key in systems_seen:
+                continue
+            systems_seen.add(sys_key)
+            storage = Capability.BRANCH_IS_STORAGE in eff
+            base_head: State | None = None
+            for ref in sorted(backend.list_working_refs(m.locator)):
+                ws = working_ref_workspace(ref)
+                if ws is None:
+                    continue
+                if ws == mine:
+                    if ref in in_use:
+                        continue
+                    origin = "this workspace's branch; no object uses it"
+                elif ws in keep_ids:
+                    continue
+                else:
+                    origin = f"workspace {ws} (not kept)"
+
+                # Why deleting would be safe -- or why it would not.
+                reason: str | None = None
+                safe = ""
+                if storage:
+                    reason = "branch is storage; deleting reclaims its data"
+                else:
+                    try:
+                        head = backend.fingerprint(m.locator, ref)
+                        if base_head is None:
+                            base_head = backend.fingerprint(m.locator, None)
+                    except TetherError as exc:
+                        head, reason = None, f"cannot read head: {exc}"
+                    if head is not None:
+                        if head in pinned.get(sys_key, []):
+                            safe = "head is pinned"
+                        elif head == base_head:
+                            safe = "head equals the base branch"
+                        elif head in recorded.get(sys_key, []):
+                            reason = (
+                                "holds a pin-less recorded state "
+                                f"({_short_state(head)})"
+                            )
+                        else:
+                            reason = f"has unpinned writes ({_short_state(head)})"
+
+                if reason is None:
+                    plan.actions.append(
+                        Action(
+                            "delete-branch",
+                            key,
+                            m.kind,
+                            target=ref,
+                            detail=f"{origin}; {safe}",
+                            params={"locator": m.locator},
+                        )
+                    )
+                elif force:
+                    plan.actions.append(
+                        Action(
+                            "delete-branch",
+                            key,
+                            m.kind,
+                            target=ref,
+                            detail=f"{origin}; FORCED although it {reason}",
+                            params={"locator": m.locator, "forced": True},
+                        )
+                    )
+                else:
+                    plan.actions.append(
+                        Action(
+                            "keep-branch",
+                            key,
+                            m.kind,
+                            target=ref,
+                            detail=f"{origin}; kept: {reason} (--force-prune deletes)",
+                        )
+                    )
+
     def apply_gc(self, plan: Plan) -> GcReport:
         """Execute a plan from `plan_gc`.
 
         Unpins, deletes branches, forgets working refs, and deletes listings as
-        planned. Backend failures are aggregated into `MultiObjectError` after
-        every action has been attempted.
+        planned (`keep-branch` actions are reported, not executed). Backend
+        failures are aggregated into `MultiObjectError` after every action has
+        been attempted.
         """
         if plan.command != "gc":
             raise ConfigError(f"expected a gc plan, got {plan.command!r}")
@@ -1329,14 +1412,13 @@ class Repo:
                 elif a.op == "forget-working-ref":
                     self.workspace.working_refs.pop(a.key, None)
                     forgot = True
-                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                    report.forgotten_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "delete-branch":
                     backend = self.backend_for(a.kind)
                     backend.delete_working_ref(dict(a.params["locator"]), a.target)
-                    if a.params.get("forget"):
-                        self.workspace.working_refs.pop(a.key, None)
-                        forgot = True
                     report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "keep-branch":
+                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "delete-listing":
                     (listings_dir(self.root) / a.target).unlink(missing_ok=True)
                     report.deleted_listings.append(a.target)
@@ -1354,22 +1436,29 @@ class Repo:
         dry_run: bool = True,
         prune_workspaces: bool = False,
         keep_workspaces: set[str] | None = None,
+        force_prune: bool = False,
     ) -> GcReport:
         """Release native pins that no manifest in VCS history references.
 
         Equivalent to `plan_gc` followed by `apply_gc` unless `dry_run`. Also
-        drops this workspace's working refs for removed objects, deletes
-        `.tether/listings/` files no manifest names, and with
-        `prune_workspaces` deletes `tether.ws.*` branches of other workspaces
-        (except `keep_workspaces`).
+        forgets this workspace's working refs for removed objects and deletes
+        `.tether/listings/` files no manifest names. With `prune_workspaces`,
+        stray `tether.ws.*` branches (other workspaces' except
+        `keep_workspaces`, and this workspace's unused ones) are deleted when
+        their head is pinned or equals the base head, and kept otherwise unless
+        `force_prune`.
 
         Args:
             dry_run: Only report what would be released (the report carries the plan).
-            prune_workspaces: Also delete other workspaces' working branches.
+            prune_workspaces: Also evaluate stray working branches.
             keep_workspaces: Workspace ids (or 8-char prefixes) to leave alone.
+            force_prune: Delete stray branches even if they hold unpinned data
+                (or belong to a `BRANCH_IS_STORAGE` backend).
         """
         plan = self.plan_gc(
-            prune_workspaces=prune_workspaces, keep_workspaces=keep_workspaces
+            prune_workspaces=prune_workspaces,
+            keep_workspaces=keep_workspaces,
+            force_prune=force_prune,
         )
         if dry_run:
             report = GcReport(dry_run=True, plan=plan)
@@ -1378,8 +1467,12 @@ class Repo:
                     report.unpinned.setdefault(a.kind, []).append(
                         str(a.params["pin_id"])
                     )
-                elif a.op in ("forget-working-ref", "delete-branch"):
+                elif a.op == "forget-working-ref":
+                    report.forgotten_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "delete-branch":
                     report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "keep-branch":
+                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "delete-listing":
                     report.deleted_listings.append(a.target)
             return report

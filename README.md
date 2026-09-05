@@ -94,8 +94,8 @@ tether add old/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --pick 
 tether verify --all-history --deep
 tether commit -m "..." --dry-run    # every store-writing command plans first; --plan/--from-plan save + apply
 tether add scratch/feat s3://bucket/feat.lance --kind lance --pin record   # no tag per commit; fork from the recorded state
-tether gc                           # dry run: pins no commit references, orphaned listings
-tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # drop dead workspaces' tether.ws.* branches
+tether gc                           # dry run: pins no commit references, orphaned listings (never branches)
+tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned; --force-prune for the rest
 ```
 
 Python:

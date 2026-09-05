@@ -37,7 +37,7 @@ Common conventions:
 | --- | --- | --- | --- |
 | `file` | -- (local) / `objectstore` | Observed; Addressable for a versioned object | `CHEAP_FINGERPRINT`, `DIFF` |
 | `icechunk` | `icechunk` | Forkable | `ATOMIC_REF`, `DIFF` |
-| `neon` | `neon` | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND` |
+| `neon` | `neon` | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
 | `git` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` |
 | `iceberg` | `iceberg` | Forkable | `RETENTION_BOUND`, `DIFF` |
 | `delta` | `delta` | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
@@ -97,7 +97,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Quiescence | `commit` refuses while `pg_stat_activity` shows active writers (`--force` skips) |
 | Handle | `NeonHandle(url, branch)` -- a Postgres connection URL |
 | Diff | not supported (no native primitive) |
-| Notes | pins are branches, so a working branch cannot be deleted while its pins exist; `gc` only drops leaf pins; Neon cannot merge a child back into `main` -- use `--write track` for production. `protected` requires a paid plan. Fingerprinting may wake a suspended compute; use `--no-snapshot` when that matters. |
+| Notes | pins are branches, so a working branch cannot be deleted while its pins exist; `gc` only drops leaf pins. Branches *are* the storage (`BRANCH_IS_STORAGE`): `gc --prune-workspaces` never deletes a Neon working branch without `--force-prune`. Neon cannot merge a child back into `main` -- use `--write track` for production. `protected` requires a paid plan. Fingerprinting may wake a suspended compute; use `--no-snapshot` when that matters. |
 
 ## `git` -- git and jj repositories
 

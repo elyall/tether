@@ -682,6 +682,13 @@ def gc(
         help="Workspace id (or 8-char prefix) whose branches --prune-workspaces "
         "must keep; repeatable. This workspace is always kept.",
     ),
+    force_prune: bool = typer.Option(
+        False,
+        "--force-prune",
+        help="With --prune-workspaces: delete stray branches even when they hold "
+        "unpinned writes, a pin-less recorded state, or are the storage itself "
+        "(Neon). Data on them is lost.",
+    ),
     plan_out: Path | None = typer.Option(
         None, "--plan", help="Write the plan to FILE (implies --dry-run)."
     ),
@@ -692,11 +699,15 @@ def gc(
 ) -> None:
     """Release native pins that no manifest in VCS history references.
 
-    Also deletes this workspace's working branches for removed objects,
-    unreferenced listings, and with `--prune-workspaces` the working branches
-    of workspaces that no longer exist. Dry-run by default: pass `--no-dry-run`
-    (or `--from-plan`) to release.
+    Also forgets this workspace's refs for removed objects and deletes
+    unreferenced listings. `--prune-workspaces` evaluates stray
+    `tether.ws.*` branches (other workspaces' and this one's unused): a branch
+    is deleted only if its head is pinned or equals the base head, otherwise
+    kept -- `--force-prune` deletes those too. Dry-run by default: pass
+    `--no-dry-run` (or `--from-plan`) to release.
     """
+    if force_prune and not prune_workspaces:
+        _fail(TetherError("--force-prune requires --prune-workspaces"))
     repo = _repo()
     try:
         if from_plan is not None:
@@ -706,6 +717,7 @@ def gc(
             plan = repo.plan_gc(
                 prune_workspaces=prune_workspaces,
                 keep_workspaces=set(keep_workspace) or None,
+                force_prune=force_prune,
             )
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
@@ -720,6 +732,8 @@ def gc(
                 "dry_run": report.dry_run,
                 "unpinned": report.unpinned,
                 "deleted_working_refs": report.deleted_working_refs,
+                "kept_working_refs": report.kept_working_refs,
+                "forgotten_working_refs": report.forgotten_working_refs,
                 "deleted_listings": report.deleted_listings,
             },
             as_json=True,
@@ -736,6 +750,19 @@ def gc(
         for key, refs in report.deleted_working_refs.items():
             for ref in refs:
                 typer.echo(f"  {key}: {ref}")
+    kept = sum(len(v) for v in report.kept_working_refs.values())
+    if kept:
+        typer.secho(
+            f"kept {kept} working branch(es) holding unpinned data "
+            f"(--force-prune deletes)",
+            fg=typer.colors.YELLOW,
+        )
+        for key, refs in report.kept_working_refs.items():
+            for ref in refs:
+                typer.echo(f"  {key}: {ref}")
+    forgotten = sum(len(v) for v in report.forgotten_working_refs.values())
+    if forgotten:
+        typer.echo(f"forgot {forgotten} working ref(s) of removed object(s)")
     if report.deleted_listings:
         typer.echo(f"deleted {len(report.deleted_listings)} orphan listing(s)")
 

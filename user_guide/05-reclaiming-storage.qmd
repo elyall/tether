@@ -187,9 +187,22 @@ Those are the system's operations, not tether's.
 Every workspace forks its own `tether.ws.<id>.<key>` branch per Forkable
 object. Workspaces that were forgotten, machines that were wiped, and
 `jj workspace forget` all leave those branches behind -- each one holding
-whatever it wrote. `--prune-workspaces` lists the `tether.ws.*` branches in
-each system and deletes the ones whose workspace id is not this one's and not
-on the keep list:
+whatever it wrote. By default `gc` never deletes a branch: it releases tether's
+*refs* (tags) and leaves data reclamation to each system, so a branch you
+forgot about is never the reason data disappears.
+
+`--prune-workspaces` opts in. It lists the `tether.ws.*` branches in each
+system, skips this workspace's live ones and any on the keep list, and for
+each remaining branch reads its head and asks whether deleting it would lose
+anything:
+
+| Head state | Decision |
+| --- | --- |
+| natively pinned by some commit (a tag holds it) | `delete-branch` |
+| equal to the base branch's head (nothing was ever written) | `delete-branch` |
+| has writes no commit pinned | `keep-branch` |
+| a `--pin record` state (only this branch keeps it reachable) | `keep-branch` |
+| on a backend whose branches *are* the storage (Neon) | `keep-branch` |
 
 ```bash
 jj workspace list                 # the ids of workspaces still alive
@@ -197,15 +210,27 @@ tether gc --prune-workspaces --keep-workspace 3f9c2a1b --keep-workspace 7e21d0ab
 ```
 
 ```
-plan: gc (2 write(s))
-       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging  working branch of workspace c0ffee42 (not kept)
-       delete-branch  features      [lance] tether.ws.c0ffee42.features  working branch of workspace c0ffee42 (not kept)
+plan: gc (1 write(s))
+       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging  workspace c0ffee42 (not kept); head is pinned
+         keep-branch  features      [lance] tether.ws.c0ffee42.features  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
+         keep-branch  db/metrics    [neon] tether.ws.c0ffee42.db-metrics  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
 ```
 
-Add `--no-dry-run` to delete them. Branches of `tether remove`d objects are
-handled without the flag: the working ref stays in `.tether/workspace.toml`
-until `gc` deletes the native branch and forgets it. (Lance refuses to delete
-a branch that a tag still points at; tether leaves it and moves on.)
+Add `--no-dry-run` to apply. The kept branches are the decision that is yours
+to make: pin what is on them (`tether add ... --at`, then `commit`), or decide
+the data is disposable and pass `--force-prune`, which deletes every stray
+branch regardless -- the plan marks those `FORCED although it has unpinned
+writes` so the loss is explicit before it happens:
+
+```bash
+tether gc --prune-workspaces --keep-workspace 3f9c2a1b --force-prune --no-dry-run
+```
+
+`tether remove` never deletes anything either: it leaves the object's working
+ref in `.tether/workspace.toml`, a plain `gc` forgets the ref, and the branch
+itself is evaluated by the next `--prune-workspaces` like any other stray.
+(Lance refuses to delete a branch a tag still points at; tether leaves it and
+moves on.)
 
 ## Recap
 
@@ -215,6 +240,8 @@ a branch that a tag still points at; tether leaves it and moves on.)
   recorded state; cheaper, retention-bound.
 - Drop commits with `jj squash` / `jj abandon` / `git rebase -i`; tether reads
   the VCS's idea of history, so what you cannot see it does not protect.
-- `gc` releases orphaned pins and listings; `--prune-workspaces` deletes
-  working branches of workspaces that are gone; reclaiming the bytes is the
-  system's own expiry/cleanup step.
+- `gc` releases orphaned pins and listings and never deletes a branch on its
+  own; `--prune-workspaces` deletes dead workspaces' branches only when a tag
+  already holds their head (or nothing was written), `--force-prune` deletes
+  them regardless; reclaiming the bytes is the system's own expiry/cleanup
+  step.

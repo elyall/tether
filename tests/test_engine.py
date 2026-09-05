@@ -432,48 +432,129 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
     assert {a.key for a in plan_at.actions} == {"db", "tracked"}
 
 
-def test_gc_prunes_other_workspaces_and_removed_objects(vcs_root: Path) -> None:
+def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    s1 = store.write(system, "main", {"v": 1})
+    repo.commit("baseline")  # pins s1
+    s2 = store.write(system, "main", {"v": 2})
+    repo.commit("update")  # pins s2; main head is s2
+    repo.new()
+    mine = repo.workspace.working_refs["db"]
+    branches = store.system(system).branches
+    s3 = store.write(system, "main", {"v": 3})  # main moved on; s3 is not pinned
+
+    # Stray branches of dead workspaces, in every situation the rule covers.
+    branches["tether.ws.aaaa0001.db"] = s3  # equals base head: safe
+    branches["tether.ws.aaaa0002.db"] = s1  # pinned by the first commit: safe
+    branches["tether.ws.aaaa0003.db"] = s2
+    store.write(system, "tether.ws.aaaa0003.db", {"v": 99})  # unpinned writes: keep
+    branches["tether.ws.cafef00d.db"] = s2  # live workspace: never considered
+    branches["feature-x"] = s2  # not a tether branch: never considered
+
+    # Default gc never touches branches.
+    plan = repo.plan_gc()
+    assert not [a for a in plan.actions if a.op in ("delete-branch", "keep-branch")]
+
+    plan = repo.plan_gc(prune_workspaces=True, keep_workspaces={"cafef00d"})
+    by_ref = {a.target: a for a in plan.actions if a.op.endswith("-branch")}
+    assert by_ref["tether.ws.aaaa0001.db"].op == "delete-branch"
+    assert "equals the base branch" in by_ref["tether.ws.aaaa0001.db"].detail
+    assert by_ref["tether.ws.aaaa0002.db"].op == "delete-branch"
+    assert "head is pinned" in by_ref["tether.ws.aaaa0002.db"].detail
+    assert by_ref["tether.ws.aaaa0003.db"].op == "keep-branch"
+    assert "unpinned writes" in by_ref["tether.ws.aaaa0003.db"].detail
+    assert "tether.ws.cafef00d.db" not in by_ref and "feature-x" not in by_ref
+    assert mine not in by_ref  # in use by this workspace
+    assert len(plan.writes) == 2  # keep-branch is not a write
+
+    report = repo.gc(dry_run=False, prune_workspaces=True, keep_workspaces={"cafef00d"})
+    assert "tether.ws.aaaa0001.db" not in branches
+    assert "tether.ws.aaaa0002.db" not in branches
+    assert "tether.ws.aaaa0003.db" in branches  # kept: has data
+    assert "tether.ws.cafef00d.db" in branches and "feature-x" in branches
+    assert mine in branches
+    assert report.kept_working_refs == {"db": ["tether.ws.aaaa0003.db"]}
+
+    # --force-prune deletes the one with data too, and says so.
+    plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
+    (forced,) = [a for a in plan.actions if a.target == "tether.ws.aaaa0003.db"]
+    assert forced.op == "delete-branch" and forced.params["forced"] is True
+    assert "FORCED" in forced.detail
+    repo.apply_gc(plan)
+    assert "tether.ws.aaaa0003.db" not in branches
+    assert "tether.ws.cafef00d.db" not in branches  # no keep list this time
+    assert mine in branches
+
+
+def test_gc_keeps_pinless_recorded_states_and_storage_branches(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tether.backends.base import Capability
+
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    repo.add(
+        "db",
+        "memory",
+        {"system": system, "branch": "main"},
+        policy=Policy(pin="record"),
+    )
+    repo.commit("baseline")  # records s1, no tag
+    store.write(system, "main", {"v": 2})
+    repo.commit("update")  # records s2; main head is s2
+    branches = store.system(system).branches
+    branches["tether.ws.aaaa0001.db"] = s1  # the only thing keeping s1 alive
+
+    plan = repo.plan_gc(prune_workspaces=True)
+    (a,) = [x for x in plan.actions if x.target == "tether.ws.aaaa0001.db"]
+    assert a.op == "keep-branch" and "pin-less recorded state" in a.detail
+
+    # A backend whose branches *are* the storage is never pruned without force.
+    backend = repo.backend_for("memory")
+    monkeypatch.setattr(
+        backend, "capabilities", backend.capabilities | Capability.BRANCH_IS_STORAGE
+    )
+    branches["tether.ws.aaaa0002.db"] = branches["main"]  # would otherwise be safe
+    plan = repo.plan_gc(prune_workspaces=True)
+    ops = {x.target: x for x in plan.actions if x.op.endswith("-branch")}
+    assert ops["tether.ws.aaaa0002.db"].op == "keep-branch"
+    assert "branch is storage" in ops["tether.ws.aaaa0002.db"].detail
+    plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
+    assert all(
+        x.op == "delete-branch" for x in plan.actions if x.op.endswith("-branch")
+    )
+
+
+def test_gc_forgets_removed_objects_refs_without_deleting(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
     repo.new()
     mine = repo.workspace.working_refs["db"]
-    sid = store.system(system).branches["main"]
-    # Branches left behind by two other workspaces (one we still want).
-    store.system(system).branches["tether.ws.deadbeef.db"] = sid
-    store.system(system).branches["tether.ws.cafef00d.db"] = sid
-    store.system(system).branches["feature-x"] = sid  # not ours; never touched
 
-    plan = repo.plan_gc()
-    assert not [a for a in plan.actions if a.op == "delete-branch"]
-
-    plan = repo.plan_gc(prune_workspaces=True, keep_workspaces={"cafef00d"})
-    deletes = [a.target for a in plan.actions if a.op == "delete-branch"]
-    assert deletes == ["tether.ws.deadbeef.db"]
-
-    report = repo.gc(dry_run=True, prune_workspaces=True)
-    assert set(report.deleted_working_refs["db"]) == {
-        "tether.ws.deadbeef.db",
-        "tether.ws.cafef00d.db",
-    }
-    assert "tether.ws.deadbeef.db" in store.system(system).branches  # dry run
-
-    report = repo.gc(dry_run=False, prune_workspaces=True, keep_workspaces={"cafef00d"})
-    branches = store.system(system).branches
-    assert "tether.ws.deadbeef.db" not in branches
-    assert "tether.ws.cafef00d.db" in branches and mine in branches
-    assert "feature-x" in branches
-    assert report.deleted_working_refs == {"db": ["tether.ws.deadbeef.db"]}
-
-    # Removing the object: its working branch is deleted and forgotten.
     repo.remove("db")
+    assert repo.workspace.working_refs["db"] == mine  # kept for gc to find
     plan = repo.plan_gc()
-    (delete,) = [a for a in plan.actions if a.op == "delete-branch"]
-    assert delete.target == mine and delete.params["forget"] is True
-    repo.apply_gc(plan)
-    assert mine not in store.system(system).branches
+    (forget,) = [a for a in plan.actions if a.op == "forget-working-ref"]
+    assert forget.target == mine
+    assert not [a for a in plan.actions if a.op == "delete-branch"]
+    report = repo.apply_gc(plan)
+    assert report.forgotten_working_refs == {"db": [mine]}
     assert "db" not in repo.workspace.working_refs
+    assert mine in store.system(system).branches  # the branch itself survives
+
+    # Re-register the object: the stray branch becomes this workspace's orphan
+    # and --prune-workspaces evaluates it like any other.
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    plan = repo.plan_gc(prune_workspaces=True)
+    (a,) = [x for x in plan.actions if x.target == mine]
+    assert a.op == "delete-branch" and "no object uses it" in a.detail
 
 
 def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
