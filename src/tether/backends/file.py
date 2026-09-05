@@ -1,15 +1,26 @@
 """File / object-store backend.
 
-Handles plain artifacts on local disk or in S3 (single object or prefix). It is
-Observed by default -- fingerprint and drift detection only -- and Addressable
-when pointed at an S3 object in a versioning-enabled bucket (the recorded
-``version_id`` can be read back later). It never creates or forks refs.
+Handles plain artifacts on local disk or in an object store -- S3, GCS, or Azure
+Blob, as a single object or a prefix -- through `obstore`_ (one Rust client for
+all three clouds). It is Observed by default -- fingerprint and drift detection
+only -- and Addressable when pointed at a single object in a versioning-enabled
+bucket/container with ``--file versioned`` (the recorded ``version_id`` -- an S3
+version id, GCS generation, or Azure version id -- can be read back later). It
+never creates or forks refs.
+
+Fingerprints are metadata-only: a local walk (``os.scandir`` + ``stat``), one
+``HEAD`` for a remote object, or one paged ``LIST`` for a prefix (etag + size per
+object, no per-object round-trips).
+
+.. _obstore: https://developmentseed.org/obstore/
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from tether.backends.base import (
@@ -23,14 +34,24 @@ from tether.errors import BackendError, CapabilityError
 from tether.handles import FileHandle, Handle
 from tether.manifest import Locator, Pin, Policy, State
 
+# URL schemes obstore understands, normalized to the store they select.
+_REMOTE_SCHEMES = frozenset(
+    {"s3", "s3a", "gs", "gcs", "az", "azure", "abfs", "abfss", "adl", "http", "https"}
+)
+
 
 def _parse(uri: str) -> tuple[str, str, str]:
-    """Return ``(scheme, bucket_or_root, key_or_path)``."""
+    """Return ``(scheme, store_root_url, key_or_path)``.
+
+    ``scheme`` is ``"local"`` for filesystem paths; otherwise the URL scheme. The
+    store root is the URL without its path, so keys are always full object keys.
+    """
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         return "local", "", parsed.path or uri
-    if parsed.scheme == "s3":
-        return "s3", parsed.netloc, parsed.path.lstrip("/")
+    if parsed.scheme in _REMOTE_SCHEMES:
+        root = f"{parsed.scheme}://{parsed.netloc}"
+        return parsed.scheme, root, parsed.path.lstrip("/")
     raise BackendError(f"unsupported file URI scheme: {parsed.scheme!r}", kind="file")
 
 
@@ -44,6 +65,32 @@ def _digest_pairs(pairs: list[tuple[str, str]]) -> str:
     return h.hexdigest()
 
 
+def _strip_etag(etag: object) -> str:
+    return str(etag or "").strip('"')
+
+
+def _walk_files(root: Path) -> list[tuple[str, int, int]]:
+    """Return ``(relative posix path, size, mtime_ns)`` for every file under root.
+
+    ``os.scandir`` reuses the directory entry's cached type information and is
+    ~7x cheaper per entry than ``Path.rglob`` + ``stat``. Symlinked directories
+    are not followed (matching ``rglob``); symlinked files are stat'ed through.
+    """
+    out: list[tuple[str, int, int]] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        with os.scandir(current) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                elif entry.is_file():
+                    st = entry.stat()
+                    rel = Path(entry.path).relative_to(root).as_posix()
+                    out.append((rel, st.st_size, st.st_mtime_ns))
+    return out
+
+
 class FileBackend(ObjectBackend):
     kind = "file"
     capabilities = (
@@ -52,7 +99,7 @@ class FileBackend(ObjectBackend):
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
-        self._s3_client = None
+        self._stores: dict[str, Any] = {}
 
     # -- capability refinement ------------------------------------------ #
     def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
@@ -68,76 +115,93 @@ class FileBackend(ObjectBackend):
             raise BackendError("file locator needs 'uri'", kind="file")
         return str(uri)
 
-    def _s3(self):
-        if self._s3_client is None:
-            try:
-                import boto3
-            except ImportError as exc:  # pragma: no cover - optional dep
-                raise BackendError(
-                    "the s3 extra is required for s3:// file objects "
-                    "(`pip install tether[s3]`)",
-                    kind="file",
-                ) from exc
-            self._s3_client = boto3.client("s3")
-        return self._s3_client
+    def _obstore(self):
+        try:
+            import obstore
+        except ImportError as exc:  # pragma: no cover - optional dep
+            raise BackendError(
+                "the objectstore extra is required for remote file objects "
+                "(`pip install tether[objectstore]`)",
+                kind="file",
+            ) from exc
+        return obstore
+
+    def _open_store(self, root: str, locator: Locator) -> Any:
+        """Build an obstore store for ``root`` (e.g. ``s3://bucket``).
+
+        Credentials come from the environment / instance metadata, never from
+        manifests. ``[backends.file] storage_options`` in ``tether.toml`` is
+        passed through verbatim (region, endpoint, account name, ...); a locator
+        ``region`` overrides it. Tests replace this seam with an in-memory store.
+        """
+        from obstore.store import from_url
+
+        options: dict[str, Any] = dict(self._config.get("storage_options") or {})
+        region = locator.get("region")
+        if region:
+            options["region"] = str(region)
+        return from_url(root, **options)
+
+    def _store(self, root: str, locator: Locator) -> Any:
+        store = self._stores.get(root)
+        if store is None:
+            self._obstore()  # surface a clear error before touching the store
+            store = self._open_store(root, locator)
+            self._stores[root] = store
+        return store
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
         return {"uri": self._uri(locator)}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
-        scheme, bucket, path = _parse(self._uri(locator))
+        scheme, root, path = _parse(self._uri(locator))
         if scheme == "local":
             return self._fingerprint_local(Path(path))
-        return self._fingerprint_s3(bucket, path)
+        return self._fingerprint_remote(self._store(root, locator), path)
 
     def _fingerprint_local(self, path: Path) -> State:
         if not path.exists():
             raise BackendError(f"path does not exist: {path}", kind="file")
         if path.is_dir():
-            pairs: list[tuple[str, str]] = []
-            total = 0
-            for child in sorted(path.rglob("*")):
-                if child.is_file():
-                    st = child.stat()
-                    rel = child.relative_to(path).as_posix()
-                    pairs.append((rel, f"{st.st_size}:{st.st_mtime_ns}"))
-                    total += st.st_size
+            entries = _walk_files(path)
+            pairs = [(rel, f"{size}:{mtime}") for rel, size, mtime in entries]
             return {
                 "type": "dir",
-                "count": len(pairs),
-                "size": total,
+                "count": len(entries),
+                "size": sum(size for _, size, _ in entries),
                 "digest": _digest_pairs(pairs),
             }
         st = path.stat()
         return {"type": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
-    def _fingerprint_s3(self, bucket: str, key: str) -> State:
-        client = self._s3()
+    def _fingerprint_remote(self, store: Any, key: str) -> State:
+        obs = self._obstore()
         if key.endswith("/") or key == "":
-            paginator = client.get_paginator("list_objects_v2")
             pairs: list[tuple[str, str]] = []
             total = 0
-            for page in paginator.paginate(Bucket=bucket, Prefix=key):
-                for obj in page.get("Contents", []):
-                    etag = obj["ETag"].strip('"')
-                    pairs.append((obj["Key"], etag))
-                    total += obj["Size"]
+            for page in obs.list(store, prefix=key or None):
+                for meta in page:
+                    pairs.append((str(meta["path"]), _strip_etag(meta.get("e_tag"))))
+                    total += int(meta["size"])
             return {
                 "type": "prefix",
                 "count": len(pairs),
                 "size": total,
                 "digest": _digest_pairs(pairs),
             }
-        head = client.head_object(Bucket=bucket, Key=key)
+        try:
+            meta = obs.head(store, key)
+        except FileNotFoundError as exc:
+            raise BackendError(f"object does not exist: {key}", kind="file") from exc
         state: State = {
             "type": "object",
-            "size": head["ContentLength"],
-            "etag": head["ETag"].strip('"'),
+            "size": int(meta["size"]),
+            "etag": _strip_etag(meta.get("e_tag")),
         }
-        version_id = head.get("VersionId")
-        if version_id and version_id != "null":
-            state["version_id"] = version_id
+        version = meta.get("version")
+        if version and version != "null":
+            state["version_id"] = str(version)
         return state
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
@@ -162,16 +226,26 @@ class FileBackend(ObjectBackend):
                 return VerifyReport(
                     VerifyStatus.UNKNOWN, "pass --deep to confirm the version"
                 )
-            scheme, bucket, key = _parse(self._uri(locator))
-            if scheme != "s3":  # pragma: no cover - defensive
+            scheme, root, key = _parse(self._uri(locator))
+            if scheme == "local":  # pragma: no cover - defensive
                 return VerifyReport(VerifyStatus.UNKNOWN)
+            obs = self._obstore()
             try:
-                self._s3().head_object(
-                    Bucket=bucket, Key=key, VersionId=str(version_id)
+                result = obs.get(
+                    self._store(root, locator),
+                    key,
+                    options={"version": str(version_id), "head": True},
                 )
-                return VerifyReport(VerifyStatus.OK)
-            except Exception as exc:
+            except FileNotFoundError as exc:
                 return VerifyReport(VerifyStatus.MISSING, str(exc))
+            except Exception as exc:  # obstore.exceptions.BaseError and friends
+                return VerifyReport(VerifyStatus.UNKNOWN, str(exc))
+            etag = _strip_etag(result.meta.get("e_tag"))
+            if state.get("etag") and etag and etag != state["etag"]:
+                return VerifyReport(
+                    VerifyStatus.DRIFTED, f"version {version_id} has etag {etag}"
+                )
+            return VerifyReport(VerifyStatus.OK)
         # Observed: compare the current fingerprint to the recorded one.
         try:
             current = self.fingerprint(locator, None)
