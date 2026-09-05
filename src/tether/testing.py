@@ -114,7 +114,15 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     h.mutate(loc, wref)
     assert b.fingerprint(loc, wref) != forked, "writes to a fork must register"
     assert b.fingerprint(loc, None) == base_before, "fork must isolate the base"
+    listed = b.list_working_refs(loc)
+    assert wref in listed, f"list_working_refs must include {wref!r} (got {listed})"
     b.delete_working_ref(loc, wref)
+    assert wref not in b.list_working_refs(loc), "deleted working ref still listed"
+    # Pin-less fork: straight from the recorded state (policy.pin = "record").
+    name2 = working_ref_name("ws012345", "conformance/pinless")
+    wref2 = b.fork(loc, state, name2)
+    assert b.fingerprint(loc, wref2) == state, "fork from state must start there"
+    b.delete_working_ref(loc, wref2)
 
 
 def _addressable_checks(h: BackendHarness, loc: Locator, state: dict) -> None:

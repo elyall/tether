@@ -35,7 +35,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, LakeFSHandle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 MAIN = "main"
 
@@ -219,21 +219,28 @@ class LakeFSBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, str(exc))
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         repo = self._repo(locator)
-        target = self._tag_commit(repo, pin.ref)
-        if target is None:
-            raise BackendError(f"tag {pin.ref} missing; cannot fork", kind="lakefs")
+        if isinstance(source, Pin):
+            target = self._tag_commit(repo, source.ref)
+            if target is None:
+                raise BackendError(
+                    f"tag {source.ref} missing; cannot fork", kind="lakefs"
+                )
+            origin = source.ref
+        else:
+            # Recorded state (no tag): fork straight from the commit id.
+            origin = target = str(source["commit_id"])
         branch = repo.branch(name)
         try:
-            branch.create(source_reference=pin.ref, exist_ok=True)
+            branch.create(source_reference=origin, exist_ok=True)
             if str(branch.get_commit().id) != target:
-                # Reset semantics, like icechunk: recreate at the pin.
+                # Reset semantics, like icechunk: recreate at the source.
                 branch.delete()
-                branch.create(source_reference=pin.ref)
+                branch.create(source_reference=origin)
         except self._errors() as exc:
             raise BackendError(
-                f"cannot create lakefs branch {name} from {pin.ref}: {exc}",
+                f"cannot create lakefs branch {name} from {origin}: {exc}",
                 kind="lakefs",
             ) from exc
         return name
@@ -243,6 +250,14 @@ class LakeFSBackend(ObjectBackend):
             return
         with contextlib.suppress(*self._errors()):
             self._repo(locator).branch(ref).delete()
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        repo = self._repo(locator)
+        return sorted(
+            str(b.id)
+            for b in repo.branches(prefix=WORKING_REF_PREFIX)
+            if str(b.id).startswith(WORKING_REF_PREFIX)
+        )
 
     def _uri(self, locator: Locator, ref: str) -> str:
         prefix = self._prefix(locator)

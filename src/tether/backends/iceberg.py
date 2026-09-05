@@ -26,7 +26,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcebergHandle
-from tether.manifest import Locator, Pin, Policy, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, Policy, State, ref_for_pin
 
 
 class IcebergBackend(ObjectBackend):
@@ -208,12 +208,16 @@ class IcebergBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.MISSING, f"snapshot {sid} expired/absent")
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         table = self._table(locator)
-        ref = self._refs(table).get(pin.ref)
-        if ref is None:
-            raise BackendError(f"pin {pin.ref} missing", kind="iceberg")
-        sid = int(ref.snapshot_id)
+        if isinstance(source, Pin):
+            ref = self._refs(table).get(source.ref)
+            if ref is None:
+                raise BackendError(f"pin {source.ref} missing", kind="iceberg")
+            sid = int(ref.snapshot_id)
+        else:
+            # Recorded state (no tag): the snapshot must not have been expired.
+            sid = self._resolve(table, str(source["snapshot_id"]))
         if name in self._refs(table):
             return name
         with table.manage_snapshots() as ms:
@@ -228,6 +232,16 @@ class IcebergBackend(ObjectBackend):
             return
         with table.manage_snapshots() as ms:
             ms.remove_branch(ref)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        from pyiceberg.table.refs import SnapshotRefType
+
+        return sorted(
+            name
+            for name, ref in self._refs(self._table(locator)).items()
+            if name.startswith(WORKING_REF_PREFIX)
+            and ref.snapshot_ref_type == SnapshotRefType.BRANCH
+        )
 
     def open(
         self,

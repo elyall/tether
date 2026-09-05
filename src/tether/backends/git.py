@@ -26,7 +26,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import GitHandle, Handle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
 class GitBackend(ObjectBackend):
@@ -185,8 +185,9 @@ class GitBackend(ObjectBackend):
             )
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
-        sha = self._run(locator, "rev-parse", "--verify", f"{pin.ref}^{{commit}}")
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+        ref = source.ref if isinstance(source, Pin) else str(source["sha"])
+        sha = self._run(locator, "rev-parse", "--verify", f"{ref}^{{commit}}")
         exists = self._run(
             locator,
             "rev-parse",
@@ -203,6 +204,15 @@ class GitBackend(ObjectBackend):
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         self._run(locator, "branch", "-D", ref, check=False)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        out = self._run(
+            locator,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            f"refs/heads/{WORKING_REF_PREFIX}*",
+        )
+        return sorted(line.strip() for line in out.splitlines() if line.strip())
 
     def open(
         self,

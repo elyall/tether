@@ -41,7 +41,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import DoltHandle, Handle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 MAIN = "main"
 DEFAULT_PORT = 3306
@@ -67,6 +67,8 @@ class DoltClient(Protocol):
     def create_branch(self, name: str, ref: str) -> None: ...
 
     def delete_branch(self, name: str) -> None: ...
+
+    def list_branches(self) -> list[str]: ...
 
     def diff_summary(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
         """Rows of ``dolt_diff_summary``: table_name, diff_type, data/schema_change."""
@@ -151,6 +153,9 @@ class SqlDoltClient:
 
     def delete_branch(self, name: str) -> None:
         self._run("CALL DOLT_BRANCH('-D', %s)", (name,))
+
+    def list_branches(self) -> list[str]:
+        return [str(r[0]) for r in self._run("SELECT name FROM dolt_branches")]
 
     def diff_summary(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
         return self._rows_as_dicts(
@@ -348,17 +353,26 @@ class DoltBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, f"commit {commit} not found")
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         client = self._client(locator)
-        target = client.tag_hash(pin.ref)
-        if target is None:
-            raise BackendError(f"tag {pin.ref} missing; cannot fork", kind="dolt")
+        if isinstance(source, Pin):
+            target = client.tag_hash(source.ref)
+            if target is None:
+                raise BackendError(
+                    f"tag {source.ref} missing; cannot fork", kind="dolt"
+                )
+            origin = source.ref
+        else:
+            # Recorded state (no tag): fork straight from the commit hash.
+            origin = target = str(source["commit"])
+            if not client.commit_exists(target):
+                raise BackendError(f"commit {target} missing; cannot fork", kind="dolt")
         head = client.branch_head(name)
         if head is not None and head[0] == target and not head[1]:
             return name
         if head is not None:
             client.delete_branch(name)  # reset semantics, like icechunk
-        client.create_branch(name, pin.ref)
+        client.create_branch(name, origin)
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
@@ -367,6 +381,13 @@ class DoltBackend(ObjectBackend):
         client = self._client(locator)
         if client.branch_head(ref) is not None:
             client.delete_branch(ref)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        return sorted(
+            b
+            for b in self._client(locator).list_branches()
+            if b.startswith(WORKING_REF_PREFIX)
+        )
 
     def open(
         self,

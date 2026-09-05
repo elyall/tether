@@ -26,7 +26,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcechunkHandle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
 class IcechunkBackend(ObjectBackend):
@@ -206,11 +206,15 @@ class IcechunkBackend(ObjectBackend):
         except ic.IcechunkError as exc:
             return VerifyReport(VerifyStatus.MISSING, str(exc))
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         import icechunk as ic
 
         repo = self._repo(locator)
-        sid = repo.lookup_tag(pin.ref)
+        if isinstance(source, Pin):
+            sid = repo.lookup_tag(source.ref)
+        else:
+            # Recorded state (no tag): the snapshot must still be reachable.
+            sid = self._resolve(repo, str(source["snapshot_id"]))
         try:
             repo.create_branch(name, sid)
         except ic.IcechunkError:
@@ -224,6 +228,10 @@ class IcechunkBackend(ObjectBackend):
             return
         with contextlib.suppress(ic.IcechunkError):
             self._repo(locator).delete_branch(ref)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        branches = self._repo(locator).list_branches()
+        return sorted(b for b in branches if b.startswith(WORKING_REF_PREFIX))
 
     def open(
         self,

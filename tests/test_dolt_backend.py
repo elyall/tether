@@ -106,6 +106,9 @@ class FakeDoltDb:
         del self.branches[name]
         self.dirty.discard(name)
 
+    def list_branches(self) -> list[str]:
+        return sorted(self.branches)
+
     def diff_summary(self, from_ref: str, to_ref: str) -> list[dict]:
         ta, tb = (
             self.commits[self._lookup(from_ref)],

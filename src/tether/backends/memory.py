@@ -23,7 +23,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, MemoryHandle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
 @dataclass
@@ -175,18 +175,30 @@ class MemoryBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.MISSING, f"snapshot {sid} gone")
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         system = self._system(locator)
         sys = self.store.system(system)
-        if pin.ref not in sys.tags:
-            raise BackendError(f"pin {pin.ref} missing", key=system, kind="memory")
-        sys.branches[name] = sys.tags[pin.ref]
+        if isinstance(source, Pin):
+            if source.ref not in sys.tags:
+                raise BackendError(
+                    f"pin {source.ref} missing", key=system, kind="memory"
+                )
+            sid = sys.tags[source.ref]
+        else:
+            sid = str(source["snapshot_id"])
+            if sid not in sys.snapshots:
+                raise BackendError(f"snapshot {sid} gone", key=system, kind="memory")
+        sys.branches[name] = sid
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         sys = self.store.system(self._system(locator))
         if ref != "main":
             sys.branches.pop(ref, None)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        sys = self.store.system(self._system(locator))
+        return sorted(b for b in sys.branches if b.startswith(WORKING_REF_PREFIX))
 
     def open(
         self,

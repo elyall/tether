@@ -169,6 +169,11 @@ class FakeRepository:
             if prefix is None or name.startswith(prefix):
                 yield FakeTag(self._s, name)
 
+    def branches(self, prefix: str | None = None, **_: object):
+        for name in sorted(self._s.branches):
+            if prefix is None or name.startswith(prefix):
+                yield FakeBranch(self._s, name)
+
     def commit(self, commit_id: str) -> FakeRef:
         return FakeRef(self._s, commit_id)
 

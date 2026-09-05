@@ -36,7 +36,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, LanceHandle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 MAIN = "main"
 _LANCE_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError)
@@ -197,8 +197,12 @@ class LanceBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, str(exc))
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         ds = self._dataset(locator)
+        # A tag name, or the recorded (branch, version) for pin-less forks.
+        origin: str | Ref = (
+            source.ref if isinstance(source, Pin) else self._state_ref(source)
+        )
         existing = ds.branches.list()
         target = name
         if name in existing:
@@ -212,10 +216,10 @@ class LanceBackend(ObjectBackend):
                     n += 1
                 target = f"{name}.{n}"
         try:
-            ds.create_branch(target, pin.ref)
+            ds.create_branch(target, origin)
         except _LANCE_ERRORS as exc:
             raise BackendError(
-                f"cannot create lance branch {target} from {pin.ref}: {exc}",
+                f"cannot create lance branch {target} from {origin!r}: {exc}",
                 kind="lance",
             ) from exc
         return target
@@ -226,6 +230,10 @@ class LanceBackend(ObjectBackend):
         # Refused (and correctly kept) when a tether tag references the branch.
         with contextlib.suppress(*_LANCE_ERRORS):
             self._dataset(locator).branches.delete(ref)
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        branches = self._dataset(locator).branches.list()
+        return sorted(b for b in branches if str(b).startswith(WORKING_REF_PREFIX))
 
     def open(
         self,

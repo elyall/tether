@@ -114,9 +114,21 @@ def slugify_key(key: str) -> str:
     return slug or "obj"
 
 
+WORKING_REF_PREFIX = f"{REF_PREFIX}ws."
+
+
 def working_ref_name(workspace_id: str, key: str) -> str:
     """Per-workspace working-branch name so workspaces never collide."""
-    return f"{REF_PREFIX}ws.{workspace_id[:8]}.{slugify_key(key)}"
+    return f"{WORKING_REF_PREFIX}{workspace_id[:8]}.{slugify_key(key)}"
+
+
+def working_ref_workspace(ref: str) -> str | None:
+    """The 8-char workspace id embedded in a working ref name, if it is one."""
+    if not ref.startswith(WORKING_REF_PREFIX):
+        return None
+    rest = ref[len(WORKING_REF_PREFIX) :]
+    ws, _, _ = rest.partition(".")
+    return ws or None
 
 
 def _drop_nulls(obj: Any) -> Any:

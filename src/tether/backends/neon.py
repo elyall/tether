@@ -31,7 +31,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, NeonHandle
-from tether.manifest import Locator, Pin, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 _DEFAULT_API = "https://console.neon.tech/api/v2"
 _WORKING_PREFIX = ref_for_pin("ws.")  # "tether.ws."
@@ -257,15 +257,23 @@ class NeonBackend(ObjectBackend):
             )
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         project_id = self._project(locator)
         if self._branch_by_name(project_id, name) is not None:
             return name
-        parent = self._require_branch(project_id, pin.ref)
-        self._api.post(
-            f"/projects/{project_id}/branches",
-            {"branch": {"name": name, "parent_id": parent["id"]}},
-        )
+        if isinstance(source, Pin):
+            parent = self._require_branch(project_id, source.ref)
+            branch: dict = {"name": name, "parent_id": parent["id"]}
+        else:
+            # Recorded state (no pin branch): fork the source branch at the
+            # recorded LSN; only possible while it is inside the history window.
+            parent = self._require_branch(project_id, self._source_branch(locator))
+            branch = {
+                "name": name,
+                "parent_id": parent["id"],
+                "parent_lsn": str(source["lsn"]),
+            }
+        self._api.post(f"/projects/{project_id}/branches", {"branch": branch})
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
@@ -275,6 +283,13 @@ class NeonBackend(ObjectBackend):
         br = self._branch_by_name(project_id, ref)
         if br is not None:
             self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        return sorted(
+            str(br.get("name", ""))
+            for br in self._branches(self._project(locator))
+            if str(br.get("name", "")).startswith(WORKING_REF_PREFIX)
+        )
 
     def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> None:
         for ep in self._endpoints_for(project_id, branch_id):

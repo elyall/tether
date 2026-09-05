@@ -322,7 +322,7 @@ class FileBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.DRIFTED, "content changed since commit")
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         raise CapabilityError("file backend cannot fork", kind="file")
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:

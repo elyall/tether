@@ -269,11 +269,23 @@ class ObjectBackend(Protocol):
     ) -> VerifyReport:
         """Check that ``state``/``pin`` still hold."""
 
-    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
-        """Create a writable branch ``name`` off ``pin``. Requires ``FORK``."""
+    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+        """Create a writable branch ``name`` off ``source``. Requires ``FORK``.
+
+        ``source`` is a :class:`~tether.manifest.Pin` (fork from the native ref)
+        or a recorded ``State`` (fork directly from an addressable state, used
+        by ``policy.pin == "record"`` objects that carry no native ref).
+        """
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
+
+    def list_working_refs(self, locator: Locator) -> list[str]:
+        """Native branches created by :meth:`fork` (``tether.ws.*``). Requires ``FORK``.
+
+        Default: none. Used by ``gc --prune-workspaces``.
+        """
+        return []
 
     def open(
         self,
@@ -416,8 +428,13 @@ def effective_capabilities(
     Addressable. Backends may implement ``effective_capabilities(locator, policy)``
     to refine their class-level :attr:`capabilities`; otherwise the class value
     is used.
+
+    ``policy.pin == "record"`` removes ``PIN`` for any backend: the state is
+    recorded without a native ref (cheaper, no retention hold) and forks come
+    straight from the recorded state while the system still has it.
     """
     fn = getattr(backend, "effective_capabilities", None)
-    if callable(fn):
-        return fn(locator, policy)
-    return backend.capabilities
+    caps = fn(locator, policy) if callable(fn) else backend.capabilities
+    if getattr(policy, "pin", "native") == "record":
+        caps &= ~Capability.PIN
+    return caps
