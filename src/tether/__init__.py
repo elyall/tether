@@ -14,7 +14,7 @@ from tether.errors import (
     TetherError,
     UnpinnedStateError,
 )
-from tether.manifest import ObjectManifest, RepoConfig, WorkspaceState
+from tether.manifest import ObjectManifest, Pin, Policy, RepoConfig, WorkspaceState
 from tether.repo import Repo
 
 __all__ = [
@@ -22,7 +22,9 @@ __all__ = [
     "ImmutableObjectModified",
     "MultiObjectError",
     "ObjectManifest",
+    "Pin",
     "PinDriftError",
+    "Policy",
     "Repo",
     "RepoConfig",
     "StaleWorkingCopyError",

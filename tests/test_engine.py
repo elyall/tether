@@ -256,6 +256,22 @@ def test_content_diff_reports_backend_failures_per_object(
     assert entries["db"].detail_error == "no diff for you"
 
 
+def test_new_auto_fork_reforks_after_commit(vcs_root: Path) -> None:
+    from tether.manifest import RepoConfig
+
+    repo = Repo.init(vcs_root, config=RepoConfig(new_auto_fork=True))
+    system = _mem_object(repo)
+    repo.commit("baseline")
+    first = repo.workspace.working_refs["db"]
+    assert first.startswith("tether.ws.")  # forked without an explicit new()
+    default_store().write(system, first, {"x": 1})
+    repo.commit("update")
+    # Re-forked from the new pin: same deterministic name, now at the new state.
+    assert repo.workspace.working_refs["db"] == first
+    assert default_store().read(system, first) == {"x": 1}
+    assert not repo.is_stale()
+
+
 def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
     # Guard against accidental prefix drift between pin() and gc().
     assert ref_for_pin("abc") == "tether.abc"

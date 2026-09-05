@@ -64,6 +64,11 @@ def _fail(exc: Exception) -> NoReturn:
     raise typer.Exit(1)
 
 
+def _snapshot_default(repo: Repo, no_snapshot: bool) -> bool:
+    """``[snapshot] auto`` sets the default; ``--no-snapshot`` always wins."""
+    return repo.config.snapshot_auto and not no_snapshot
+
+
 def _handle_address(handle: Handle) -> str:
     if isinstance(handle, FileHandle):
         return handle.uri + (f"#{handle.version_id}" if handle.version_id else "")
@@ -201,7 +206,7 @@ def status(
     """Fan out, fingerprint every object, and classify each one."""
     repo = _repo()
     try:
-        report = repo.status(do_snapshot=not no_snapshot)
+        report = repo.status(do_snapshot=_snapshot_default(repo, no_snapshot))
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -247,7 +252,7 @@ def commit(
             vcs=not no_vcs,
             strict=strict,
             force=force,
-            do_snapshot=not no_snapshot,
+            do_snapshot=_snapshot_default(repo, no_snapshot),
         )
     except TetherError as exc:
         _fail(exc)

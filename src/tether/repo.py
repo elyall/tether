@@ -479,6 +479,9 @@ class Repo:
 
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
+        if plans and self.config.new_auto_fork:
+            # jj-style: every commit leaves you on a fresh working copy.
+            self.new()
         return result
 
     def _rollback_pins(self, created: list[tuple[str, Pin]]) -> None:

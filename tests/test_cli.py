@@ -83,3 +83,27 @@ def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert r.exit_code == 0, r.output
     detail = json.loads(r.output)[0]["detail"]
     assert detail["added"] == 1 and detail["entries"][0]["path"] == "rows"
+
+
+def test_cli_snapshot_auto_config(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tether.manifest import RepoConfig
+    from tether.repo import Repo
+
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    repo = Repo.init(vcs_root, config=RepoConfig(snapshot_auto=False))
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    default_store().write(system, "main", {"x": 1})
+
+    # snapshot.auto = false: status reuses the cached fingerprint -> clean.
+    r = runner.invoke(app, ["status", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["objects"][0]["state"] == "clean"
+    # An explicit snapshot refreshes the cache and status sees the change.
+    assert runner.invoke(app, ["snapshot"]).exit_code == 0
+    r = runner.invoke(app, ["status", "--json"])
+    assert json.loads(r.output)["objects"][0]["state"] == "modified"
