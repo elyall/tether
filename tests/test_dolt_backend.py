@@ -26,14 +26,15 @@ from tether.testing import run_conformance
 # --------------------------------------------------------------------------- #
 @dataclass
 class FakeDoltDb:
-    commits: set[str] = field(default_factory=set)
+    # commit -> {table: row count}; enough to fake dolt_diff_summary/stat.
+    commits: dict[str, dict[str, int]] = field(default_factory=dict)
     branches: dict[str, str] = field(default_factory=dict)  # name -> commit
     dirty: set[str] = field(default_factory=set)
     tags: dict[str, str] = field(default_factory=dict)
 
-    def new_commit(self, seed: str) -> str:
+    def new_commit(self, seed: str, tables: dict[str, int] | None = None) -> str:
         h = hashlib.sha1(seed.encode()).hexdigest()[:32]
-        self.commits.add(h)
+        self.commits[h] = dict(tables or {})
         return h
 
     def resolve(self, ref: str) -> str:
@@ -74,12 +75,66 @@ class FakeDoltDb:
         del self.branches[name]
         self.dirty.discard(name)
 
+    def diff_summary(self, from_ref: str, to_ref: str) -> list[dict]:
+        ta, tb = (
+            self.commits[self.resolve(from_ref)],
+            self.commits[self.resolve(to_ref)],
+        )
+        rows = []
+        for table in sorted(set(ta) | set(tb)):
+            if table not in ta:
+                diff_type = "added"
+            elif table not in tb:
+                diff_type = "dropped"
+            elif ta[table] != tb[table]:
+                diff_type = "modified"
+            else:
+                continue
+            rows.append(
+                {
+                    "table_name": table,
+                    "diff_type": diff_type,
+                    "data_change": 1,
+                    "schema_change": 0,
+                }
+            )
+        return rows
+
+    def diff_stat(self, from_ref: str, to_ref: str) -> list[dict]:
+        ta, tb = (
+            self.commits[self.resolve(from_ref)],
+            self.commits[self.resolve(to_ref)],
+        )
+        rows = []
+        for table in sorted(set(ta) | set(tb)):
+            na, nb = ta.get(table, 0), tb.get(table, 0)
+            if na == nb:
+                continue
+            rows.append(
+                {
+                    "table_name": table,
+                    "rows_added": max(0, nb - na),
+                    "rows_deleted": max(0, na - nb),
+                    "rows_modified": 0,
+                    "old_row_count": na,
+                    "new_row_count": nb,
+                }
+            )
+        return rows
+
     # test helpers -------------------------------------------------------- #
     def write(self, branch: str) -> None:
         self.dirty.add(branch)
 
-    def commit(self, branch: str, msg: str) -> str:
-        cid = self.new_commit(f"{self.branches[branch]}:{msg}")
+    def commit(
+        self, branch: str, msg: str, tables: dict[str, int] | None = None
+    ) -> str:
+        base = dict(self.commits[self.branches[branch]])
+        if tables is None:
+            base["t"] = base.get("t", 0) + 1  # default mutation: one more row in t
+        else:
+            base.update(tables)
+        cid = self.new_commit(f"{self.branches[branch]}:{msg}", base)
         self.branches[branch] = cid
         self.dirty.discard(branch)
         return cid
@@ -196,15 +251,28 @@ def test_dolt_dirty_branch_and_handles(fake: tuple[DoltBackend, FakeDolt]) -> No
     with pytest.raises(BackendError):
         b.identity({"host": "h"})
 
+    # Content diff: per-table summary + row stats between two commits.
+    db.commit("main", "reshape", {"t": 7, "u": 3})
+    later = b.fingerprint(loc, None)
+    d = b.diff(loc, state, later)
+    assert d.unit == "tables" and (d.added, d.removed, d.modified) == (1, 0, 1)
+    by_path = {e.path: e for e in d.entries}
+    assert by_path["u"].change == "added" and by_path["u"].detail == "+3 rows"
+    assert by_path["t"].change == "modified" and by_path["t"].detail == "+6 rows"
+    assert b.diff(loc, later, later).is_empty
+    dirty_note = b.diff(loc, later, dict(later, dirty=True))
+    assert dirty_note.is_empty and "dirty" in dirty_note.note
+
 
 # --------------------------------------------------------------------------- #
 # SqlDoltClient issues the expected statements
 # --------------------------------------------------------------------------- #
 class _Cursor:
-    def __init__(self, log: list, rows: list[tuple]) -> None:
+    def __init__(self, log: list, rows: list[tuple], columns: list[str]) -> None:
         self._log = log
         self._rows = rows
-        self.description = None
+        self._columns = columns
+        self.description: list[tuple] | None = None
 
     def __enter__(self) -> _Cursor:
         return self
@@ -214,20 +282,27 @@ class _Cursor:
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         self._log.append((sql, tuple(params)))
-        self.description = [("col",)] if self._rows else None
+        self.description = [(c,) for c in self._columns] if self._rows else None
 
     def fetchall(self) -> list[tuple]:
         return self._rows
 
 
 class _Connection:
-    def __init__(self, log: list, rows: list[tuple], kwargs: dict) -> None:
+    def __init__(
+        self,
+        log: list,
+        rows: list[tuple],
+        kwargs: dict,
+        columns: list[str] | None = None,
+    ) -> None:
         self._log = log
         self._rows = rows
+        self._columns = columns or ["col"]
         log.append(("CONNECT", tuple(sorted(kwargs.items()))))
 
     def cursor(self) -> _Cursor:
-        return _Cursor(self._log, self._rows)
+        return _Cursor(self._log, self._rows, self._columns)
 
     def close(self) -> None:
         self._log.append(("CLOSE", ()))
@@ -264,6 +339,7 @@ def test_sql_client_statements() -> None:
     client.create_branch("b", "tether.x")
     client.delete_branch("b")
     assert client.tag_hash("nope") is None and client.branch_head("nope") is None
+    assert client.diff_summary("a", "b") == [] and client.diff_stat("a", "b") == []
     statements = [entry for entry in log if entry[0] not in ("CONNECT", "CLOSE")]
     assert statements == [
         ("CALL DOLT_TAG(%s, %s)", ("tether.x", "abc123")),
@@ -272,6 +348,21 @@ def test_sql_client_statements() -> None:
         ("CALL DOLT_BRANCH('-D', %s)", ("b",)),
         ("SELECT tag_hash FROM dolt_tags WHERE tag_name = %s", ("nope",)),
         ("SELECT hash, dirty FROM dolt_branches WHERE name = %s", ("nope",)),
+        ("SELECT * FROM dolt_diff_summary(%s, %s)", ("a", "b")),
+        ("SELECT * FROM dolt_diff_stat(%s, %s)", ("a", "b")),
+    ]
+    # Dict rows come back keyed by cursor description.
+    columns = ["table_name", "diff_type", "data_change", "schema_change"]
+    client2 = SqlDoltClient(
+        lambda **kw: _Connection(log, [("t", "modified", 1, 0)], kw, columns)
+    )
+    assert client2.diff_summary("a", "b") == [
+        {
+            "table_name": "t",
+            "diff_type": "modified",
+            "data_change": 1,
+            "schema_change": 0,
+        }
     ]
 
 

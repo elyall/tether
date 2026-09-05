@@ -91,3 +91,21 @@ def test_icechunk_engine_lifecycle(vcs_root: Path) -> None:
     assert old.tag == pin.ref
 
     assert all(r.ok for r in repo.verify(deep=True).values())
+
+    # Content diff between two commits: node-level changes from Icechunk
+    # (written on the forked working branch, which is what tether tracks).
+    ic_repo = ic.Repository.open(ic.local_filesystem_storage(uri))
+    session = ic_repo.writable_session(wref)
+    group = zarr.open_group(store=session.store, mode="a")
+    arr = group.create_array("x", shape=(4,), chunks=(2,), dtype="i4")
+    arr[:] = [1, 2, 3, 4]
+    session.commit("add x")
+    res3 = repo.commit("with array")
+    entries = {
+        e.key: e for e in repo.diff(res2.vcs_commit, res3.vcs_commit, content=True)
+    }
+    d = entries["zarr/imaging"].detail
+    assert d is not None and d.unit == "nodes" and d.added == 1
+    assert {(e.path, e.change, e.detail) for e in d.entries} >= {
+        ("/x", "added", "array")
+    }

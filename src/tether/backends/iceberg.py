@@ -14,7 +14,9 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -32,6 +34,7 @@ class IcebergBackend(ObjectBackend):
         | Capability.PIN
         | Capability.FORK
         | Capability.RETENTION_BOUND
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -203,6 +206,73 @@ class IcebergBackend(ObjectBackend):
             table=table,
             ref=str(branch),
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """Per-snapshot summaries along ``b``'s ancestry back to ``a``.
+
+        Iceberg snapshot metadata carries the operation and record/file counts
+        for every commit, so no data is read. When ``a`` is not an ancestor of
+        ``b`` (diverged branches) the totals at each end are compared instead.
+        """
+        sid_a, sid_b = int(a["snapshot_id"]), int(b["snapshot_id"])
+        out = ObjectDiff(unit="snapshots")
+        if sid_a == sid_b:
+            return out
+        table = self._table(locator)
+        by_id = {int(s.snapshot_id): s for s in table.snapshots()}
+        chain = []
+        cursor = by_id.get(sid_b)
+        while cursor is not None and int(cursor.snapshot_id) != sid_a:
+            chain.append(cursor)
+            parent = getattr(cursor, "parent_snapshot_id", None)
+            cursor = by_id.get(int(parent)) if parent is not None else None
+        if cursor is None:  # a is not an ancestor of b (or expired)
+            out.note = f"{sid_a} is not an ancestor of {sid_b}; comparing totals"
+            ta = _summary(by_id.get(sid_a))
+            tb = _summary(by_id.get(sid_b))
+            for key in ("total-records", "total-data-files", "total-delete-files"):
+                if ta.get(key) != tb.get(key):
+                    out.add(
+                        key, "modified", f"{ta.get(key, '?')} -> {tb.get(key, '?')}"
+                    )
+            return out
+        for snap in reversed(chain):
+            summary = _summary(snap)
+            op = summary.get("operation", "commit")
+            parts = [
+                f"{sign}{summary[k]} {label}"
+                for k, sign, label in (
+                    ("added-records", "+", "rows"),
+                    ("deleted-records", "-", "rows"),
+                    ("added-data-files", "+", "files"),
+                    ("deleted-data-files", "-", "files"),
+                )
+                if summary.get(k) not in (None, "0")
+            ]
+            out.add(
+                str(snap.snapshot_id),
+                "modified",
+                f"{op}: {', '.join(parts) or 'metadata'}",
+            )
+        return out
+
+
+def _summary(snapshot: Any) -> dict[str, str]:
+    if snapshot is None or getattr(snapshot, "summary", None) is None:
+        return {}
+    summary = snapshot.summary
+    props = dict(getattr(summary, "additional_properties", {}) or {})
+    op = getattr(summary, "operation", None)
+    if op is not None:
+        props["operation"] = str(getattr(op, "value", op))
+    return {str(k): str(v) for k, v in props.items()}
 
 
 def _factory(config: dict) -> IcebergBackend:

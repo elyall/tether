@@ -43,6 +43,14 @@ class FakeRepoState:
         return cid
 
 
+@dataclass
+class _Change:
+    type: str
+    path: str
+    path_type: str = "object"
+    size_bytes: int | None = None
+
+
 class FakeRef:
     def __init__(self, state: FakeRepoState, ref: str) -> None:
         self._s = state
@@ -54,6 +62,32 @@ class FakeRef:
         if cid not in s.commits:
             raise NotFoundException(status=404, reason=f"ref {self.id} not found")
         return _Commit(cid)
+
+    def diff(
+        self,
+        other_ref: str,
+        max_amount: int | None = None,
+        prefix: str | None = None,
+        **_,
+    ):
+        ta = self._s.commits[self.get_commit().id]
+        tb = self._s.commits[FakeRef(self._s, other_ref).get_commit().id]
+        n = 0
+        for path in sorted(set(ta) | set(tb)):
+            if path.startswith("__") or (prefix and not path.startswith(prefix)):
+                continue
+            if path not in ta:
+                change = _Change("added", path, size_bytes=len(tb[path]))
+            elif path not in tb:
+                change = _Change("removed", path)
+            elif ta[path] != tb[path]:
+                change = _Change("changed", path, size_bytes=len(tb[path]))
+            else:
+                continue
+            if max_amount is not None and n >= max_amount:
+                return
+            n += 1
+            yield change
 
 
 class FakeBranch(FakeRef):
@@ -204,6 +238,20 @@ def test_lakefs_dirty_branch_is_reported_and_refused(
     assert b.fingerprint(loc, wref) != state
     assert b.fork(loc, pin, wref) == wref
     assert b.fingerprint(loc, wref) == state
+
+    # Content diff is scoped to the prefix and reports object-level changes.
+    f(loc).branch("main").stage("raw/a.bin", b"aaaa")
+    f(loc).branch("main").stage("raw/c.bin", b"c")
+    f(loc).branch("main").stage("other/x.bin", b"x")
+    f(loc).branch("main").commit("more")
+    later = b.fingerprint(loc, None)
+    d = b.diff(loc, state, later)
+    assert d.unit == "objects" and (d.added, d.removed, d.modified) == (1, 0, 1)
+    assert {e.path: e.change for e in d.entries} == {
+        "raw/a.bin": "modified",
+        "raw/c.bin": "added",
+    }
+    assert b.diff(loc, later, later).is_empty
 
     # Identity is the repository: prefix does not change the pin id.
     assert b.identity(loc) == {"repository": loc["repository"]}

@@ -15,7 +15,9 @@ from pathlib import Path
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -34,6 +36,7 @@ class GitBackend(ObjectBackend):
         | Capability.FORK
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -213,6 +216,46 @@ class GitBackend(ObjectBackend):
         ref = target or self._base_ref(locator)
         sha = self._run(locator, "rev-parse", f"{ref}^{{commit}}")
         return GitHandle(key=path, read_only=read_only, path=path, sha=sha)
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        sha_a, sha_b = str(a["sha"]), str(b["sha"])
+        out = ObjectDiff(unit="files")
+        if sha_a == sha_b:
+            if a.get("dirty") != b.get("dirty"):
+                out.note = f"dirty {a.get('dirty')} -> {b.get('dirty')}"
+            return out
+        # One call for per-file status (with renames), one for line counts.
+        status = self._run(locator, "diff", "--name-status", "-M", sha_a, sha_b)
+        numstat = self._run(locator, "diff", "--numstat", "-M", sha_a, sha_b)
+        lines: dict[str, str] = {}
+        for line in numstat.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                added, deleted, path = parts[0], parts[1], parts[-1]
+                lines[path] = f"+{added} -{deleted}"
+        for line in status.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            code, path = parts[0], parts[-1]
+            if code.startswith("A"):
+                change = "added"
+            elif code.startswith("D"):
+                change = "removed"
+            elif code.startswith("R"):
+                change = "renamed"
+                path = f"{parts[1]} -> {parts[2]}" if len(parts) >= 3 else path
+            else:
+                change = "modified"
+            out.add(path, change, lines.get(parts[-1], ""))
+        return out
 
 
 def _factory(config: dict) -> GitBackend:

@@ -29,7 +29,9 @@ from urllib.parse import urlparse
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -63,6 +65,12 @@ class DoltClient(Protocol):
 
     def delete_branch(self, name: str) -> None: ...
 
+    def diff_summary(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
+        """Rows of ``dolt_diff_summary``: table_name, diff_type, data/schema_change."""
+
+    def diff_stat(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
+        """Rows of ``dolt_diff_stat``: table_name, rows_added/deleted/modified, ..."""
+
 
 class SqlDoltClient:
     """:class:`DoltClient` over the MySQL protocol (PyMySQL)."""
@@ -78,6 +86,18 @@ class SqlDoltClient:
                 cur.execute(sql, params)
                 rows = cur.fetchall() if cur.description else []
             return [tuple(r) for r in rows]
+        finally:
+            con.close()
+
+    def _rows_as_dicts(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+        con = self._connect(**self._kwargs)
+        try:
+            with con.cursor() as cur:
+                cur.execute(sql, params)
+                if not cur.description:
+                    return []
+                columns = [str(d[0]) for d in cur.description]
+                return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
         finally:
             con.close()
 
@@ -123,6 +143,16 @@ class SqlDoltClient:
     def delete_branch(self, name: str) -> None:
         self._run("CALL DOLT_BRANCH('-D', %s)", (name,))
 
+    def diff_summary(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
+        return self._rows_as_dicts(
+            "SELECT * FROM dolt_diff_summary(%s, %s)", (from_ref, to_ref)
+        )
+
+    def diff_stat(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
+        return self._rows_as_dicts(
+            "SELECT * FROM dolt_diff_stat(%s, %s)", (from_ref, to_ref)
+        )
+
 
 class DoltBackend(ObjectBackend):
     kind = "dolt"
@@ -132,6 +162,7 @@ class DoltBackend(ObjectBackend):
         | Capability.PIN
         | Capability.FORK
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -310,6 +341,54 @@ class DoltBackend(ObjectBackend):
             ref=ref,
             commit=commit,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """Per-table diff from ``dolt_diff_summary`` + ``dolt_diff_stat``.
+
+        Dolt diffs are computed on prolly trees, so cost scales with the change
+        rather than table size.
+        """
+        ca, cb = str(a["commit"]), str(b["commit"])
+        out = ObjectDiff(unit="tables")
+        if ca == cb:
+            if a.get("dirty") != b.get("dirty"):
+                out.note = f"dirty {a.get('dirty')} -> {b.get('dirty')}"
+            return out
+        client = self._client(locator)
+        stats = {str(r.get("table_name")): r for r in client.diff_stat(ca, cb)}
+        for row in client.diff_summary(ca, cb):
+            table = str(row.get("table_name") or row.get("to_table_name") or "?")
+            diff_type = str(row.get("diff_type", "modified"))
+            change = {"added": "added", "dropped": "removed", "renamed": "renamed"}.get(
+                diff_type, "modified"
+            )
+            if change == "renamed":
+                old, new = (
+                    row.get("from_table_name", "?"),
+                    row.get("to_table_name", "?"),
+                )
+                table = f"{old} -> {new}"
+            stat = stats.get(table, {})
+            parts = [
+                f"{sign}{stat[k]} rows"
+                for k, sign in (
+                    ("rows_added", "+"),
+                    ("rows_deleted", "-"),
+                    ("rows_modified", "~"),
+                )
+                if stat.get(k) not in (None, 0, "0")
+            ]
+            if row.get("schema_change") in (1, True, "1", "true"):
+                parts.append("schema changed")
+            out.add(table, change, ", ".join(parts))
+        return out
 
 
 def _factory(config: dict) -> DoltBackend:

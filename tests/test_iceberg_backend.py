@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("pyiceberg")
 
 from pyiceberg.table.refs import SnapshotRef, SnapshotRefType
+from pyiceberg.table.snapshots import Operation, Summary
 
 from tether.backends.base import Capability, VerifyStatus
 from tether.backends.iceberg import IcebergBackend
@@ -15,13 +16,24 @@ LOCATOR = {"identifier": "ns.t", "branch": "main", "catalog_name": "t"}
 
 
 class _Snap:
-    def __init__(self, sid: int) -> None:
+    def __init__(
+        self,
+        sid: int,
+        parent: int | None = None,
+        summary: Summary | None = None,
+    ) -> None:
         self.snapshot_id = sid
+        self.parent_snapshot_id = parent
+        self.summary = summary
 
 
 class _Store:
     def __init__(self) -> None:
-        self.snapshots = [1001]
+        self.snapshots = {
+            1001: _Snap(
+                1001, None, Summary(Operation.APPEND, **{"added-records": "10"})
+            )
+        }
         self.refs: dict[str, SnapshotRef] = {
             "main": SnapshotRef(
                 snapshot_id=1001, snapshot_ref_type=SnapshotRefType.BRANCH
@@ -74,15 +86,19 @@ class FakeTable:
         return _Snap(self._store.refs["main"].snapshot_id)
 
     def snapshots(self):
-        return [_Snap(s) for s in self._store.snapshots]
+        return list(self._store.snapshots.values())
 
     def manage_snapshots(self) -> FakeManage:
         return FakeManage(self._store)
 
 
 @pytest.fixture
-def backend(monkeypatch: pytest.MonkeyPatch) -> IcebergBackend:
-    store = _Store()
+def store() -> _Store:
+    return _Store()
+
+
+@pytest.fixture
+def backend(monkeypatch: pytest.MonkeyPatch, store: _Store) -> IcebergBackend:
     b = IcebergBackend()
     monkeypatch.setattr(b, "_table", lambda locator: FakeTable(store))
     return b
@@ -115,6 +131,32 @@ def test_verify_detects_drift(backend: IcebergBackend) -> None:
     pin = backend.pin(LOCATOR, {"snapshot_id": 1001}, "aaaa1111bbbb")
     report = backend.verify(LOCATOR, {"snapshot_id": 2002}, pin, deep=False)
     assert report.status is VerifyStatus.DRIFTED
+
+
+def test_diff_walks_snapshot_ancestry(backend: IcebergBackend, store: _Store) -> None:
+    store.snapshots[1002] = _Snap(
+        1002,
+        1001,
+        Summary(Operation.APPEND, **{"added-records": "5", "added-data-files": "1"}),
+    )
+    store.snapshots[1003] = _Snap(
+        1003, 1002, Summary(Operation.DELETE, **{"deleted-records": "2"})
+    )
+    store.snapshots[2001] = _Snap(  # a diverged branch head
+        2001, 1001, Summary(Operation.APPEND, **{"total-records": "99"})
+    )
+    d = backend.diff(LOCATOR, {"snapshot_id": 1001}, {"snapshot_id": 1003})
+    assert d.unit == "snapshots" and d.modified == 2 and not d.note
+    assert [(e.path, e.detail) for e in d.entries] == [
+        ("1002", "append: +5 rows, +1 files"),
+        ("1003", "delete: -2 rows"),
+    ]
+    assert backend.diff(LOCATOR, {"snapshot_id": 1003}, {"snapshot_id": 1003}).is_empty
+    diverged = backend.diff(LOCATOR, {"snapshot_id": 1003}, {"snapshot_id": 2001})
+    assert "not an ancestor" in diverged.note
+    assert [(e.path, e.detail) for e in diverged.entries] == [
+        ("total-records", "? -> 99")
+    ]
 
 
 def test_record_strategy_drops_pin_capability(backend: IcebergBackend) -> None:

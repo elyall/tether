@@ -18,7 +18,9 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -35,6 +37,7 @@ class DeltaBackend(ObjectBackend):
         | Capability.ADDRESSABLE
         | Capability.CHEAP_FINGERPRINT
         | Capability.RETENTION_BOUND
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -150,6 +153,53 @@ class DeltaBackend(ObjectBackend):
             version=int(dt.version()),
             table=dt,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """One entry per transaction-log commit in ``(a, b]`` with its metrics.
+
+        Reads only the log (no data). Row-level changes would need Change Data
+        Feed enabled on the table (``DeltaTable.load_cdf``), which is opt-in.
+        """
+        va, vb = int(a["version"]), int(b["version"])
+        out = ObjectDiff(unit="commits")
+        if a.get("table_id") != b.get("table_id"):
+            out.note = "table was recreated between the two states"
+        if va == vb:
+            return out
+        lo, hi = min(va, vb), max(va, vb)
+        if vb < va:
+            out.note = (out.note + "; " if out.note else "") + "b is older than a"
+        dt = self._table(locator, version=hi, without_files=True)
+        for commit in reversed(dt.history(hi - lo)):
+            version = int(commit.get("version", -1))
+            if version <= lo or version > hi:
+                continue
+            metrics = commit.get("operationMetrics") or {}
+            parts = [
+                f"{sign}{metrics[k]} {label}"
+                for k, sign, label in (
+                    ("num_added_rows", "+", "rows"),
+                    ("num_deleted_rows", "-", "rows"),
+                    ("num_updated_rows", "~", "rows"),
+                    ("num_added_files", "+", "files"),
+                    ("num_removed_files", "-", "files"),
+                )
+                if metrics.get(k) not in (None, 0, "0")
+            ]
+            operation = commit.get("operation", "COMMIT")
+            out.add(
+                f"v{version}",
+                "modified",
+                f"{operation}: {', '.join(parts) or 'metadata'}",
+            )
+        return out
 
 
 def _factory(config: dict) -> DeltaBackend:

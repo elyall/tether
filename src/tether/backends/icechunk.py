@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -32,6 +34,7 @@ class IcechunkBackend(ObjectBackend):
         | Capability.PIN
         | Capability.FORK
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -203,6 +206,47 @@ class IcechunkBackend(ObjectBackend):
             branch=branch,
             snapshot_id=session.snapshot_id,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        import icechunk as ic
+
+        sid_a, sid_b = str(a["snapshot_id"]), str(b["snapshot_id"])
+        out = ObjectDiff(unit="nodes")
+        if sid_a == sid_b:
+            return out
+        try:
+            d = self._repo(locator).diff(from_snapshot_id=sid_a, to_snapshot_id=sid_b)
+        except ic.IcechunkError as exc:
+            raise BackendError(f"icechunk diff failed: {exc}", kind="icechunk") from exc
+        chunks = dict(getattr(d, "updated_chunks", {}) or {})
+        for path in sorted(d.new_groups):
+            out.add(path, "added", "group")
+        for path in sorted(d.new_arrays):
+            out.add(path, "added", "array")
+        for path in sorted(d.deleted_groups):
+            out.add(path, "removed", "group")
+        for path in sorted(d.deleted_arrays):
+            out.add(path, "removed", "array")
+        for path in sorted(d.updated_groups):
+            out.add(path, "modified", "group metadata")
+        touched = set(d.updated_arrays) | set(chunks)
+        for path in sorted(touched):
+            parts = []
+            if path in d.updated_arrays:
+                parts.append("array metadata")
+            if path in chunks:
+                parts.append(f"{len(chunks[path])} chunks")
+            out.add(path, "modified", ", ".join(parts))
+        for moved in getattr(d, "moved_nodes", []) or []:
+            out.add(f"{moved[0]} -> {moved[1]}", "renamed")
+        return out
 
 
 def _factory(config: dict) -> IcechunkBackend:

@@ -68,3 +68,20 @@ def test_git_backend_lifecycle(vcs_root: Path) -> None:
     assert isinstance(old, GitHandle) and old.read_only and old.sha == sha0
 
     assert all(r.ok for r in repo.verify().values())
+
+    # Content diff: per-file status with line counts.
+    (code / "util.py").write_text("x = 1\n", encoding="utf-8")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-qm", "add util")
+    sha2 = _git(code, "rev-parse", "HEAD")
+    d = backend.diff({"path": str(code)}, {"sha": sha0}, {"sha": sha2})
+    assert d.unit == "files" and (d.added, d.removed, d.modified) == (1, 0, 1)
+    assert {(e.path, e.change, e.detail) for e in d.entries} == {
+        ("main.py", "modified", "+1 -1"),
+        ("util.py", "added", "+1 -0"),
+    }
+    assert backend.diff({"path": str(code)}, {"sha": sha2}, {"sha": sha2}).is_empty
+    entries = {
+        e.key: e for e in repo.diff(res.vcs_commit, res2.vcs_commit, content=True)
+    }
+    assert entries["code"].detail is not None and entries["code"].detail.modified == 1

@@ -21,8 +21,11 @@ import contextlib
 from typing import Any
 
 from tether.backends.base import (
+    MAX_DIFF_ENTRIES,
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -43,6 +46,7 @@ class LakeFSBackend(ObjectBackend):
         | Capability.FORK
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -240,6 +244,44 @@ class LakeFSBackend(ObjectBackend):
             ref=branch,
             prefix=prefix,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """Server-side object diff between two commits, scoped to ``prefix``."""
+        ca, cb = str(a["commit_id"]), str(b["commit_id"])
+        out = ObjectDiff(unit="objects")
+        if ca == cb:
+            return out
+        repo = self._repo(locator)
+        prefix = self._prefix(locator)
+        kwargs: dict[str, Any] = {"max_amount": MAX_DIFF_ENTRIES + 1}
+        if prefix:
+            kwargs["prefix"] = prefix + "/"
+        try:
+            changes = repo.commit(ca).diff(cb, **kwargs)
+            for n, change in enumerate(changes):
+                if n >= MAX_DIFF_ENTRIES:
+                    out.truncated = True
+                    break
+                ctype = str(getattr(change, "type", "changed"))
+                change_kind = {"added": "added", "removed": "removed"}.get(
+                    ctype, "modified"
+                )
+                size = getattr(change, "size_bytes", None)
+                out.add(
+                    str(getattr(change, "path", "?")),
+                    change_kind,
+                    f"{size} B" if size is not None else "",
+                )
+        except self._errors() as exc:
+            raise BackendError(f"lakefs diff failed: {exc}", kind="lakefs") from exc
+        return out
 
 
 def _factory(config: dict) -> LakeFSBackend:

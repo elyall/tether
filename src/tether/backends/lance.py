@@ -24,7 +24,9 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    Listings,
     ObjectBackend,
+    ObjectDiff,
     VerifyReport,
     VerifyStatus,
     register_backend,
@@ -52,6 +54,7 @@ class LanceBackend(ObjectBackend):
         | Capability.PIN
         | Capability.FORK
         | Capability.ATOMIC_REF
+        | Capability.DIFF
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -244,6 +247,49 @@ class LanceBackend(ObjectBackend):
             version=int(checked.version),
             branch=branch,
         )
+
+    def diff(
+        self,
+        locator: Locator,
+        a: State,
+        b: State,
+        *,
+        listings: Listings = (None, None),
+    ) -> ObjectDiff:
+        """Fragment- and schema-level diff from two manifests (no data read)."""
+        out = ObjectDiff(unit="fragments")
+        ref_a, ref_b = self._state_ref(a), self._state_ref(b)
+        if ref_a == ref_b:
+            return out
+        ds = self._dataset(locator)
+        da, db = self._checkout(ds, ref_a), self._checkout(ds, ref_b)
+        fa = {int(f.fragment_id): f for f in da.get_fragments()}
+        fb = {int(f.fragment_id): f for f in db.get_fragments()}
+
+        def rows(frag: Any) -> tuple[int, bool]:
+            meta = frag.metadata
+            physical = int(getattr(meta, "physical_rows", 0) or 0)
+            deleted = getattr(meta, "deletion_file", None) is not None
+            return physical, deleted
+
+        for fid in sorted(set(fa) | set(fb)):
+            if fid not in fa:
+                physical, _ = rows(fb[fid])
+                out.add(f"fragment {fid}", "added", f"+{physical} rows")
+            elif fid not in fb:
+                physical, _ = rows(fa[fid])
+                out.add(f"fragment {fid}", "removed", f"-{physical} rows")
+            else:
+                ra, rb = rows(fa[fid]), rows(fb[fid])
+                if ra != rb:
+                    detail = "deletions changed" if ra[1] != rb[1] else "rewritten"
+                    out.add(f"fragment {fid}", "modified", detail)
+        cols_a, cols_b = set(da.schema.names), set(db.schema.names)
+        for name in sorted(cols_b - cols_a):
+            out.add(f"column {name}", "added")
+        for name in sorted(cols_a - cols_b):
+            out.add(f"column {name}", "removed")
+        return out
 
 
 def _factory(config: dict) -> LanceBackend:

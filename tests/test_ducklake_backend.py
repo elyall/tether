@@ -145,6 +145,32 @@ def test_ducklake_snapshots_are_addressable(tmp_path: Path) -> None:
         b.fork(loc, Pin(id="abc", ref="tether.abc"), "x")
 
 
+def test_ducklake_diff_per_table(tmp_path: Path) -> None:
+    b = DuckLakeBackend()
+    loc = _lake(tmp_path, "lake")
+    _sql(loc, "CREATE TABLE w.t (a INTEGER)", "INSERT INTO w.t VALUES (1), (2)")
+    s1 = b.fingerprint(loc, None)
+    _sql(
+        loc,
+        "INSERT INTO w.t SELECT range FROM range(5000)",
+        "DELETE FROM w.t WHERE a = 1",
+        "CREATE TABLE w.u (b TEXT)",
+        "CREATE TABLE w.gone (c INTEGER)",
+        "DROP TABLE w.gone",
+    )
+    s2 = b.fingerprint(loc, None)
+    d = b.diff(loc, s1, s2)
+    assert d.unit == "tables"
+    by_path = {e.path: e for e in d.entries}
+    assert by_path["main.t"].change == "modified"
+    # Exact delete counts depend on how DuckLake rewrites inlined rows.
+    assert by_path["main.t"].detail.startswith("+5000 rows, -")
+    assert by_path["main.u"].change == "added"
+    assert by_path["main.gone"].change == "removed"
+    assert b.diff(loc, s2, s2).is_empty
+    assert "older" in b.diff(loc, s2, s1).note
+
+
 def test_attach_sql_quotes_and_options() -> None:
     assert (
         attach_sql("ducklake:a'b.db", "x")

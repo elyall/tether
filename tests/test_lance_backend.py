@@ -112,3 +112,25 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     )
     with pytest.raises(BackendError):
         b.fingerprint({"uri": str(tmp_path / "absent.lance")}, None)
+
+
+def test_lance_diff_reports_fragments_and_columns(tmp_path: Path) -> None:
+    b = LanceBackend()
+    uri = str(tmp_path / "d.lance")
+    lance.write_dataset(pa.table({"a": [1, 2, 3]}), uri)
+    loc = {"uri": uri}
+    s1 = b.fingerprint(loc, None)
+    _append(lance.dataset(uri), 4)
+    lance.dataset(uri).delete("a = 2")
+    s3 = b.fingerprint(loc, None)
+    d = b.diff(loc, s1, s3)
+    assert d.unit == "fragments" and (d.added, d.removed, d.modified) == (1, 0, 1)
+    assert {(e.path, e.change, e.detail) for e in d.entries} == {
+        ("fragment 1", "added", "+1 rows"),
+        ("fragment 0", "modified", "deletions changed"),
+    }
+    lance.dataset(uri).add_columns({"b": "a * 2"})
+    s4 = b.fingerprint(loc, None)
+    d2 = b.diff(loc, s3, s4)
+    assert [(e.path, e.change) for e in d2.entries] == [("column b", "added")]
+    assert b.diff(loc, s4, s4).is_empty

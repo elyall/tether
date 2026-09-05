@@ -76,5 +76,27 @@ def test_delta_versions_are_addressable(tmp_path: Path) -> None:
         b.fingerprint({"uri": str(tmp_path / "absent")}, None)
     with pytest.raises(CapabilityError):
         b.pin(loc, s1, "abc")
+
+
+def test_delta_diff_lists_commits(tmp_path: Path) -> None:
+    b = DeltaBackend()
+    uri = str(tmp_path / "t")
+    loc = {"uri": uri}
+    _write(uri, 1, mode="overwrite")
+    s0 = b.fingerprint(loc, None)
+    deltalake.write_deltalake(uri, pa.table({"a": [2, 3]}), mode="append")
+    deltalake.DeltaTable(uri).delete("a = 2")
+    s2 = b.fingerprint(loc, None)
+    assert s2["version"] == 2
+    d = b.diff(loc, s0, s2)
+    assert d.unit == "commits" and d.modified == 2 and not d.note
+    assert [e.path for e in d.entries] == ["v1", "v2"]
+    assert d.entries[0].detail == "WRITE: +2 rows, +1 files"
+    assert (
+        d.entries[1].detail.startswith("DELETE: ") and "-1 rows" in d.entries[1].detail
+    )
+    assert b.diff(loc, s2, s2).is_empty
+    recreated = b.diff(loc, s0, dict(s2, table_id="other"))
+    assert "recreated" in recreated.note
     with pytest.raises(CapabilityError):
         b.fork(loc, Pin(id="abc", ref="tether.abc"), "x")
