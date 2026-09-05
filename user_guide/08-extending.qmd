@@ -1,0 +1,150 @@
+---
+title: "Writing a Backend"
+---
+
+A backend maps tether's operations onto one class of system. One instance
+serves every object of its kind; per-object addressing travels in the
+`locator`, so backends are cheap, stateless coordinators over resources the
+user already has. Implement the `ObjectBackend` protocol
+(`tether.backends.base`), register it, and run the conformance suite.
+
+## The protocol
+
+```python
+from tether.backends import Capability, ObjectBackend, ObjectDiff, VerifyReport, VerifyStatus, register_backend
+from tether.handles import Handle
+from tether.manifest import Locator, Pin, State, ref_for_pin
+
+
+class MyBackend(ObjectBackend):
+    kind = "mysys"
+    capabilities = (
+        Capability.FINGERPRINT | Capability.ADDRESSABLE | Capability.PIN | Capability.FORK
+        | Capability.ATOMIC_REF | Capability.DIFF
+    )
+
+    def __init__(self, config: dict | None = None) -> None:
+        self._config = config or {}          # [backends.mysys] from tether.toml
+
+    def identity(self, locator: Locator) -> Locator: ...
+    def fingerprint(self, locator: Locator, working_ref: str | None) -> State: ...
+    def pin(self, locator: Locator, state: State, pin_id: str) -> Pin: ...
+    def unpin(self, locator: Locator, pin: Pin) -> None: ...
+    def list_pins(self, locator: Locator) -> set[str]: ...
+    def verify(self, locator: Locator, state: State, pin: Pin | None, deep: bool) -> VerifyReport: ...
+    def fork(self, locator: Locator, pin: Pin, name: str) -> str: ...
+    def delete_working_ref(self, locator: Locator, ref: str) -> None: ...
+    def open(self, locator: Locator, target: str | Pin | State | None, read_only: bool) -> Handle: ...
+
+
+register_backend("mysys", lambda config: MyBackend(config))
+```
+
+Method by method:
+
+| Method | Contract |
+| --- | --- |
+| `identity(locator)` | The subset of the locator that names the *system* (not the branch, region, or credential references). It is hashed into the pin id, so two objects with the same identity and state share a pin. |
+| `fingerprint(locator, working_ref)` | The current state at `working_ref` (a branch `fork` returned) or at the locator's base ref when `None`. Must be a JSON-compatible dict, stable across calls when nothing changed, and different after any change. Metadata only where possible. |
+| `pin(locator, state, pin_id)` | Create the native ref `ref_for_pin(pin_id)` (`tether.<id>`) pointing at `state`. Idempotent: if it exists and points at the same state, return it; if it points elsewhere, raise `BackendError`. |
+| `unpin(locator, pin)` | Delete the ref; ignore "already gone". |
+| `list_pins(locator)` | Pin ids (without the `tether.` prefix) that exist natively. `gc` subtracts the referenced ones. |
+| `verify(locator, state, pin, deep)` | With a pin: `OK` if it resolves to `state`, `DRIFTED` if it points elsewhere, `MISSING` if gone. Without: `UNKNOWN` unless `deep`, then actually open the state. |
+| `fork(locator, pin, name)` | Create writable branch `name` at the pin's state and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). Reset semantics if it already exists. |
+| `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. |
+| `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
+
+Optional members:
+
+- `effective_capabilities(locator, policy) -> Capability` when the tier varies
+  per object (the `file` backend is Observed for a local directory and
+  Addressable for a versioned object).
+- `check_quiescence(locator, working_ref)` for `NEEDS_QUIESCENCE` backends;
+  raise `BackendError` if writers are active.
+- `listing(locator, state) -> str | None` and
+  `diff(locator, a, b, *, listings) -> ObjectDiff` for `DIFF` (below).
+
+Raise `BackendError` (or `CapabilityError` for unsupported operations) with
+`kind=self.kind`; the engine aggregates per-object failures into
+`MultiObjectError`. Import optional third-party libraries *inside* methods so
+`import tether.backends.mysys` works without them and the error surfaces when
+the backend is actually used.
+
+## Capabilities decide behavior
+
+Declare only what the system truly supports; the engine degrades explicitly.
+
+| Capability | The engine will... |
+| --- | --- |
+| `FINGERPRINT` | fingerprint on every command (required) |
+| `ADDRESSABLE` | let `open(state)` read a recorded state without a pin |
+| `PIN` | call `pin` on commit, `list_pins`/`unpin` in `gc`, `verify` with the pin |
+| `FORK` | call `fork` in `new` and return writable handles from `open` |
+| `CHEAP_FINGERPRINT` | (informational) metadata-only reads |
+| `RETENTION_BOUND` | (informational) surface that recoverability expires |
+| `NEEDS_QUIESCENCE` | call `check_quiescence` before pinning |
+| `ATOMIC_REF` | (informational) pins are create-if-absent |
+| `DIFF` | call `diff` for `diff --content`, `listing` at commit |
+
+## Content diffs and listings
+
+`diff(locator, a, b, *, listings)` returns an `ObjectDiff`: a `unit` naming
+what is counted (files, tables, arrays, ...), exact `added`/`removed`/
+`modified` counts, and entries (capped at 2000; use `out.add(path, change,
+detail)`). Read metadata only; never data.
+
+If your state is a digest that cannot be diffed on its own, also implement
+`listing(locator, state)` to return a detailed text description (JSON lines
+work well). The engine stores it under `.tether/listings/` at commit, commits
+it, and hands both sides back in `listings=(text_a, text_b)` at diff time --
+so make `diff` degrade gracefully (a summary line) when either is `None`.
+
+## Conformance suite
+
+`tether.testing.run_conformance` runs the tier-appropriate checks against any
+backend. Provide a harness that can create a fresh system and mutate it:
+
+```python
+from tether.backends import ObjectBackend
+from tether.manifest import Locator
+from tether.testing import run_conformance
+
+
+class MyHarness:
+    def __init__(self) -> None:
+        self.backend: ObjectBackend = MyBackend()
+        self._n = 0
+
+    def new_object(self) -> Locator:
+        ...  # create an empty system with a `main` branch; return its locator
+
+    def mutate(self, locator: Locator, working_ref: str | None) -> None:
+        self._n += 1
+        ...  # write something new at working_ref (or the base branch)
+
+
+def test_conformance() -> None:
+    run_conformance(MyHarness())
+```
+
+The suite checks fingerprint stability and change, identity/pin-id
+determinism, `DIFF` (empty self-diff, non-empty after a mutation),
+`ADDRESSABLE` (open by state), `PIN` (create, list, verify shallow and deep,
+idempotency, protection against later drift of the working ref), `FORK` (a
+fresh fork fingerprints equal to the pinned state; writes to the fork leave the
+base untouched), and unpin. A harness may set `capabilities` to exercise a
+specific tier of a multi-tier backend.
+
+Look at `tether.backends.memory` for the executable specification the suite was
+written against, and at `tether.backends.lance` for a Forkable backend that had
+to bend the mapping (branch-scoped version numbers, undeletable tagged
+branches) without breaking the contract.
+
+## VCS adapters
+
+Backends never touch the VCS. If you need to support another version-control
+system for the *manifests*, implement `tether.vcs.VcsAdapter` (resolve, read
+and list files at a revision, stream history, commit, new) and extend
+`detect_vcs`. The jj and git adapters read history through one
+`git cat-file --batch` process (`GitObjectReader`); a non-git store should aim
+for the same batching to keep `gc` and `verify --all-history` fast.

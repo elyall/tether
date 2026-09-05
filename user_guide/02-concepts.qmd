@@ -1,0 +1,106 @@
+---
+title: "Concepts"
+---
+
+tether borrows its shape from [jj](https://jj-vcs.dev): there is a working copy
+that gets snapshotted on every command, commits that record it, and `new` to
+start working on top of a commit. What differs is *what* is versioned: not
+files in a tree, but the state of external systems that keep their own
+history.
+
+## The working copy is the manifests
+
+A dataset is a directory holding `tether.toml` and `.tether/objects/<key>.toml`,
+one manifest per registered object. A manifest names the object (`kind` +
+`locator`), its policy, and -- once committed -- its recorded `state` and, if
+any, its `pin`. Committing a dataset means committing those manifests to the
+enclosing git/jj repository. History, undo, bookmarks, workspaces, and sharing
+are therefore the VCS's, not tether's.
+
+| jj | tether |
+| --- | --- |
+| working copy | the VCS working dir; the committed thing is the manifests |
+| snapshot on every command | **snapshot**: concurrent fan-out fingerprint of every object |
+| `jj commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
+| `jj new <rev>` | checkout + **fork** fan-out (fresh writable branch per object) |
+| stale working copy | manifest hash recorded at fork differs from HEAD: refuse writes |
+| `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
+| -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins) |
+
+## State, pin, fork
+
+For each object a backend implements three things, in increasing order of what
+the system must support:
+
+- **State**: what the object *is* right now -- an Icechunk `snapshot_id`, a
+  Neon `(lsn, next_xid)`, a Delta `version`, a directory's size/mtime digest.
+  Comparing states is how drift is detected without watching anything.
+- **Pin**: a durable, GC-proof native reference to a state, named
+  `tether.<pin_id>` -- an Icechunk tag, a protected Neon child branch, a git
+  tag, a Lance tag, a Dolt tag. `pin_id = blake2b(kind, locator identity,
+  state)[:12]`, so identical state on the same object yields the same pin and
+  re-committing an unchanged object is a no-op.
+- **Fork**: a fresh writable branch created off a pin. `tether new` forks one per
+  Forkable object, named `tether.ws.<workspace-id>.<key>`, so workspaces never
+  collide.
+
+## Capability tiers
+
+Backends declare capabilities; commands degrade explicitly by tier.
+
+- **Observed** (`FINGERPRINT`): drift detection only. `commit` records the state
+  and marks it `recoverable = false`. A local directory by mtime, an
+  unversioned S3 prefix.
+- **Addressable** (`+ ADDRESSABLE`): the recorded state can be read back later
+  with nothing to create or GC. An S3 object in a versioned bucket, a Delta
+  version, a DuckLake snapshot.
+- **Pinnable** (`+ PIN`): a durable native ref can be created and deleted;
+  `verify` and `gc` apply.
+- **Forkable** (`+ FORK`): a writable branch can be created off a pin; `new`
+  forks and `open` returns a writable handle. Icechunk, Neon, Iceberg, Lance,
+  lakeFS, Dolt, git/jj.
+
+Orthogonal flags refine behavior: `CHEAP_FINGERPRINT` (metadata only),
+`RETENTION_BOUND` (recoverability expires with a retention window),
+`NEEDS_QUIESCENCE` (commit checks for active writers), `ATOMIC_REF`
+(create-if-absent pins), `DIFF` (native content diffs).
+
+## Handles, not data
+
+tether is never in the data path. `open` returns a typed handle carrying the
+native address -- an Icechunk session on the right branch or tag, a Postgres
+URL, a `DeltaTable` at a version, a `lakefs://repo/ref/prefix/` URI -- and steps
+aside. You read and write with the system's own library.
+
+## Stale working copies
+
+`tether new` records the manifest hash it forked from. If HEAD's manifests
+later change (someone committed, you switched revisions), the workspace is
+*stale*: `status` says so and writable `open` refuses with
+`StaleWorkingCopyError` until you `tether new` again. This is jj's
+stale-working-copy check applied to external branches.
+
+## Drift
+
+Snapshots happen on every command, so drift is caught at the next touch rather
+than by a daemon. An Observed object registered as immutable (the default for
+`file`) that changes on disk is an *error* at `status`; a Forkable object whose
+working branch moved is simply `modified` and will be pinned on the next
+commit. `verify` answers the other question -- do the pins we recorded still
+resolve to the states we recorded? -- cheaply by default, deeply with `--deep`,
+and across every commit with `--all-history`.
+
+## Listings
+
+A directory or prefix state is only a digest, so it cannot be diffed on its
+own. At commit time the `file` backend hands tether a per-file listing, stored
+content-addressed under `.tether/listings/` and committed with the manifests
+(the same trick as DVC's `.dir` files). `diff --content` compares two listings
+file by file; `gc` prunes listings no manifest references.
+
+## What tether does not do
+
+- Cross-system atomicity. A commit records each object's state within a
+  capture window; point-consistency requires quiesced writers.
+- Reimplement history, undo, branching, or sharing. That is the VCS's job.
+- Queries or transactions across systems.

@@ -1,0 +1,143 @@
+---
+title: "CLI Guide"
+---
+
+The per-command reference (arguments, options, `--help` text) is generated from
+the Typer app and lives under **Reference → CLI**. This page covers what the
+help text cannot: how the commands compose, what they print as JSON, exit
+codes, and environment.
+
+```
+tether init [PATH]
+tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write fork|track] [--file immutable|versioned] [--pin native|record]
+tether remove KEY
+tether status [--no-snapshot]
+tether snapshot
+tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot]
+tether new [REV] [--keep]
+tether open KEY [-r REV] [--read-only | --writable]
+tether verify [-r REV] [--all-history] [--deep]
+tether diff [REV_A] [REV_B] [--content] [--limit N]
+tether gc [--dry-run | --no-dry-run]
+```
+
+Commands run from anywhere inside a dataset: the root is found by walking up to
+the nearest `tether.toml`. Every command that inspects external systems fans out
+concurrently across objects, and every command that prints a result accepts
+`--json`.
+
+## Exit codes and errors
+
+`0` on success, `1` on any `TetherError` (printed to stderr as `error: ...`).
+`verify` also exits `1` when any report is not `ok`, which makes it a natural
+CI gate. Failures in one object's backend during a fan-out are aggregated into
+one message listing each object.
+
+## Revisions
+
+`REV` arguments are passed to the enclosing VCS untouched: jj revsets (`@`,
+`@-`, `main`, change ids) in a jj repository, git revisions (`HEAD~2`, tags,
+shas) in a git repository.
+
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
+| `PATH`, `JJ_CONFIG` | Used by the `jj` / `git` executables tether shells out to (also configurable via `[vcs] jj_path` / `git_path`). |
+| Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](07-backends.qmd). |
+
+## Locator options for `add`
+
+The positional `LOCATOR` becomes the `uri` field. Named options map to locator
+fields; `--set key=value` (repeatable) covers everything else. Which fields a
+backend reads is listed per backend in [Backends](07-backends.qmd).
+
+| Option | Locator field | Typical backends |
+| --- | --- | --- |
+| `LOCATOR` (positional) | `uri` | file, icechunk, delta, lance, ducklake (`metadata`) |
+| `--branch` | `branch` | icechunk, neon, iceberg, lance, lakefs, dolt |
+| `--project-id`, `--database`, `--role` | same | neon; `--database` also dolt |
+| `--remote` | `remote` | git (push pins to a remote) |
+| `--region` | `region` | file (object stores), icechunk, delta |
+| `--repository`, `--prefix` | same | lakefs |
+| `--host`, `--port` | same | dolt |
+| `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
+| `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
+
+Policy options: `--write fork|track` (fork a per-workspace branch on `new`, or
+stay on the base branch), `--file immutable|versioned` (`file` only: treat drift
+as an error, or record object-store version ids), `--pin native|record`
+(`iceberg` only: create a tag, or rely on snapshot retention).
+
+## Status labels
+
+```
+dataset 3f9c2a1b7d0e (STALE)
+       new  raw/plate1  [file/observed] unrecoverable
+  modified  zarr/imaging  [icechunk/forkable]
+     clean  db/rosebud  [neon/forkable] verify=ok
+```
+
+- `new` never committed; `modified` current state differs from the committed
+  one; `clean` unchanged; `error` the fingerprint failed.
+- `unrecoverable`: the committed state cannot be reconstructed later (Observed).
+- `(STALE)`: HEAD's manifests changed since this workspace forked its refs;
+  run `tether new` before writing.
+- `verify=`: shown when `[verify] on_status = true`.
+
+`--no-snapshot` reuses the cached fingerprints (useful when a Neon compute is
+suspended); `[snapshot] auto = false` makes that the default.
+
+## What `commit` does
+
+1. Snapshot (unless `--no-snapshot`), then quiescence checks for backends that
+   need them (Neon refuses while writers are active; `--force` skips).
+2. For each object whose state changed: Pinnable/Forkable backends create the
+   native ref `tether.<pin_id>`; Addressable backends record the state;
+   Observed backends record it with `recoverable = false` (`--strict` fails
+   instead). Unchanged objects are skipped.
+3. Write `.tether/objects/<key>.toml` and any `.tether/listings/<hash>.jsonl`,
+   then `jj commit` / `git commit` scoped to those paths (`--no-vcs` skips).
+4. With `[new] auto_fork = true`, refork working refs from the new pins.
+
+If a pin fails, pins created by the same commit are released best-effort.
+
+## What `open` prints
+
+| Handle | Address |
+| --- | --- |
+| `FileHandle` | `uri[#version_id]` |
+| `NeonHandle` | connection URL |
+| `GitHandle` | `path@sha` |
+| `IcechunkHandle` | `uri#<tag or branch or snapshot_id>` |
+| `IcebergHandle` | `identifier#<ref or snapshot_id>` |
+| `DeltaHandle` | `uri@vN` |
+| `LanceHandle` | `uri#tag` or `uri#branch@vN` |
+| `LakeFSHandle` | `lakefs://repo/ref/prefix/` |
+| `DuckLakeHandle` | `metadata#snapshot=N` |
+| `DoltHandle` | `mysql://user@host:port/db/ref` |
+
+Without `-r` (and without `TETHER_REV`), Forkable objects open **writable** at
+their working ref and everything else read-only at the base. With `-r REV`, the
+handle is read-only at that commit's pinned (or recorded Addressable) state.
+
+## `diff` defaults
+
+No arguments: current commit vs working tree. One revision: that revision vs
+nothing (everything `removed`). Two: `REV_A → REV_B`. `--content` adds each
+changed object's native diff; `--limit` caps entries printed per object
+(counts stay exact).
+
+## JSON output
+
+| Command | Shape |
+| --- | --- |
+| `init` | `{"root": "<absolute path>"}` |
+| `status` | `{"manifest_hash", "stale", "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
+| `snapshot` | `{key: state}` |
+| `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}` |
+| `open` | `{"key", "read_only", "address", "type"}` |
+| `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
+| `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
+| `gc` | `{"dry_run", "unpinned": {kind: [pin_ids]}, "deleted_listings": [names]}` |

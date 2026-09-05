@@ -1,0 +1,270 @@
+---
+title: "Pinning"
+---
+
+*Pinning* is recording the exact state of every object in a commit so it can be
+read back later -- and, for systems that support it, protecting that state with
+a native reference that survives retention and cleanup. This walkthrough builds
+a small dataset, pins it twice, reproduces reads from the first commit, and
+shows how drift, verification, and garbage collection behave.
+
+The dataset: an Icechunk repository of imaging data on S3, a Neon Postgres
+database of metrics, and a directory of raw plate images.
+
+## Register the objects
+
+```bash
+tether init
+tether add zarr/imaging --kind icechunk s3://lab-data/imaging.icechunk --branch main
+tether add db/metrics   --kind neon --project-id prj-9f2 --database metrics --role runner
+tether add raw/plate1   --kind file /mnt/instruments/plate1/
+```
+
+`add` writes manifests only; the systems are first contacted by `status`:
+
+```bash
+tether status
+```
+
+```
+dataset 0f2e9c7a11b3
+       new  db/metrics  [neon/forkable]
+       new  raw/plate1  [file/observed] unrecoverable
+       new  zarr/imaging  [icechunk/forkable]
+```
+
+The tiers already tell you what pinning will mean for each object: Icechunk and
+Neon are *Forkable* (a native ref will be created), the directory is *Observed*
+(its state can be recorded but not re-read, hence `unrecoverable`).
+
+## Pin: the first commit
+
+```bash
+tether commit -m "Baseline: plate1 imaging + metrics"
+```
+
+```
+  pinned zarr/imaging -> tether.6674305d5e1f
+  pinned db/metrics -> tether.a91f0e2b77c3
+  recorded raw/plate1 (not recoverable)
+committed 8d5719841a09
+```
+
+What happened, per object:
+
+| Object | State recorded | Pin created |
+| --- | --- | --- |
+| `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.6674305d5e1f` (immutable, excluded from expiry) |
+| `db/metrics` | `lsn`, `next_xid` of `main` | protected Neon child branch `tether.a91f0e2b77c3` at that LSN |
+| `raw/plate1` | `count`, `size`, `digest` | none; the per-file listing is stored under `.tether/listings/` |
+
+Then the manifests (and the listing) were committed to your jj/git repository as
+`8d5719841a09`. Look at what was committed:
+
+```bash
+jj diff -r 8d571984      # or: git show --stat 8d571984
+```
+
+```
+Added regular file .tether/objects/zarr/imaging.toml:
+        1: key = "zarr/imaging"
+        2: kind = "icechunk"
+        3: recoverable = true
+        ...
+       15: [state]
+       16: snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
+       18: [pin]
+       19: id = "6674305d5e1f"
+       20: ref = "tether.6674305d5e1f"
+```
+
+Pin ids are content-addressed from `(kind, locator identity, state)`. Commit
+again without changing anything and every object is reported `unchanged`; no
+new refs are created.
+
+## Pin again after the data moves
+
+Some time later the imaging repository gets a new commit on `main` and the
+metrics database has been written to:
+
+```bash
+tether status
+```
+
+```
+dataset 0f2e9c7a11b3
+  modified  db/metrics  [neon/forkable]
+     clean  raw/plate1  [file/observed] unrecoverable
+  modified  zarr/imaging  [icechunk/forkable]
+```
+
+```bash
+tether commit -m "Re-segmented plate1; metrics through 2026-09-04"
+```
+
+```
+  pinned zarr/imaging -> tether.deb4861eb388
+  pinned db/metrics -> tether.0c31e7aa5f92
+committed cfc66fa79c0a
+```
+
+Two commits now describe two complete, consistent-as-captured states of the
+whole dataset. Compare them:
+
+```bash
+tether diff 8d571984 cfc66fa7 --content
+```
+
+```
+    changed  db/metrics  [+0 -0 ~0 tables]
+    changed  zarr/imaging  [+0 -0 ~3 nodes]
+               modified  /labels  12 chunks
+               modified  /masks  12 chunks
+               modified  /  group metadata
+```
+
+(Neon has no native diff, so `db/metrics` shows only that it changed; Icechunk
+reports the arrays whose chunks were rewritten.)
+
+## Reproduce reads from a pinned commit
+
+This is the payoff. Any process can resolve every object *as it was* at a
+commit. From the CLI:
+
+```bash
+tether open zarr/imaging -r 8d571984
+```
+
+```
+s3://lab-data/imaging.icechunk#tether.6674305d5e1f
+```
+
+```bash
+tether open db/metrics -r 8d571984
+```
+
+```
+postgresql://runner@ep-quiet-lake-a1b2c3.us-west-2.aws.neon.tech/metrics?...
+```
+
+From Python, the same handles come with native objects attached:
+
+```python
+from tether import Repo
+from tether.handles import IcechunkHandle, NeonHandle
+
+repo = Repo.find(".")
+
+imaging = repo.open("zarr/imaging", rev="8d571984")
+assert isinstance(imaging, IcechunkHandle) and imaging.read_only
+store = imaging.session.store          # read-only icechunk session at the tag
+# zarr.open_group(store, mode="r") ...
+
+metrics = repo.open("db/metrics", rev="8d571984")
+assert isinstance(metrics, NeonHandle)
+metrics.url                            # connection URL for the pinned branch
+```
+
+For reproducible jobs, set `TETHER_REV` instead of passing `rev` everywhere;
+`repo.open(key)` then defaults to a read-only handle at that commit:
+
+```bash
+TETHER_REV=8d571984 python run_analysis.py
+```
+
+```python
+repo = Repo.find(".")
+handle = repo.open("zarr/imaging")    # read-only, pinned; no code change needed
+```
+
+Record `TETHER_REV` (or `repo.vcs.current_rev()`) and each object's `pin.id`
+next to your results and any output can be traced back to the exact state of
+every input:
+
+```python
+provenance = {
+    "tether_rev": os.environ.get("TETHER_REV") or repo.vcs.current_rev(),
+    "pins": {k: (m.pin.id if m.pin else None) for k, m in repo.objects.items()},
+}
+```
+
+`raw/plate1` cannot be opened at a revision: it is Observed, and its state at
+`8d571984` is a digest, not an address. Promote directories that must be
+recoverable to an object store with versioning enabled and register single
+objects with `--file versioned`, or put them in lakeFS.
+
+## Drift
+
+Because tether snapshots on every command, drift surfaces the next time you
+touch the dataset. The directory was registered with the default
+`--file immutable`, so if a file under `/mnt/instruments/plate1/` changes:
+
+```bash
+tether status
+```
+
+```
+error: [raw/plate1] immutable object 'raw/plate1' changed since it was committed;
+re-register with acceptance to record the new state
+```
+
+That is deliberate: an "immutable" input silently changing is the worst kind of
+drift. Either the change is legitimate (`tether remove raw/plate1` and `add` it
+again, then commit) or something wrote where it should not have. Forkable
+objects drift too, but benignly -- their branch moved, `status` says `modified`,
+and the next commit pins the new state.
+
+## Verify
+
+Pins are references *inside other systems*, and those systems have their own
+operators. `verify` confirms they still resolve to what the manifests say:
+
+```bash
+tether verify                      # working-tree manifests, cheap checks
+tether verify -r 8d571984 --deep   # actually open each pinned state
+tether verify --all-history --deep # every commit in the repository
+```
+
+```
+        ok  8d5719841a09:db/metrics
+        ok  8d5719841a09:zarr/imaging
+        ok  cfc66fa79c0a:db/metrics
+        ok  cfc66fa79c0a:zarr/imaging
+```
+
+A report is `ok`, `drifted` (the ref exists but points elsewhere), `missing`
+(the ref or snapshot is gone -- expired, deleted), or `unknown` (cannot tell
+without `--deep`). `--all-history` streams every manifest at every commit
+through one object reader and verifies each distinct pin once, so it stays fast
+on long histories. Exit status is non-zero if anything is not `ok`, which makes
+it a natural CI check.
+
+## Garbage collection
+
+Pins are created before the VCS commit lands, so an aborted commit -- or history
+you rewrote or abandoned -- can leave native refs nothing references. `gc`
+collects every pin id mentioned by any manifest in history or the working tree,
+lists what exists natively, and releases the rest:
+
+```bash
+tether gc                 # dry run: report only
+tether gc --no-dry-run    # release orphaned pins, prune unreferenced listings
+```
+
+```
+would unpin 1 pin(s)
+  icechunk: 3c80e6bda56d
+```
+
+Run `verify --all-history` first; `gc` trusts history, and a pin that is
+referenced but broken is a `verify` finding, not a `gc` one.
+
+## Recap
+
+- `commit` pins every Pinnable/Forkable object and records the rest; the VCS
+  commit id names the whole state.
+- `open -r <rev>` / `TETHER_REV` resolve any object read-only at that commit.
+- Observed objects record state but cannot be re-read; use versioned storage
+  or lakeFS if you need to.
+- `status` catches drift on every command; `verify` confirms pins still hold;
+  `gc` releases pins no commit references.

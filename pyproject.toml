@@ -85,6 +85,12 @@ dev = [
     "icechunk>=1.0",
     "pyarrow>=15",
 ]
+# Documentation site (Great Docs on Quarto). `quarto-cli` pins the Quarto
+# binary alongside the Python deps so local and CI builds match.
+docs = [
+    "great-docs>=0.17",
+    "quarto-cli>=1.7",
+]
 
 [tool.uv]
 package = true

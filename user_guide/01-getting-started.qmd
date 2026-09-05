@@ -1,0 +1,87 @@
+---
+title: "Getting Started"
+---
+
+tether ties heterogeneous data objects -- files and object-store prefixes,
+Icechunk repositories, Neon Postgres databases, Iceberg / Delta / DuckLake
+tables, Lance datasets, lakeFS repositories, Dolt databases, git/jj
+repositories -- to the commits of an existing git or jj repository. A commit
+records every object's state and, where the system supports it, creates a
+durable native reference (a tag, a branch at an LSN) so that state can be read
+back and branched from later.
+
+## Install
+
+```bash
+pip install tether[cli]                 # core + CLI
+pip install tether[cli,icechunk,neon]   # add the backends you use
+pip install tether[all]                 # everything
+```
+
+Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`, `azure`
+are aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`,
+`ducklake`, `dolt`. `git` and/or `jj` must be on `PATH`: tether stores its
+history inside your repository rather than keeping its own.
+
+## A dataset in five commands
+
+Run these inside any git or jj repository (a new one is fine):
+
+```bash
+tether init
+tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --branch main
+tether add db/rosebud   --kind neon --project-id prj-123 --database neondb --role runner
+tether add raw/plate1   --kind file s3://bucket/raw/plate1/
+tether status
+```
+
+```
+dataset 0f2e9c7a11b3
+       new  db/rosebud  [neon/forkable]
+       new  raw/plate1  [file/observed] unrecoverable
+       new  zarr/imaging  [icechunk/forkable]
+```
+
+`status` fanned out to all three systems concurrently, fingerprinted each one
+(a Neon LSN, an Icechunk snapshot id, an etag digest over the prefix), and
+classified them. Nothing has been recorded yet; `init` and `add` only wrote
+small TOML manifests under `.tether/`.
+
+```bash
+tether commit -m "Baseline imaging + metrics"
+```
+
+```
+  pinned zarr/imaging -> tether.6674305d5e1f
+  pinned db/rosebud -> tether.a91f0e2b77c3
+  recorded raw/plate1 (not recoverable)
+committed 8d5719841a09
+```
+
+That one command created an Icechunk tag and a protected Neon branch (the
+*pins*), wrote the states into the manifests, and made a jj/git commit of those
+manifests. The commit id is the handle for this exact combination of states,
+forever.
+
+Where to next:
+
+- [Pinning](03-pinning.qmd) walks through recording state, reproducing reads
+  from a past commit, drift detection, verification, and garbage collection.
+- [Branching and writing](04-branching-and-writing.qmd) covers `tether new`,
+  writable handles, and committing your changes.
+- [Concepts](02-concepts.qmd) explains the model (tiers, pins, forks, stale
+  working copies) in one page.
+
+## Layout
+
+```
+<dataset-root>/
+  tether.toml                 # committed config
+  .tether/
+    .gitignore                # ignores workspace.toml
+    objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
+    listings/<hash>.jsonl     # committed per-file listings for directory/prefix states
+    workspace.toml            # untracked: workspace id, working refs, cached snapshot
+```
+
+Everything committed is small, text, and reviewable in `jj diff` / `git diff`.

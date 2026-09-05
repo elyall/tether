@@ -1,0 +1,90 @@
+---
+title: "Configuration"
+---
+
+A dataset's configuration is `tether.toml` at the dataset root, committed with
+the manifests and loaded into `RepoConfig`. Every key has a default; a minimal
+file is just `[tether] version = 1`.
+
+```toml
+[tether]
+version = 1
+
+[snapshot]
+auto = true          # CLI status/commit fingerprint by default (--no-snapshot wins)
+
+[verify]
+on_status = false    # also run a cheap verify of each committed object in status
+
+[new]
+auto_fork = false    # commit re-forks working refs from the pins it just created
+
+[defaults]           # policy for objects added without an explicit one
+write = "fork"       # fork | track
+file = "immutable"   # immutable | versioned
+pin = "native"       # native | record
+
+[vcs]
+prefer = "jj"        # which adapter to use when both .jj and .git exist
+# jj_path = "/opt/jj/bin/jj"
+# git_path = "/usr/bin/git"
+
+[backends.file]      # passed verbatim to the backend factory; one table per kind
+storage_options = { region = "us-west-2" }
+
+[backends.neon]
+api_key_env = "NEON_API_KEY"
+
+[backends.ducklake]
+init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
+```
+
+## Policies
+
+A `Policy` is stored per object (`[policy]` in its manifest) and set with the
+`--write`, `--file`, `--pin` options of `tether add` or `Repo.add(policy=...)`.
+
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `write` | `fork` (default), `track` | `fork`: `new` creates a fresh per-workspace branch off the pin. `track`: the working ref is the locator's branch (e.g. `main`); use for production branches that must not be forked. |
+| `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
+| `pin` | `native` (default), `record` | `iceberg` only. `record` creates no native tag (for catalogs where user refs disable maintenance) and relies on snapshot retention. |
+
+## Backend options
+
+`[backends.<kind>]` is handed to the backend when it is first used. Only
+non-secret settings belong here (regions, endpoints, environment-variable
+*names*); credentials come from the environment. The per-backend keys are
+listed in [Backends](07-backends.qmd).
+
+## Workspace state
+
+`.tether/workspace.toml` is untracked (ignored by the `.tether/.gitignore` that
+`init` writes) and is per checkout / per jj workspace:
+
+```toml
+workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
+base = "3ba1c07e55d2..."             # manifest hash the working refs were forked from
+last_snapshot_at = "2026-09-04T22:10:03.118Z"
+
+[working_refs]
+"zarr/imaging" = "tether.ws.7c1e0a4d.zarr-imaging"
+"db/metrics" = "tether.ws.7c1e0a4d.db-metrics"
+
+[last_snapshot."zarr/imaging"]
+snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
+```
+
+`base` drives stale-working-copy detection; `working_refs` are what `open`
+writes to; `last_snapshot` is what `--no-snapshot` reuses.
+
+## Environment variables
+
+| Variable | Read by |
+| --- | --- |
+| `TETHER_REV` | `Repo.open` / `tether open` default revision |
+| `NEON_API_KEY` (or `[backends.neon] api_key_env`) | neon |
+| `DOLT_PASSWORD`, `DOLT_USER` (or `password_env` / `user_env`) | dolt |
+| AWS / GCP / Azure credential chains | file (obstore), icechunk, delta, lance |
+| `LAKECTL_*` or `~/.lakectl.yaml` | lakefs |
+| pyiceberg catalog properties / env | iceberg |

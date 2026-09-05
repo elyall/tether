@@ -1,0 +1,263 @@
+---
+title: "Branching and Writing"
+---
+
+Pinning makes the past reproducible. *Branching* makes the present safe to
+change: `tether new` forks a fresh writable branch in every system off the
+pinned state, you write through native handles, and `commit` pins the results.
+Nothing you do on your branches touches `main` in any system until you decide
+it should.
+
+This walkthrough continues from [Pinning](03-pinning.qmd) and adds a Lance
+feature store and the analysis code itself as objects, so the recipe covers
+four different systems.
+
+## Register a few more objects
+
+```bash
+tether add features --kind lance s3://lab-data/features.lance
+tether add code     --kind git --set path=. --remote origin
+tether commit -m "Add feature store and code"
+```
+
+`code` pins the git repository the dataset lives in (its `HEAD` sha, as a tag),
+so a dataset commit also names the code that produced it.
+
+## Fork: `tether new`
+
+```bash
+tether new main
+```
+
+```
+forked working refs
+```
+
+For every Forkable object, `new` verified the pin recorded at `main` (cheaply)
+and created a branch from it, concurrently:
+
+| Object | Pin at `main` | Working ref created |
+| --- | --- | --- |
+| `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.7c1e0a4d.zarr-imaging` |
+| `db/metrics` | Neon branch | Neon child branch `tether.ws.7c1e0a4d.db-metrics` |
+| `features` | Lance tag | Lance branch `tether.ws.7c1e0a4d.features` |
+| `code` | git tag | git branch `tether.ws.7c1e0a4d.code` |
+
+`7c1e0a4d` is this workspace's id (from the untracked
+`.tether/workspace.toml`), so two people -- or two jj workspaces -- forking the
+same commit get disjoint branches everywhere. `raw/plate1` has no working ref:
+files cannot be forked.
+
+`status` now reads every object at its working ref, and all are `clean`: a
+fresh fork is, by construction, the pinned state.
+
+## Write through native handles
+
+`open` without `-r` returns a **writable** handle for Forkable objects,
+positioned on the working ref. tether hands you the system's own objects and
+gets out of the way.
+
+### Icechunk
+
+```python
+import zarr
+from tether import Repo
+from tether.handles import IcechunkHandle
+
+repo = Repo.find(".")
+h = repo.open("zarr/imaging")
+assert isinstance(h, IcechunkHandle) and not h.read_only
+print(h.branch)                       # tether.ws.7c1e0a4d.zarr-imaging
+
+group = zarr.open_group(h.session.store, mode="a")
+group["labels"][...] = relabel(group["labels"][...])
+h.session.commit("Relabel plate1 with model v3")   # an Icechunk commit on the fork
+```
+
+### Lance
+
+```python
+import lance, pyarrow as pa
+from tether.handles import LanceHandle
+
+h = repo.open("features")
+assert isinstance(h, LanceHandle)
+lance.write_dataset(pa.table({"well": ["A1"], "score": [0.91]}), h.dataset, mode="append")
+```
+
+### Neon (any Postgres client)
+
+```python
+import psycopg
+from tether.handles import NeonHandle
+
+h = repo.open("db/metrics")
+assert isinstance(h, NeonHandle)
+with psycopg.connect(h.url) as conn:     # URL for the forked branch's endpoint
+    conn.execute("INSERT INTO metrics (well, score) VALUES ('A1', 0.91)")
+```
+
+Opening a Neon fork writable creates a `read_write` compute endpoint on the
+branch if none exists; the URL points at it.
+
+### Code
+
+```python
+from tether.handles import GitHandle
+
+h = repo.open("code")
+assert isinstance(h, GitHandle)
+h.sha, h.path        # the fork branch's head; commit your code changes there
+```
+
+From the shell, `tether open <key>` prints the same addresses:
+
+```bash
+tether open db/metrics
+postgresql://runner@ep-brisk-forest-x9y8z7.us-west-2.aws.neon.tech/metrics?...
+tether open features
+s3://lab-data/features.lance#tether.ws.7c1e0a4d.features@v4
+```
+
+## See what changed
+
+```bash
+tether status
+```
+
+```
+dataset 3ba1c07e55d2
+  modified  code  [git/forkable]
+  modified  db/metrics  [neon/forkable]
+  modified  features  [lance/forkable]
+     clean  raw/plate1  [file/observed] unrecoverable
+  modified  zarr/imaging  [icechunk/forkable]
+```
+
+`diff` with no arguments compares the current commit's manifests with the
+working tree; nothing has been recorded yet, so use `--content` after the
+commit below. Meanwhile `main` in every system is untouched: the forks isolate
+your work.
+
+## Commit: pin the forks
+
+```bash
+tether commit -m "Relabel plate1 with model v3; scores for A1"
+```
+
+```
+  pinned code -> tether.f01a9d3c2b7e
+  pinned db/metrics -> tether.55e2ab7d9c10
+  pinned features -> tether.9e7c4b2f0a61
+  pinned zarr/imaging -> tether.deb4861eb388
+committed 41c0d9e2b7f3
+```
+
+Each pin points at the state of the *working branch*: an Icechunk tag on the
+fork's snapshot, a Lance tag on `(branch, version)`, a Neon branch at the
+fork's LSN, a git tag on the fork's sha. Then the manifests were committed.
+Now compare:
+
+```bash
+tether diff main @- --content
+```
+
+```
+    changed  code  [+0 -0 ~1 files]
+               modified  segment.py  +12 -3
+    changed  db/metrics
+    changed  features  [+1 -0 ~0 fragments]
+                  added  fragment 4  +1 rows
+    changed  zarr/imaging  [+0 -0 ~1 nodes]
+               modified  /labels  12 chunks
+```
+
+Continue writing on the same forks and committing as often as you like; each
+commit pins the latest state and the previous pins stay valid (they are what
+`open -r` and `verify` use).
+
+## Bringing it back to `main`
+
+tether does not merge. Promotion is a decision per system, made with the
+system's own tools once you are satisfied:
+
+- **Icechunk**: `repo.reset_branch("main", snapshot_id)` or re-commit the
+  fork's data onto `main`; then register/commit the dataset from `main`.
+- **Lance / git / lakeFS / Dolt**: merge or fast-forward with the native
+  command.
+- **Neon** cannot merge a child branch back. For production databases use
+  `--write track` (below) so the working ref *is* `main`, and rely on pins
+  (child branches at an LSN) for reproducibility rather than forks for
+  isolation.
+
+The VCS side is ordinary: land the dataset commit on `main` with `jj` or `git`
+as you would any other change. The pins it references are already durable.
+
+## `track` mode: write on the base branch
+
+Some objects should never be forked -- a production database, a shared
+`main` you deliberately advance. Register them with `--write track`:
+
+```bash
+tether add db/prod --kind neon --project-id prj-9f2 --database prod --role app --write track
+```
+
+For a `track` object, `tether new` sets the working ref to the locator's branch
+(`main`) instead of forking. `open` still returns a writable handle -- to
+`main` -- and `commit` still pins whatever state it finds there. You get
+reproducibility without branch sprawl, and the Neon quiescence check
+(`commit` refuses while writers are active unless `--force`) keeps pins
+consistent.
+
+## Stale working copies
+
+If HEAD's manifests change under you -- a teammate committed, or you `jj new`
+to another revision -- the forks were taken from a state that is no longer
+current:
+
+```bash
+tether status
+```
+
+```
+dataset 9d0e5f71ac22 (STALE)
+  ...
+```
+
+```bash
+tether open zarr/imaging
+error: working copy is stale (HEAD manifests changed since fork); run `tether new` to refork before writing
+```
+
+`tether new` reforks from the current pins and clears the flag. Work already on
+the old forks is not lost: the branches still exist in each system, and the
+pins you committed still reference them.
+
+## Workspaces and `auto_fork`
+
+Because working refs live in the *untracked* `.tether/workspace.toml`, each
+jj workspace (or each checkout) is an independent tether workspace with its own
+id and its own forks. Two agents working on the same dataset commit never write
+to the same branch.
+
+If you prefer jj's rhythm where every commit leaves you on a fresh working
+copy, set in `tether.toml`:
+
+```toml
+[new]
+auto_fork = true
+```
+
+`commit` then reforks working refs from the pins it just created, so the next
+write starts from exactly what was committed.
+
+## Recap
+
+- `tether new [rev]` forks a writable branch per Forkable object off the pins at
+  `rev`; names embed the workspace id so forks never collide.
+- `open` returns writable native handles on those forks; write with the
+  system's own library.
+- `commit` pins the forks' states and commits the manifests; `diff --content`
+  shows what changed inside each system.
+- Promotion to `main` is per system and deliberate; `--write track` skips
+  forking for objects that must stay on their base branch.

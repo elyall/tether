@@ -2,6 +2,10 @@
 
 **jj-style version control for heterogeneous datasets.**
 
+> Status: alpha. See the [changelog](https://github.com/tether-vcs/tether/blob/main/CHANGELOG.md).
+>
+> State: vibe coded with Claude Fable 5.1.
+
 `tether` ties heterogeneous data objects -- files and object-store prefixes (S3,
 GCS, Azure), [Icechunk](https://icechunk.io) repositories, [Neon](https://neon.com)
 Postgres databases, [Apache Iceberg](https://iceberg.apache.org) tables,
@@ -23,7 +27,10 @@ Think of it as **DVC for *branchable* systems**: like DVC it commits small
 manifests into your git/jj repo, but where DVC only fingerprints files, tether
 also *pins* and *forks* live systems.
 
-> Status: alpha. See [CHANGELOG.md](CHANGELOG.md).
+Documentation: <https://tether-vcs.github.io/tether/> -- user guide (getting
+started, concepts, pinning, branching and writing, CLI, configuration,
+backends, writing a backend) plus the generated API and CLI reference. The
+guide sources live in [`user_guide/`](https://github.com/tether-vcs/tether/tree/main/user_guide).
 
 ## Why this exists (prior art)
 
@@ -36,13 +43,15 @@ Every existing tool versions a single layer:
 | Dolt, pgGit, Neon, Databricks Lakebase | one database | vendor-bound; no external-object pins; Dolt and Neon are backends |
 | Nessie, Bauplan | Iceberg catalog branching | Iceberg-only |
 | Icechunk, Lance, Delta, DuckLake | one dataset / table / catalog | we use them as backends |
-| replikativ/yggdrasil | cross-system (Clojure) | right shape, not adoptable (immature, stale Python binding) |
+| [Yggdrasil](https://github.com/replikativ/yggdrasil) (replikativ) | cross-system: Clojure protocol stack (snapshot / branch / merge / watch) over Git, ZFS, Btrfs, IPFS, Iceberg, Datahike, lakeFS, Dolt, Podman, with an HLC-coordinated workspace | the closest conceptual sibling; not adoptable from Python (JVM library; its own README marks the Python binding as unmaintained since the initial release) |
 | Dagster observable assets | staleness detection | analog of our snapshot/drift step; no branching |
 
 Nothing provides unified version control *across* files + Icechunk + Postgres +
 Iceberg with pinning and forking. So tether borrows jj's working-copy model
 (fingerprint, snapshot on every command, stale-working-copy detection), DVC's
-manifests-in-VCS layout, and Yggdrasil's observe-then-record shape.
+manifests-in-VCS layout, and [Yggdrasil](https://github.com/replikativ/yggdrasil)'s
+observe-then-record shape (a workspace that watches independent systems and
+records their snapshots, rather than a store that holds the data).
 
 ## Install
 
@@ -116,8 +125,9 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 
 ```
 <dataset-root>/
-  tether.toml                 # committed: snapshot.auto, verify.on_status, new.auto_fork,
-                              #   default policies, backend options, credential *references*
+  tether.toml                 # committed: snapshot.auto (CLI snapshots by default), verify.on_status,
+                              #   new.auto_fork (commit re-forks working refs), default policies,
+                              #   backend options, credential *references*
   .tether/
     .gitignore                # ignores workspace.toml
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin

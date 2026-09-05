@@ -45,6 +45,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (working tree or VCS) for diffs, and prunes unreferenced ones in `gc`. The
   `file` backend uses it for directory/prefix listings so Observed directories
   diff file by file.
+- Documentation site built with [Great Docs](https://posit-dev.github.io/great-docs/)
+  (`great-docs.yml`, `docs` dependency group pinning `great-docs` and
+  `quarto-cli`, `.github/workflows/docs.yml` deploying to GitHub Pages). The
+  API reference is generated from docstrings, the CLI reference from the Typer
+  app (mirrored onto real Click objects by `tether._clickdoc`, since Typer
+  vendors its own Click), and the user guide lives in `user_guide/`: getting
+  started, concepts, pinning (worked example), branching and writing (worked
+  example), CLI guide, configuration, backends, writing a backend.
+- Docstrings: Google-style `Args`/`Returns`/`Raises` on every `Repo` method,
+  attribute docstrings on result types, handles, `Capability`, `Tier`,
+  `VerifyStatus`, and diff types; help text on every CLI option. The package
+  root re-exports the result types, manifest helpers, and the `handles`,
+  `backends`, `testing`, and `vcs` submodules.
+- `tether.Policy` and `tether.Pin` are exported from the package root.
+- `tether.toml`'s `[snapshot] auto` now sets the CLI default for
+  `status`/`commit` snapshotting (`--no-snapshot` still wins) and
+  `[new] auto_fork` makes `commit` re-fork working refs afterwards; both keys
+  were previously parsed but unused.
 
 ### Changed
 

@@ -17,3 +17,6 @@ coverage.xml
 
 # OS
 .DS_Store
+
+# Great Docs build output (great-docs.yml is the committed config)
+great-docs/
