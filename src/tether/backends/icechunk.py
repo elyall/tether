@@ -1,0 +1,212 @@
+"""Icechunk backend (Forkable).
+
+Maps tether onto an Icechunk repository: a branch is the working ref, a commit's
+``snapshot_id`` is the state, an immutable tag is the pin, and a branch created
+off a tag is a fork. Icechunk tags are immutable and are excluded from snapshot
+expiry, which makes them ideal, GC-proof pins.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import Any
+from urllib.parse import urlparse
+
+from tether.backends.base import (
+    Capability,
+    ObjectBackend,
+    VerifyReport,
+    VerifyStatus,
+    register_backend,
+)
+from tether.errors import BackendError
+from tether.handles import Handle, IcechunkHandle
+from tether.manifest import Locator, Pin, State, ref_for_pin
+
+
+class IcechunkBackend(ObjectBackend):
+    kind = "icechunk"
+    capabilities = (
+        Capability.FINGERPRINT
+        | Capability.ADDRESSABLE
+        | Capability.PIN
+        | Capability.FORK
+        | Capability.ATOMIC_REF
+    )
+
+    def __init__(self, config: dict | None = None) -> None:
+        self._config = config or {}
+        self._repos: dict[str, Any] = {}
+
+    # -- storage / repo -------------------------------------------------- #
+    def _uri(self, locator: Locator) -> str:
+        uri = locator.get("uri") or locator.get("path")
+        if not uri:
+            raise BackendError("icechunk locator needs 'uri'", kind="icechunk")
+        return str(uri)
+
+    def _storage(self, locator: Locator):
+        import icechunk as ic
+
+        uri = self._uri(locator)
+        parsed = urlparse(uri)
+        if parsed.scheme in ("", "file"):
+            return ic.local_filesystem_storage(parsed.path or uri)
+        if parsed.scheme == "s3":
+            return ic.s3_storage(
+                bucket=parsed.netloc,
+                prefix=parsed.path.lstrip("/") or None,
+                region=locator.get("region"),
+                from_env=True,
+            )
+        raise BackendError(
+            f"unsupported icechunk storage scheme: {parsed.scheme!r}",
+            kind="icechunk",
+        )
+
+    def _repo(self, locator: Locator):
+        import icechunk as ic
+
+        uri = self._uri(locator)
+        repo = self._repos.get(uri)
+        if repo is None:
+            repo = ic.Repository.open(self._storage(locator))
+            self._repos[uri] = repo
+        return repo
+
+    def _base_branch(self, locator: Locator) -> str:
+        return str(locator.get("branch", "main"))
+
+    # -- protocol -------------------------------------------------------- #
+    def identity(self, locator: Locator) -> Locator:
+        return {"uri": self._uri(locator)}
+
+    def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
+        branch = working_ref or self._base_branch(locator)
+        repo = self._repo(locator)
+        return {"snapshot_id": repo.lookup_branch(branch)}
+
+    def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
+        import icechunk as ic
+
+        repo = self._repo(locator)
+        ref = ref_for_pin(pin_id)
+        sid = str(state["snapshot_id"])
+        try:
+            repo.create_tag(ref, sid)
+        except ic.IcechunkError:
+            # Tag already exists (idempotent commit) -- confirm it matches.
+            existing = repo.lookup_tag(ref)
+            if existing != sid:
+                raise BackendError(
+                    f"tag {ref} already points at {existing}, not {sid}",
+                    kind="icechunk",
+                ) from None
+        return Pin(id=pin_id, ref=ref)
+
+    def unpin(self, locator: Locator, pin: Pin) -> None:
+        import icechunk as ic
+
+        with contextlib.suppress(ic.IcechunkError):
+            self._repo(locator).delete_tag(pin.ref)  # ignore if already gone
+
+    def list_pins(self, locator: Locator) -> set[str]:
+        prefix = ref_for_pin("")
+        tags = self._repo(locator).list_tags()
+        return {t[len(prefix) :] for t in tags if t.startswith(prefix)}
+
+    def verify(
+        self,
+        locator: Locator,
+        state: State,
+        pin: Pin | None,
+        deep: bool,
+    ) -> VerifyReport:
+        import icechunk as ic
+
+        repo = self._repo(locator)
+        sid = str(state["snapshot_id"])
+        if pin is not None:
+            try:
+                actual = repo.lookup_tag(pin.ref)
+            except ic.IcechunkError:
+                return VerifyReport(VerifyStatus.MISSING, f"tag {pin.ref} missing")
+            if actual != sid:
+                return VerifyReport(
+                    VerifyStatus.DRIFTED, f"{pin.ref} -> {actual}, expected {sid}"
+                )
+            return VerifyReport(VerifyStatus.OK)
+        if not deep:
+            return VerifyReport(VerifyStatus.UNKNOWN, "pass --deep to read snapshot")
+        try:
+            repo.readonly_session(snapshot_id=sid)
+            return VerifyReport(VerifyStatus.OK)
+        except ic.IcechunkError as exc:
+            return VerifyReport(VerifyStatus.MISSING, str(exc))
+
+    def fork(self, locator: Locator, pin: Pin, name: str) -> str:
+        import icechunk as ic
+
+        repo = self._repo(locator)
+        sid = repo.lookup_tag(pin.ref)
+        try:
+            repo.create_branch(name, sid)
+        except ic.IcechunkError:
+            repo.reset_branch(name, sid)
+        return name
+
+    def delete_working_ref(self, locator: Locator, ref: str) -> None:
+        import icechunk as ic
+
+        if ref == self._base_branch(locator) or ref == "main":
+            return
+        with contextlib.suppress(ic.IcechunkError):
+            self._repo(locator).delete_branch(ref)
+
+    def open(
+        self,
+        locator: Locator,
+        target: str | Pin | State | None,
+        read_only: bool,
+    ) -> Handle:
+        repo = self._repo(locator)
+        if isinstance(target, Pin):
+            session = repo.readonly_session(tag=target.ref)
+            return IcechunkHandle(
+                key=self._uri(locator),
+                read_only=True,
+                repository=repo,
+                session=session,
+                tag=target.ref,
+                snapshot_id=session.snapshot_id,
+            )
+        if isinstance(target, dict):
+            sid = str(target["snapshot_id"])
+            session = repo.readonly_session(snapshot_id=sid)
+            return IcechunkHandle(
+                key=self._uri(locator),
+                read_only=True,
+                repository=repo,
+                session=session,
+                snapshot_id=sid,
+            )
+        branch = target or self._base_branch(locator)
+        if read_only:
+            session = repo.readonly_session(branch=branch)
+        else:
+            session = repo.writable_session(branch)
+        return IcechunkHandle(
+            key=self._uri(locator),
+            read_only=read_only,
+            repository=repo,
+            session=session,
+            branch=branch,
+            snapshot_id=session.snapshot_id,
+        )
+
+
+def _factory(config: dict) -> IcechunkBackend:
+    return IcechunkBackend(config)
+
+
+register_backend("icechunk", _factory)

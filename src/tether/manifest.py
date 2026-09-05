@@ -1,0 +1,473 @@
+"""On-disk manifest model: config, per-object manifests, workspace state.
+
+Layout inside a dataset root (see the project plan)::
+
+    tether.toml                 # committed repo config
+    .tether/
+      .gitignore                # ignores workspace.toml
+      objects/<key>.toml        # committed, one per object; key path may nest
+      workspace.toml            # untracked working state
+
+Only *pinned* state is written into ``objects/*.toml``; live snapshots live in
+the untracked ``workspace.toml``. Everything in this module is pure data +
+(de)serialization -- no network, no VCS, no backends.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+
+import tomlkit
+
+from tether.errors import ConfigError
+
+CONFIG_FILENAME = "tether.toml"
+TETHER_DIR = ".tether"
+OBJECTS_DIR = "objects"
+WORKSPACE_FILENAME = "workspace.toml"
+GITIGNORE_FILENAME = ".gitignore"
+
+REF_PREFIX = "tether."
+CONFIG_VERSION = 1
+
+WriteMode = Literal["fork", "track"]
+FileMode = Literal["immutable", "versioned"]
+PinMode = Literal["native", "record"]
+
+JsonValue = Any
+State = dict[str, JsonValue]
+Locator = dict[str, JsonValue]
+
+
+# --------------------------------------------------------------------------- #
+# Canonical hashing helpers
+# --------------------------------------------------------------------------- #
+def canonical_bytes(obj: Any) -> bytes:
+    """Return a deterministic JSON encoding used for hashing.
+
+    Keys are sorted; separators are compact; non-ASCII is preserved. ``None``
+    values are permitted here (canonicalization only), unlike the TOML writers.
+    """
+    return json.dumps(
+        obj,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _blake(*parts: bytes, size: int = 32) -> str:
+    h = hashlib.blake2b(digest_size=size)
+    for p in parts:
+        h.update(len(p).to_bytes(8, "big"))
+        h.update(p)
+    return h.hexdigest()
+
+
+def compute_pin_id(kind: str, identity: Locator, state: State) -> str:
+    """Content-address a pin from ``(kind, locator identity, state)``.
+
+    The 12-hex-char result is stable across processes and machines: identical
+    state on the same object produces the same pin id, so re-committing an
+    unchanged object is a no-op and identical states dedupe to one pin.
+    """
+    return _blake(
+        canonical_bytes(kind),
+        canonical_bytes(identity),
+        canonical_bytes(state),
+        size=16,
+    )[:12]
+
+
+def ref_for_pin(pin_id: str) -> str:
+    """Native reference name for a pin id (dot-delimited; no ``/``)."""
+    return f"{REF_PREFIX}{pin_id}"
+
+
+def slugify_key(key: str) -> str:
+    """Turn an object key into a safe, dot-free ref fragment."""
+    slug = re.sub(r"[^0-9A-Za-z]+", "-", key).strip("-").lower()
+    return slug or "obj"
+
+
+def working_ref_name(workspace_id: str, key: str) -> str:
+    """Per-workspace working-branch name so workspaces never collide."""
+    return f"{REF_PREFIX}ws.{workspace_id[:8]}.{slugify_key(key)}"
+
+
+def _drop_nulls(obj: Any) -> Any:
+    """Recursively drop ``None`` values so the result is TOML-writable."""
+    if isinstance(obj, dict):
+        return {k: _drop_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_drop_nulls(v) for v in obj]
+    return obj
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+# --------------------------------------------------------------------------- #
+# Policy
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Policy:
+    """Per-object behavioral knobs."""
+
+    write: WriteMode = "fork"
+    file: FileMode = "immutable"
+    pin: PinMode = "native"
+
+    def to_dict(self) -> dict[str, str]:
+        return {"write": self.write, "file": self.file, "pin": self.pin}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> Policy:
+        data = data or {}
+        write = data.get("write", "fork")
+        file = data.get("file", "immutable")
+        pin = data.get("pin", "native")
+        if write not in ("fork", "track"):
+            raise ConfigError(f"invalid policy.write: {write!r}")
+        if file not in ("immutable", "versioned"):
+            raise ConfigError(f"invalid policy.file: {file!r}")
+        if pin not in ("native", "record"):
+            raise ConfigError(f"invalid policy.pin: {pin!r}")
+        return cls(write=write, file=file, pin=pin)
+
+
+@dataclass(frozen=True)
+class Pin:
+    """A durable native reference created for a committed state."""
+
+    id: str
+    ref: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"id": self.id, "ref": self.ref}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Pin:
+        return cls(id=str(data["id"]), ref=str(data["ref"]))
+
+
+# --------------------------------------------------------------------------- #
+# Object manifest
+# --------------------------------------------------------------------------- #
+@dataclass
+class ObjectManifest:
+    """The committed record for one object.
+
+    ``state``/``pin`` are ``None`` until the object has been committed at least
+    once. ``recoverable`` is ``False`` for Observed-tier objects whose committed
+    state cannot be reconstructed later (e.g. a mutable file by mtime).
+    """
+
+    key: str
+    kind: str
+    locator: Locator
+    policy: Policy = field(default_factory=Policy)
+    state: State | None = None
+    pin: Pin | None = None
+    captured_at: str | None = None
+    recoverable: bool = True
+
+    def to_toml(self) -> str:
+        doc = tomlkit.document()
+        doc["key"] = self.key
+        doc["kind"] = self.kind
+        doc["recoverable"] = self.recoverable
+        if self.captured_at is not None:
+            doc["captured_at"] = self.captured_at
+        doc["locator"] = _drop_nulls(self.locator)
+        doc["policy"] = self.policy.to_dict()
+        if self.state is not None:
+            doc["state"] = _drop_nulls(self.state)
+        if self.pin is not None:
+            doc["pin"] = self.pin.to_dict()
+        return tomlkit.dumps(doc)
+
+    @classmethod
+    def from_toml(cls, text: str) -> ObjectManifest:
+        data = _loads_plain(text)
+        try:
+            key = str(data["key"])
+            kind = str(data["kind"])
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise ConfigError(f"object manifest missing {exc}") from exc
+        state = data.get("state")
+        pin = data.get("pin")
+        return cls(
+            key=key,
+            kind=kind,
+            locator=dict(data.get("locator", {})),
+            policy=Policy.from_dict(data.get("policy")),
+            state=dict(state) if state is not None else None,
+            pin=Pin.from_dict(dict(pin)) if pin is not None else None,
+            captured_at=(str(data["captured_at"]) if "captured_at" in data else None),
+            recoverable=bool(data.get("recoverable", True)),
+        )
+
+    def canonical(self) -> bytes:
+        """Deterministic encoding used for the manifest hash."""
+        payload = {
+            "key": self.key,
+            "kind": self.kind,
+            "locator": self.locator,
+            "policy": self.policy.to_dict(),
+            "state": self.state,
+            "pin": self.pin.to_dict() if self.pin else None,
+            "recoverable": self.recoverable,
+        }
+        return canonical_bytes(payload)
+
+    def with_pin(
+        self,
+        *,
+        state: State,
+        pin: Pin | None,
+        recoverable: bool = True,
+    ) -> ObjectManifest:
+        return replace(
+            self,
+            state=state,
+            pin=pin,
+            recoverable=recoverable,
+            captured_at=_now(),
+        )
+
+
+def _loads_plain(text: str) -> dict[str, Any]:
+    """Parse TOML into plain Python structures (no tomlkit wrappers)."""
+    return tomlkit.loads(text).unwrap()
+
+
+# --------------------------------------------------------------------------- #
+# Repo config (tether.toml)
+# --------------------------------------------------------------------------- #
+@dataclass
+class RepoConfig:
+    """Committed repository configuration."""
+
+    version: int = CONFIG_VERSION
+    snapshot_auto: bool = True
+    verify_on_status: bool = False
+    new_auto_fork: bool = False
+    defaults: Policy = field(default_factory=Policy)
+    vcs: dict[str, Any] = field(default_factory=dict)
+    backends: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def to_toml(self) -> str:
+        doc = tomlkit.document()
+        tether_tbl = tomlkit.table()
+        tether_tbl["version"] = self.version
+        doc["tether"] = tether_tbl
+        doc["snapshot"] = {"auto": self.snapshot_auto}
+        doc["verify"] = {"on_status": self.verify_on_status}
+        doc["new"] = {"auto_fork": self.new_auto_fork}
+        doc["defaults"] = self.defaults.to_dict()
+        if self.vcs:
+            doc["vcs"] = _drop_nulls(self.vcs)
+        if self.backends:
+            doc["backends"] = _drop_nulls(self.backends)
+        return tomlkit.dumps(doc)
+
+    @classmethod
+    def from_toml(cls, text: str) -> RepoConfig:
+        data = _loads_plain(text)
+        tether_tbl = data.get("tether") or {}
+        snapshot = data.get("snapshot") or {}
+        verify = data.get("verify") or {}
+        new = data.get("new") or {}
+        return cls(
+            version=int(tether_tbl.get("version", CONFIG_VERSION)),
+            snapshot_auto=bool(snapshot.get("auto", True)),
+            verify_on_status=bool(verify.get("on_status", False)),
+            new_auto_fork=bool(new.get("auto_fork", False)),
+            defaults=Policy.from_dict(data.get("defaults")),
+            vcs=dict(data.get("vcs") or {}),
+            backends=dict(data.get("backends") or {}),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Workspace state (untracked)
+# --------------------------------------------------------------------------- #
+@dataclass
+class WorkspaceState:
+    """Untracked per-workspace working state.
+
+    ``base`` is the manifest hash the working refs were forked from; it drives
+    stale-working-copy detection. ``working_refs`` maps object key -> native
+    working ref. ``last_snapshot`` caches the most recent fan-out fingerprints.
+    """
+
+    workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    base: str | None = None
+    working_refs: dict[str, str] = field(default_factory=dict)
+    last_snapshot: dict[str, State] = field(default_factory=dict)
+    last_snapshot_at: str | None = None
+
+    def to_toml(self) -> str:
+        doc = tomlkit.document()
+        doc["workspace_id"] = self.workspace_id
+        if self.base is not None:
+            doc["base"] = self.base
+        if self.last_snapshot_at is not None:
+            doc["last_snapshot_at"] = self.last_snapshot_at
+        if self.working_refs:
+            doc["working_refs"] = dict(self.working_refs)
+        if self.last_snapshot:
+            doc["last_snapshot"] = {
+                k: _drop_nulls(v) for k, v in self.last_snapshot.items()
+            }
+        return tomlkit.dumps(doc)
+
+    @classmethod
+    def from_toml(cls, text: str) -> WorkspaceState:
+        data = _loads_plain(text)
+        return cls(
+            workspace_id=str(data.get("workspace_id", uuid.uuid4().hex)),
+            base=str(data["base"]) if "base" in data else None,
+            working_refs=dict(data.get("working_refs") or {}),
+            last_snapshot={
+                str(k): dict(v) for k, v in (data.get("last_snapshot") or {}).items()
+            },
+            last_snapshot_at=(
+                str(data["last_snapshot_at"]) if "last_snapshot_at" in data else None
+            ),
+        )
+
+    def touch_snapshot(self, snapshot: dict[str, State]) -> None:
+        self.last_snapshot = snapshot
+        self.last_snapshot_at = _now()
+
+
+# --------------------------------------------------------------------------- #
+# Manifest set + hashing
+# --------------------------------------------------------------------------- #
+def manifest_hash(objects: dict[str, ObjectManifest]) -> str:
+    """Hash the full committed object set (order-independent).
+
+    Serves as the dataset "tree id" and the anchor for stale detection.
+    """
+    parts = [
+        canonical_bytes([key, objects[key].canonical().decode("utf-8")])
+        for key in sorted(objects)
+    ]
+    return _blake(*parts, size=32)
+
+
+def key_to_relpath(key: str) -> Path:
+    """Map an object key to its manifest path under ``objects/``."""
+    if key.startswith("/") or ".." in key.split("/"):
+        raise ConfigError(f"unsafe object key: {key!r}")
+    return Path(OBJECTS_DIR, *key.split("/")).with_suffix(".toml")
+
+
+def relpath_to_key(relpath: Path) -> str:
+    """Inverse of :func:`key_to_relpath` (relative to ``objects/``)."""
+    rel = relpath.with_suffix("")
+    return "/".join(rel.parts)
+
+
+# --------------------------------------------------------------------------- #
+# Filesystem layout (working tree)
+# --------------------------------------------------------------------------- #
+def config_path(root: Path) -> Path:
+    return root / CONFIG_FILENAME
+
+
+def tether_path(root: Path) -> Path:
+    return root / TETHER_DIR
+
+
+def objects_dir(root: Path) -> Path:
+    return root / TETHER_DIR / OBJECTS_DIR
+
+
+def workspace_path(root: Path) -> Path:
+    return root / TETHER_DIR / WORKSPACE_FILENAME
+
+
+def object_path(root: Path, key: str) -> Path:
+    return root / TETHER_DIR / key_to_relpath(key)
+
+
+def find_dataset_root(start: Path) -> Path | None:
+    """Walk up from ``start`` looking for a ``tether.toml``."""
+    start = start.resolve()
+    for candidate in (start, *start.parents):
+        if config_path(candidate).is_file():
+            return candidate
+    return None
+
+
+def ensure_layout(root: Path) -> None:
+    """Create ``.tether/`` and its ``.gitignore`` (ignoring workspace.toml)."""
+    objects_dir(root).mkdir(parents=True, exist_ok=True)
+    gitignore = tether_path(root) / GITIGNORE_FILENAME
+    if not gitignore.exists():
+        gitignore.write_text(f"/{WORKSPACE_FILENAME}\n", encoding="utf-8")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_config(root: Path) -> RepoConfig:
+    text = config_path(root).read_text(encoding="utf-8")
+    return RepoConfig.from_toml(text)
+
+
+def write_config(root: Path, config: RepoConfig) -> None:
+    _atomic_write(config_path(root), config.to_toml())
+
+
+def read_objects(root: Path) -> dict[str, ObjectManifest]:
+    """Load every committed object manifest from the working tree."""
+    result: dict[str, ObjectManifest] = {}
+    base = objects_dir(root)
+    if not base.is_dir():
+        return result
+    for path in sorted(base.rglob("*.toml")):
+        manifest = ObjectManifest.from_toml(path.read_text(encoding="utf-8"))
+        result[manifest.key] = manifest
+    return result
+
+
+def write_object(root: Path, manifest: ObjectManifest) -> None:
+    _atomic_write(object_path(root, manifest.key), manifest.to_toml())
+
+
+def remove_object(root: Path, key: str) -> None:
+    path = object_path(root, key)
+    path.unlink(missing_ok=True)
+    # Prune now-empty parent directories up to objects/.
+    base = objects_dir(root)
+    parent = path.parent
+    while parent != base and parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+        parent = parent.parent
+
+
+def read_workspace(root: Path) -> WorkspaceState:
+    path = workspace_path(root)
+    if not path.is_file():
+        return WorkspaceState()
+    return WorkspaceState.from_toml(path.read_text(encoding="utf-8"))
+
+
+def write_workspace(root: Path, workspace: WorkspaceState) -> None:
+    _atomic_write(workspace_path(root), workspace.to_toml())
