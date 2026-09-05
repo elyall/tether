@@ -3,7 +3,8 @@
 A handle is a thin, typed carrier for whatever a caller needs to talk to the
 underlying system directly. tether never sits in the data path: it hands back
 the native address (a path/URI, an Icechunk repository + ref, a Neon connection
-URL, a git worktree, an Iceberg table + ref) and steps out of the way.
+URL, a git worktree, an Iceberg table + ref, a Delta table at a version, a Lance
+dataset at a branch/tag, a lakeFS ref URI) and steps out of the way.
 """
 
 from __future__ import annotations
@@ -71,6 +72,49 @@ class IcebergHandle(Handle):
     table: Any  # pyiceberg Table
     ref: str | None = None
     snapshot_id: int | None = None
+
+
+@dataclass
+class DeltaHandle(Handle):
+    """A Delta Lake table loaded at a specific version (always read-only).
+
+    ``table`` is a ``deltalake.DeltaTable``; write through ``deltalake`` directly
+    (tether only records and re-addresses versions).
+    """
+
+    uri: str
+    version: int
+    table: Any  # deltalake.DeltaTable
+
+
+@dataclass
+class LanceHandle(Handle):
+    """A Lance dataset checked out at a branch (write) or tag/version (read).
+
+    ``dataset`` is a ``lance.LanceDataset``; append with
+    ``lance.write_dataset(table, handle.dataset, mode="append")``.
+    """
+
+    uri: str
+    dataset: Any  # lance.LanceDataset
+    version: int
+    branch: str | None = None
+    tag: str | None = None
+
+
+@dataclass
+class LakeFSHandle(Handle):
+    """A lakeFS repository ref, as a ``lakefs://repo/ref/prefix`` URI.
+
+    ``ref`` is a branch (write) or a tag / commit id (read); the URI is what
+    lakefs-spec, the S3 gateway, and ``lakectl`` all accept.
+    """
+
+    uri: str
+    repository: str
+    ref: str
+    commit_id: str | None = None
+    prefix: str = ""
 
 
 @dataclass

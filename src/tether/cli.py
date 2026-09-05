@@ -20,11 +20,14 @@ except ImportError as exc:  # pragma: no cover - optional dep
 
 from tether.errors import TetherError
 from tether.handles import (
+    DeltaHandle,
     FileHandle,
     GitHandle,
     Handle,
     IcebergHandle,
     IcechunkHandle,
+    LakeFSHandle,
+    LanceHandle,
     NeonHandle,
 )
 from tether.manifest import Policy
@@ -71,6 +74,13 @@ def _handle_address(handle: Handle) -> str:
         return f"{handle.key}#{ref}"
     if isinstance(handle, IcebergHandle):
         return f"{handle.key}#{handle.ref or handle.snapshot_id}"
+    if isinstance(handle, DeltaHandle):
+        return f"{handle.uri}@v{handle.version}"
+    if isinstance(handle, LanceHandle):
+        ref = handle.tag or f"{handle.branch}@v{handle.version}"
+        return f"{handle.uri}#{ref}"
+    if isinstance(handle, LakeFSHandle):
+        return handle.uri
     return handle.key
 
 
@@ -121,6 +131,8 @@ def add(
     branch: str | None = typer.Option(None, "--branch"),
     remote: str | None = typer.Option(None, "--remote"),
     region: str | None = typer.Option(None, "--region"),
+    repository: str | None = typer.Option(None, "--repository", help="lakeFS repo."),
+    prefix: str | None = typer.Option(None, "--prefix", help="Path scope in a repo."),
     set_: list[str] = typer.Option(
         [], "--set", help="Extra locator field key=value (repeatable)."
     ),
@@ -140,6 +152,8 @@ def add(
         ("branch", branch),
         ("remote", remote),
         ("region", region),
+        ("repository", repository),
+        ("prefix", prefix),
     ):
         if value is not None:
             loc[name] = value
