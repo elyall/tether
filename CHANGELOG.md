@@ -64,8 +64,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[new] auto_fork` makes `commit` re-fork working refs afterwards; both keys
   were previously parsed but unused.
 
+- Detached bases and native history: `tether add --at <id>` registers an
+  object at a specific snapshot / version / commit / tag instead of a branch
+  head (`commit` pins it, `new` forks from it, `open` reads it), `tether log`
+  lists a system's native history newest first with branches, tags, and pins
+  marked (`--kind` browses before registering), and `--pick` chooses the base
+  interactively. Backed by `Capability.HISTORY`, `ObjectBackend.history`, and
+  `HistoryEntry`; implemented for icechunk, lance, iceberg, delta, ducklake,
+  lakefs, dolt, git, and memory (neon and file refuse `at`). The conformance
+  suite checks `history` and `at` for every `HISTORY` backend.
+
 ### Changed
 
+- Version is `0.1.0a1` (PEP 440 alpha pre-release) to match the project's
+  status; `tether.__version__` now comes from the installed distribution
+  metadata instead of a duplicated constant.
 - The distribution is published as `tether-vcs` (PyPI prohibits the bare name
   `tether`); the importable package and the CLI remain `tether`. Install with
   `pip install tether-vcs[...]`.

@@ -25,6 +25,8 @@ are therefore the VCS's, not tether's.
 | `jj new <rev>` | checkout + **fork** fan-out (fresh writable branch per object) |
 | stale working copy | manifest hash recorded at fork differs from HEAD: refuse writes |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
+| `jj log` | **log**: an object's *native* history (snapshots / versions / commits); ids feed `add --at` |
+| detached head | an object registered `--at` a state that is not a branch head; `commit` pins it, `new` forks from it |
 | -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins) |
 
 ## State, pin, fork

@@ -89,6 +89,8 @@ tether new main                     # fork fresh writable branches off main's pi
 tether open db/rosebud              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
 tether diff main @ --content         # what changed inside each object, natively
+tether log zarr/imaging              # native snapshot history; ids feed `add --at`
+tether add old/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --pick   # start from an older snapshot
 tether verify --all-history --deep
 tether gc --dry-run
 ```
@@ -160,7 +162,9 @@ Backends declare capabilities; commands degrade explicitly by tier.
 
 Orthogonal flags: `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `NEEDS_QUIESCENCE`,
 `ATOMIC_REF`, `DIFF` (the backend can describe what changed between two
-recorded states; see [Content diffs](#content-diffs)).
+recorded states; see [Content diffs](#content-diffs)), `HISTORY` (the backend
+can list its native history for `tether log`, and accepts a detached base via
+the locator's `at` field: `tether add --at <id>` / `--pick`).
 
 ### Compatibility matrix
 

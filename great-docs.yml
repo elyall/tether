@@ -40,8 +40,8 @@ cli:
       desc: Create a dataset and manage its objects.
       contents: [init, add, remove]
     - title: Inspect
-      desc: Fingerprint, classify, compare, and verify.
-      contents: [status, snapshot, diff, verify]
+      desc: Fingerprint, classify, compare, browse history, and verify.
+      contents: [status, snapshot, diff, log, verify]
     - title: Record and branch
       desc: Pin state into commits and fork writable branches.
       contents: [commit, new, open]

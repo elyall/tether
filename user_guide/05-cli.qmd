@@ -18,6 +18,7 @@ tether new [REV] [--keep]
 tether open KEY [-r REV] [--read-only | --writable]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
+tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
 tether gc [--dry-run | --no-dry-run]
 ```
 
@@ -63,6 +64,7 @@ backend reads is listed per backend in [Backends](07-backends.qmd).
 | `--repository`, `--prefix` | same | lakefs |
 | `--host`, `--port` | same | dolt |
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
+| `--at ID` / `--pick` | `at` | detached base: snapshot id / version / commit / tag (all but file, neon); `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
 
 Policy options: `--write fork|track` (fork a per-workspace branch on `new`, or
@@ -122,6 +124,15 @@ Without `-r` (and without `TETHER_REV`), Forkable objects open **writable** at
 their working ref and everything else read-only at the base. With `-r REV`, the
 handle is read-only at that commit's pinned (or recorded Addressable) state.
 
+## `log`
+
+Lists an object's native history newest first: id, timestamp, message, and
+the branches, tags, and tether pins (`tether.<id>`) pointing at each entry.
+For a registered object it starts at the working ref (or the detached `at`
+base); `--ref` starts elsewhere (a branch, tag, or id). With `--kind`, the
+positional is a locator for an unregistered object, so you can browse before
+`add`. Ids are valid `--at` values.
+
 ## `diff` defaults
 
 No arguments: current commit vs working tree. One revision: that revision vs
@@ -140,4 +151,5 @@ changed object's native diff; `--limit` caps entries printed per object
 | `open` | `{"key", "read_only", "address", "type"}` |
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
+| `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | `{"dry_run", "unpinned": {kind: [pin_ids]}, "deleted_listings": [names]}` |

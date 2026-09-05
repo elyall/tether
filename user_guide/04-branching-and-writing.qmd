@@ -193,6 +193,59 @@ system's own tools once you are satisfied:
 The VCS side is ordinary: land the dataset commit on `main` with `jj` or `git`
 as you would any other change. The pins it references are already durable.
 
+## Starting from an older snapshot
+
+`tether new` forks from the pins tether itself created, and `commit` pins a
+branch's *head*. To start from a state that was never pinned -- an older
+Icechunk snapshot from before you adopted tether, a Lance version, a Dolt or
+lakeFS commit -- register the object *detached* at that state with `--at`.
+`tether log` shows what there is to choose from, with each system's own ids,
+timestamps, and messages, and marks branches, tags, and tether pins:
+
+```bash
+tether log zarr/imaging                         # a registered object
+tether log s3://lab-data/imaging.icechunk --kind icechunk   # before registering
+```
+
+```
+  AZ1REKMV3HETD2X7EW7G  2026-09-05 15:16  Relabel plate1 with model v3  [main]
+  TYZ25DJEHXERGBR7H3P0  2026-09-05 14:02  Segment plate1
+  M32R7C6M4H4Y8BEGSEK0  2026-09-05 13:40  Convert plate1
+  1CECHNKREP0F1RSTCMT0  2026-09-05 13:39  Repository initialized
+```
+
+```bash
+tether add zarr/imaging --kind icechunk s3://lab-data/imaging.icechunk --at TYZ25DJEHXERGBR7H3P0
+tether commit -m "Adopt imaging at the pre-relabel snapshot"
+tether new
+```
+
+`--pick` does the same interactively -- it prints the list numbered and asks
+which entry to use:
+
+```bash
+tether add zarr/imaging --kind icechunk s3://lab-data/imaging.icechunk --pick
+```
+
+```
+  1. AZ1REKMV3HETD2X7EW7G  2026-09-05 15:16  Relabel plate1 with model v3  [main]
+  2. TYZ25DJEHXERGBR7H3P0  2026-09-05 14:02  Segment plate1
+  3. M32R7C6M4H4Y8BEGSEK0  2026-09-05 13:40  Convert plate1
+  4. 1CECHNKREP0F1RSTCMT0  2026-09-05 13:39  Repository initialized
+Pick an entry (number or id) [1]: 2
+added zarr/imaging (icechunk) at TYZ25DJEHXERGBR7H3P0
+```
+
+A detached object fingerprints as that state (so it never shows as
+`modified` until a fork exists), `open` reads it read-only, `commit` pins it,
+and `new` forks from the pin -- exactly as if it had been the branch head.
+`at` stays in the committed manifest, which documents where the object was
+adopted; it is ignored once a working ref exists. What `at` accepts is
+per system (snapshot id or tag; version or tag; commit hash or tag; any
+git commit-ish); the ids `tether log` prints are always valid. Neon has no
+`at` (an LSN is only meaningful inside the history window) and files have
+no history to detach from.
+
 ## `track` mode: write on the base branch
 
 Some objects should never be forked -- a production database, a shared

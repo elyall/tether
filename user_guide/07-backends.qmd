@@ -18,6 +18,20 @@ Common conventions:
   content-addressed from kind + identity + state).
 - `identity` is the subset of the locator that names the system; two objects
   with the same identity and state share one pin.
+- `at` in a locator detaches the base at a native state (`tether add --at` /
+  `--pick`); `tether log` lists what each system accepts:
+
+| Kind | `at` accepts | `log` lists |
+| --- | --- | --- |
+| `icechunk` | snapshot id, tag, branch | `Repository.ancestry` from the ref: id, `written_at`, message |
+| `lance` | version number (on the base branch) or tag | `versions()` of the branch, newest first, tags on each |
+| `iceberg` | snapshot id or ref name | snapshot ancestry with operation and record counts |
+| `delta` | version number | transaction log with operation and metrics |
+| `ducklake` | snapshot id | `ducklake_snapshots` with each snapshot's changes |
+| `lakefs` | commit id or tag | the ref's commit log |
+| `dolt` | commit hash, tag, or branch (`HASHOF`) | `DOLT_LOG(ref)` |
+| `git` | any commit-ish (alias of `ref`) | `git log` with decorations |
+| `neon`, `file` | not supported | -- |
 
 | Kind | Extra | Tier | Flags |
 | --- | --- | --- | --- |

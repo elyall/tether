@@ -63,6 +63,11 @@ Optional members:
   raise `BackendError` if writers are active.
 - `listing(locator, state) -> str | None` and
   `diff(locator, a, b, *, listings) -> ObjectDiff` for `DIFF` (below).
+- `history(locator, ref, limit) -> list[HistoryEntry]` for `HISTORY`: the
+  system's native history newest first (`id`, ISO `when`, `message`, `refs`).
+  Each `id` must be accepted as the locator's `at` field, and `fingerprint`
+  must honor `at` (via `base_at(locator)`) when no working ref is given, so
+  users can register an object detached at any listed state.
 
 Raise `BackendError` (or `CapabilityError` for unsupported operations) with
 `kind=self.kind`; the engine aggregates per-object failures into
@@ -85,6 +90,7 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `NEEDS_QUIESCENCE` | call `check_quiescence` before pinning |
 | `ATOMIC_REF` | (informational) pins are create-if-absent |
 | `DIFF` | call `diff` for `diff --content`, `listing` at commit |
+| `HISTORY` | call `history` for `tether log` and `add --pick` |
 
 ## Content diffs and listings
 
