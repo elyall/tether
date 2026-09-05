@@ -72,7 +72,7 @@ With `pin = "record"` on any backend:
   `pin`.
 - `new` forks **straight from the recorded state**: `create_branch(name,
   snapshot_id)` in Icechunk, `(branch, version)` in Lance, the commit id in
-  lakeFS/Dolt/git, the LSN on the base branch in Neon.
+  lakeFS/Dolt/git, the LSN on the branch it was read from in Neon.
 - `verify` checks the state is still reachable natively; `open -r` still works
   while it is.
 

@@ -181,7 +181,9 @@ class NeonBackend(ObjectBackend):
         )
         uri = self._connection_uri(project_id, branch["id"], locator)
         lsn, next_xid = self._probe(uri)
-        return {"lsn": lsn, "next_xid": next_xid}
+        # An LSN is only meaningful on its own timeline, so the state names the
+        # branch it was read from; pin/fork/open hang off that branch.
+        return {"lsn": lsn, "next_xid": next_xid, "branch": str(branch["name"])}
 
     def check_quiescence(self, locator: Locator, working_ref: str | None) -> None:
         project_id = self._project(locator)
@@ -200,7 +202,7 @@ class NeonBackend(ObjectBackend):
         ref = ref_for_pin(pin_id)
         existing = self._branch_by_name(project_id, ref)
         if existing is None:
-            parent = self._require_branch(project_id, self._source_branch(locator))
+            parent = self._require_branch(project_id, str(state["branch"]))
             self._api.post(
                 f"/projects/{project_id}/branches",
                 {
@@ -250,6 +252,12 @@ class NeonBackend(ObjectBackend):
                 VerifyStatus.DRIFTED,
                 f"parent_lsn {br.get('parent_lsn')} != {state['lsn']}",
             )
+        parent = self._branch_by_name(project_id, str(state["branch"]))
+        if parent is not None and br.get("parent_id") != parent["id"]:
+            return VerifyReport(
+                VerifyStatus.DRIFTED,
+                f"pin hangs off {br.get('parent_id')}, not {state['branch']}",
+            )
         if br.get("last_reset_at"):
             return VerifyReport(VerifyStatus.DRIFTED, "branch was reset")
         if self._endpoints_for(project_id, br["id"]):
@@ -266,9 +274,9 @@ class NeonBackend(ObjectBackend):
             parent = self._require_branch(project_id, source.ref)
             branch: dict = {"name": name, "parent_id": parent["id"]}
         else:
-            # Recorded state (no pin branch): fork the source branch at the
+            # Recorded state (no pin branch): fork the state's branch at the
             # recorded LSN; only possible while it is inside the history window.
-            parent = self._require_branch(project_id, self._source_branch(locator))
+            parent = self._require_branch(project_id, str(source["branch"]))
             branch = {
                 "name": name,
                 "parent_id": parent["id"],
@@ -316,8 +324,8 @@ class NeonBackend(ObjectBackend):
                 key=target.ref, read_only=True, url=uri, branch=target.ref
             )
         if isinstance(target, dict):
-            # Time-travel read on the source branch within the history window.
-            br = self._require_branch(project_id, self._source_branch(locator))
+            # Time-travel read on the state's branch within the history window.
+            br = self._require_branch(project_id, str(target["branch"]))
             uri = self._connection_uri(project_id, br["id"], locator)
             sep = "&" if "?" in uri else "?"
             uri = f"{uri}{sep}options=neon_lsn:{target['lsn']}"

@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0a4] - 2026-09-05
 
+### Fixed
+
+- Neon pins now hang off the branch the state was fingerprinted on. The state
+  gained a `branch` field; previously a state read on a forked working branch
+  was pinned as a child of the object's *source* branch at the fork's LSN,
+  which named the wrong data (or failed) once the fork had writes. `pin`,
+  pin-less `fork`, `verify` (which now also checks the pin's parent), and
+  time-travel `open` all use the state's branch. Neon manifests committed by
+  earlier alphas lack the field; re-register and re-commit those objects.
+- The `git` backend accepts the CLI's positional locator as its `path`
+  (`tether add code --kind git ../code`); only `--set path=` worked before.
+
 ### Changed
 
 - `gc` never deletes branches on its own again. `0.1.0a3` deleted the working

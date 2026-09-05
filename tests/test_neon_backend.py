@@ -115,12 +115,14 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         fake.install(router)
 
         state = backend.fingerprint(LOCATOR, None)
-        assert state == {"lsn": "0/16B3748", "next_xid": "742"}
+        assert state == {"lsn": "0/16B3748", "next_xid": "742", "branch": "main"}
 
         pin = backend.pin(LOCATOR, state, "abc123def456")
         assert pin.ref == ref_for_pin("abc123def456")
         assert "abc123def456" in backend.list_pins(LOCATOR)
         assert backend.verify(LOCATOR, state, pin, deep=False).ok
+        pin_br = next(b for b in fake.branches.values() if b["name"] == pin.ref)
+        assert pin_br["parent_id"] == "br-main" and pin_br["protected"] is True
 
         # Fork a working branch and open it writable (creates an endpoint).
         wref = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.db")
@@ -128,6 +130,7 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         assert isinstance(handle, NeonHandle)
         assert handle.url.startswith("postgresql://")
         assert any(e["type"] == "read_write" for e in fake.endpoints)
+        assert backend.list_working_refs(LOCATOR) == [wref]
 
         # Working branches are excluded from list_pins.
         assert "ws.abcd1234.db" not in backend.list_pins(LOCATOR)
@@ -139,12 +142,54 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         )
 
 
+def test_pins_hang_off_the_branch_the_state_came_from(
+    backend: NeonBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork's LSN lives on the fork's timeline, so its pin is a child of the fork."""
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        base = backend.fingerprint(LOCATOR, None)
+        base_pin = backend.pin(LOCATOR, base, "000000000001")
+        wref = backend.fork(LOCATOR, base_pin, "tether.ws.abcd1234.db")
+        work_br = next(b for b in fake.branches.values() if b["name"] == wref)
+
+        # Writes on the fork move its LSN; the state says which branch that is.
+        monkeypatch.setattr(backend, "_probe", lambda uri: ("0/2000000", "900"))
+        forked = backend.fingerprint(LOCATOR, wref)
+        assert forked == {"lsn": "0/2000000", "next_xid": "900", "branch": wref}
+
+        pin = backend.pin(LOCATOR, forked, "000000000002")
+        pin_br = next(b for b in fake.branches.values() if b["name"] == pin.ref)
+        assert pin_br["parent_id"] == work_br["id"]  # not br-main
+        assert pin_br["parent_lsn"] == "0/2000000"
+        assert backend.verify(LOCATOR, forked, pin, deep=False).ok
+
+        # A pin created under the wrong parent is reported as drift.
+        pin_br["parent_id"] = "br-main"
+        report = backend.verify(LOCATOR, forked, pin, deep=False)
+        assert report.status is VerifyStatus.DRIFTED and "hangs off" in report.message
+
+        # Pin-less fork and time-travel open also use the state's branch.
+        other = backend.fork(LOCATOR, forked, "tether.ws.ffff9999.db")
+        other_br = next(b for b in fake.branches.values() if b["name"] == other)
+        assert other_br["parent_id"] == work_br["id"]
+        assert other_br["parent_lsn"] == "0/2000000"
+        ro = backend.open(LOCATOR, forked, read_only=True)
+        assert isinstance(ro, NeonHandle) and ro.branch == wref
+        assert "neon_lsn:0/2000000" in ro.url
+
+
 def test_verify_detects_lsn_drift(backend: NeonBackend) -> None:
     fake = FakeNeon()
     with respx.mock as router:
         fake.install(router)
-        pin = backend.pin(LOCATOR, {"lsn": "0/16B3748"}, "aaaa1111bbbb")
-        report = backend.verify(LOCATOR, {"lsn": "0/DIFFERENT"}, pin, deep=False)
+        pin = backend.pin(
+            LOCATOR, {"lsn": "0/16B3748", "branch": "main"}, "aaaa1111bbbb"
+        )
+        report = backend.verify(
+            LOCATOR, {"lsn": "0/DIFFERENT", "branch": "main"}, pin, deep=False
+        )
         assert report.status is VerifyStatus.DRIFTED
 
 
