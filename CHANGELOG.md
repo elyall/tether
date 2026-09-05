@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a3] - 2026-09-05
+
 ### Added
 
 - Plans for every store-writing command. `commit`, `new`, and `gc` are now a
