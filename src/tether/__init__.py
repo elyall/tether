@@ -23,6 +23,9 @@ Example:
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
+
 from tether import backends, handles, testing, vcs
 from tether.errors import (
     BackendError,
@@ -92,4 +95,8 @@ __all__ = [
     "working_ref_name",
 ]
 
-__version__ = "0.1.0"
+try:
+    # Single source of truth is pyproject.toml (distribution `tether-vcs`).
+    __version__ = _dist_version("tether-vcs")
+except PackageNotFoundError:  # pragma: no cover - running from a bare checkout
+    __version__ = "0+unknown"

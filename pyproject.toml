@@ -6,7 +6,9 @@ build-backend = "uv_build"
 # Distribution name; the import package and CLI are still `tether` (PyPI
 # prohibits the bare name `tether`).
 name = "tether-vcs"
-version = "0.1.0"
+# PEP 440 pre-release: installers only select it when no final release exists
+# or when asked (`pip install --pre` / an explicit `==0.1.0a1`).
+version = "0.1.0a1"
 description = "jj-style version control for heterogeneous datasets (files/object stores, Icechunk, Neon, Iceberg, Delta, Lance, lakeFS, DuckLake, Dolt, git)"
 readme = "README.md"
 requires-python = ">=3.11"
