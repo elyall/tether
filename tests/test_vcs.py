@@ -39,6 +39,58 @@ def test_adapter_roundtrip(vcs_root: Path) -> None:
     assert ".tether/objects/b.toml" not in vcs.list_files_at(c1, ".tether/objects")
 
 
+def test_batched_reads_match_per_file_reads(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
+    _write(vcs_root, ".tether/objects/nested/deep/c.toml", "key='nested/deep/c'\n")
+    _write(
+        vcs_root, ".tether/objects/notes.txt", "ignored by the engine, still a file\n"
+    )
+    _write(vcs_root, "tether.toml", "v=1\n")
+    c1 = vcs.commit([".tether", "tether.toml"], "first")
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\nchanged=true\n")
+    c2 = vcs.commit([".tether", "tether.toml"], "second")
+
+    # files_at streams the whole subtree (nested dirs included) via cat-file.
+    at_c1 = vcs.files_at(c1, ".tether/objects")
+    assert at_c1 == {
+        ".tether/objects/a.toml": "key='a'\n",
+        ".tether/objects/nested/deep/c.toml": "key='nested/deep/c'\n",
+        ".tether/objects/notes.txt": "ignored by the engine, still a file\n",
+    }
+    assert vcs.files_at(c2, ".tether/objects")[".tether/objects/a.toml"].endswith(
+        "changed=true\n"
+    )
+    # Symbolic revisions resolve too; a missing directory is simply empty.
+    assert vcs.files_at(c2, ".tether/objects") == vcs.files_at(
+        "@-" if vcs.kind == "jj" else "HEAD", ".tether/objects"
+    )
+    assert vcs.files_at(c1, "no/such/dir") == {}
+
+    # iter_history_files covers every commit and agrees with files_at.
+    history = dict(vcs.iter_history_files(".tether/objects"))
+    assert set(vcs.history_revs()) == set(history)
+    assert history[c1] == at_c1
+    assert history[c2] == vcs.files_at(c2, ".tether/objects")
+
+
+def test_git_object_reader_parses_trees(vcs_root: Path) -> None:
+    from tether.vcs import GitObjectReader, _parse_tree
+
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "dir/x.txt", "x")
+    _write(vcs_root, "dir/sub/y.txt", "y")
+    c = vcs.commit(["dir"], "tree")
+    with GitObjectReader("git", vcs_root) as reader:
+        obj = reader.fetch(f"{c}:dir")
+        assert obj is not None and obj[1] == "tree"
+        entries = {name: mode for mode, name, _ in _parse_tree(obj[2])}
+        assert entries == {"x.txt": "100644", "sub": "40000"}
+        assert reader.files(f"{c}:dir") == {"x.txt": "x", "sub/y.txt": "y"}
+        assert reader.fetch(f"{c}:dir/none") is None
+        assert reader.files(f"{c}:dir/x.txt") == {}  # a blob has no children
+
+
 def test_detect_prefers_jj_when_colocated(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     assert vcs.kind in ("git", "jj")

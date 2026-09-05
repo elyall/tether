@@ -9,17 +9,26 @@ manifest files, and start a new working-copy commit.
 We deliberately shell out rather than link a library: it matches how the user's
 environment is set up (``jj`` lives on ``PATH`` / at a configured path) and keeps
 the dependency footprint at zero for the core package.
+
+History walks (``gc``, ``verify --all-history``) would otherwise cost one process
+per commit per manifest. Both adapters instead stream every object out of a
+single ``git cat-file --batch`` process (jj repos are git-backed, so the same
+plumbing works there), which is ~50x cheaper per read.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from tether.errors import VcsError
+
+_TREE_MODE = "40000"
+_BLOB_MODES = frozenset({"100644", "100755"})
 
 
 @dataclass
@@ -55,6 +64,144 @@ def _run(
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Batched object reads (git plumbing; shared by both adapters)
+# --------------------------------------------------------------------------- #
+def _parse_tree(data: bytes) -> Iterator[tuple[str, str, str]]:
+    """Yield ``(mode, name, hex_sha)`` from a raw git tree object."""
+    i = 0
+    n = len(data)
+    while i < n:
+        sp = data.index(b" ", i)
+        nul = data.index(b"\0", sp)
+        mode = data[i:sp].decode("ascii")
+        name = data[sp + 1 : nul].decode("utf-8", "surrogateescape")
+        sha = data[nul + 1 : nul + 21].hex()
+        i = nul + 21
+        yield mode, name, sha
+
+
+class GitObjectReader:
+    """Read many objects through one ``git cat-file --batch`` process.
+
+    Trees and blobs are cached by object id, so walking a long history whose
+    manifests rarely change costs one round-trip per commit plus one per
+    *distinct* manifest -- not one process per commit per file.
+    """
+
+    def __init__(self, git_exe: str, cwd: Path, git_dir: Path | None = None) -> None:
+        argv = [git_exe]
+        if git_dir is not None:
+            argv += ["--git-dir", str(git_dir)]
+        argv += ["cat-file", "--batch"]
+        try:
+            self._proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError as exc:  # pragma: no cover - env dependent
+            raise VcsError(f"executable not found: {git_exe}") from exc
+        self._trees: dict[str, dict[str, str]] = {}
+        self._blobs: dict[str, str] = {}
+
+    def __enter__(self) -> GitObjectReader:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        proc = self._proc
+        if proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            proc.kill()
+            proc.wait()
+
+    def fetch(self, spec: str) -> tuple[str, str, bytes] | None:
+        """Return ``(oid, type, data)`` for ``spec`` or ``None`` if missing."""
+        proc = self._proc
+        assert proc.stdin is not None and proc.stdout is not None
+        try:
+            proc.stdin.write(spec.encode("utf-8") + b"\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError) as exc:
+            raise VcsError("git cat-file --batch exited unexpectedly") from exc
+        header = proc.stdout.readline()
+        if not header:
+            raise VcsError("git cat-file --batch produced no output")
+        parts = header.split()
+        if len(parts) < 3:  # "<spec> missing" / "<spec> ambiguous"
+            return None
+        oid = parts[0].decode("ascii")
+        typ = parts[1].decode("ascii")
+        size = int(parts[2])
+        data = proc.stdout.read(size)
+        proc.stdout.read(1)  # trailing newline
+        return oid, typ, data
+
+    def files(self, spec: str) -> dict[str, str]:
+        """Return ``{path-under-spec: text}`` for every blob under tree-ish ``spec``."""
+        obj = self.fetch(spec)
+        if obj is None:
+            return {}
+        oid, typ, data = obj
+        if typ != "tree":
+            return {}
+        return self._tree(oid, data)
+
+    def _tree(self, oid: str, data: bytes) -> dict[str, str]:
+        cached = self._trees.get(oid)
+        if cached is not None:
+            return cached
+        result: dict[str, str] = {}
+        for mode, name, sha in _parse_tree(data):
+            if mode == _TREE_MODE:
+                sub = self._trees.get(sha)
+                if sub is None:
+                    obj = self.fetch(sha)
+                    if obj is None:  # pragma: no cover - corrupt repo
+                        continue
+                    sub = self._tree(sha, obj[2])
+                for path, text in sub.items():
+                    result[f"{name}/{path}"] = text
+            elif mode in _BLOB_MODES:
+                result[name] = self._blob(sha)
+        self._trees[oid] = result
+        return result
+
+    def _blob(self, sha: str) -> str:
+        text = self._blobs.get(sha)
+        if text is None:
+            obj = self.fetch(sha)
+            text = obj[2].decode("utf-8", "replace") if obj is not None else ""
+            self._blobs[sha] = text
+        return text
+
+
+def _is_commit_id(rev: str) -> bool:
+    return len(rev) == 40 and all(c in "0123456789abcdef" for c in rev)
+
+
+def _tree_spec(rev: str, reldir: str) -> str:
+    reldir = reldir.strip("/")
+    if reldir in ("", "."):
+        return f"{rev}^{{tree}}"
+    return f"{rev}:{reldir}"
+
+
+def _prefixed(reldir: str, files: dict[str, str]) -> dict[str, str]:
+    reldir = reldir.strip("/")
+    if reldir in ("", "."):
+        return dict(files)
+    return {f"{reldir}/{path}": text for path, text in files.items()}
+
+
 @runtime_checkable
 class VcsAdapter(Protocol):
     """The VCS surface tether relies on. Paths are relative to :attr:`root`."""
@@ -74,8 +221,18 @@ class VcsAdapter(Protocol):
     def list_files_at(self, rev: str, reldir: str) -> list[str]:
         """List tracked file paths under ``reldir`` at ``rev`` (root-relative)."""
 
+    def files_at(self, rev: str, reldir: str) -> dict[str, str]:
+        """Return ``{root-relative path: text}`` for files under ``reldir``."""
+
     def history_revs(self) -> list[str]:
         """Return commit ids reachable in the repository."""
+
+    def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
+        """Yield ``(commit id, files_at(commit, reldir))`` across all history.
+
+        Implementations stream through one object-reader process rather than
+        spawning per commit; callers should consume lazily.
+        """
 
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
@@ -90,12 +247,41 @@ class VcsAdapter(Protocol):
 class JjAdapter:
     kind = "jj"
 
-    def __init__(self, root: Path, executable: str = "jj") -> None:
+    def __init__(
+        self,
+        root: Path,
+        executable: str = "jj",
+        git_executable: str | None = None,
+    ) -> None:
         self.root = root
         self._exe = executable
+        self._git_exe = git_executable or shutil.which("git")
 
     def _jj(self, *args: str, check: bool = True) -> _Run:
         return _run([self._exe, *args], cwd=self.root, check=check)
+
+    def _git_store(self) -> tuple[Path, Path | None] | None:
+        """Locate the git object store backing this jj repo.
+
+        Returns ``(cwd, git_dir)`` for :class:`GitObjectReader`, or ``None`` when
+        git plumbing is unavailable (no ``git`` binary or a non-git jj backend).
+        """
+        if self._git_exe is None:
+            return None
+        if (self.root / ".git").exists():  # colocated
+            return self.root, None
+        store = self.root / ".jj" / "repo" / "store" / "git"
+        if store.is_dir():
+            return self.root, store
+        return None
+
+    def _reader(self) -> GitObjectReader | None:
+        store = self._git_store()
+        if store is None:
+            return None
+        cwd, git_dir = store
+        assert self._git_exe is not None
+        return GitObjectReader(self._git_exe, cwd, git_dir)
 
     def resolve(self, rev: str) -> str:
         out = self._jj(
@@ -143,6 +329,23 @@ class JjAdapter:
             return []
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
+    def _files_at_slow(self, rev: str, reldir: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for path in self.list_files_at(rev, reldir):
+            text = self.read_file_at(rev, path)
+            if text is not None:
+                result[path] = text
+        return result
+
+    def files_at(self, rev: str, reldir: str) -> dict[str, str]:
+        reader = self._reader()
+        if reader is None:
+            return self._files_at_slow(rev, reldir)
+        # git plumbing only understands commit ids, not jj revsets.
+        commit = rev if _is_commit_id(rev) else self.resolve(rev)
+        with reader:
+            return _prefixed(reldir, reader.files(_tree_spec(commit, reldir)))
+
     def history_revs(self) -> list[str]:
         out = self._jj(
             "log",
@@ -154,6 +357,18 @@ class JjAdapter:
             'commit_id ++ "\\n"',
         )
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
+        revs = self.history_revs()
+        reader = self._reader()
+        if reader is None:
+            for rev in revs:
+                yield rev, self._files_at_slow(rev, reldir)
+            return
+        with reader:
+            for rev in revs:
+                # jj's virtual root commit has no git object; it reads as missing.
+                yield rev, _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
 
     def commit(self, relpaths: list[str], message: str) -> str:
         # jj auto-snapshots the working copy; scope the commit to our paths so
@@ -203,11 +418,21 @@ class GitAdapter:
             return []
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
+    def files_at(self, rev: str, reldir: str) -> dict[str, str]:
+        with GitObjectReader(self._exe, self.root) as reader:
+            return _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
+
     def history_revs(self) -> list[str]:
         out = self._git("rev-list", "--all", check=False)
         if out.returncode != 0:
             return []
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
+        revs = self.history_revs()
+        with GitObjectReader(self._exe, self.root) as reader:
+            for rev in revs:
+                yield rev, _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
 
     def commit(self, relpaths: list[str], message: str) -> str:
         self._git("add", "--", *relpaths)
@@ -244,9 +469,13 @@ def detect_vcs(
     git_root = _find_up(start, ".git")
 
     if prefer == "jj" and jj_root is not None:
-        return JjAdapter(jj_root, jj_exe)
+        return JjAdapter(
+            jj_root, jj_exe, git_executable=git_path or shutil.which("git")
+        )
     if git_root is not None:
         return GitAdapter(git_root, git_exe)
     if jj_root is not None:
-        return JjAdapter(jj_root, jj_exe)
+        return JjAdapter(
+            jj_root, jj_exe, git_executable=git_path or shutil.which("git")
+        )
     raise VcsError(f"no git or jj repository found at or above {start}")

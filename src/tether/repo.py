@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,7 +60,10 @@ from tether.manifest import (
 from tether.vcs import VcsAdapter, detect_vcs
 
 TETHER_REV_ENV = "TETHER_REV"
-_MAX_WORKERS = 8
+# Fan-out is network-bound (S3 HEADs, control-plane calls, catalog reads); the
+# Python work per object is microseconds, so threads -- not asyncio -- are the
+# right tool and a generous pool costs nothing when idle.
+_MAX_WORKERS = 16
 
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +140,9 @@ class Repo:
         self.objects = read_objects(root)
         self.workspace = read_workspace(root)
         self._backends: dict[str, ObjectBackend] = {}
+        # Manifest text -> parsed manifest. History walks re-read the same
+        # (unchanged) manifest at hundreds of commits; parse each text once.
+        self._manifest_cache: dict[str, ObjectManifest] = {}
 
     # -- construction ---------------------------------------------------- #
     @classmethod
@@ -204,19 +211,29 @@ class Repo:
             (rel / _m.CONFIG_FILENAME).as_posix(),
         ]
 
-    def _objects_at(self, rev: str) -> dict[str, ObjectManifest]:
+    def _objects_reldir(self) -> str:
         rel = self._dataset_rel()
-        reldir = (rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()
+        return (rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()
+
+    def _parse_manifests(self, files: dict[str, str]) -> dict[str, ObjectManifest]:
         result: dict[str, ObjectManifest] = {}
-        for path in self.vcs.list_files_at(rev, reldir):
+        for path, text in files.items():
             if not path.endswith(".toml"):
                 continue
-            text = self.vcs.read_file_at(rev, path)
-            if text is None:
-                continue
-            m = ObjectManifest.from_toml(text)
+            m = self._manifest_cache.get(text)
+            if m is None:
+                m = ObjectManifest.from_toml(text)
+                self._manifest_cache[text] = m
             result[m.key] = m
         return result
+
+    def _objects_at(self, rev: str) -> dict[str, ObjectManifest]:
+        return self._parse_manifests(self.vcs.files_at(rev, self._objects_reldir()))
+
+    def _iter_history_objects(self) -> Iterator[tuple[str, dict[str, ObjectManifest]]]:
+        """Yield ``(commit id, manifests)`` for every commit, via one reader."""
+        for rev, files in self.vcs.iter_history_files(self._objects_reldir()):
+            yield rev, self._parse_manifests(files)
 
     def current_manifest_hash(self) -> str:
         return manifest_hash(self.objects)
@@ -447,9 +464,10 @@ class Repo:
             write_workspace(self.root, self.workspace)
             return
 
-        # Cheap verify of pins we are about to fork from.
-        errors: dict[str, Exception] = {}
+        # Cheap verify of pins we are about to fork from, then fork -- one
+        # network round-trip chain per object, run concurrently.
         working_refs: dict[str, str] = {}
+        to_fork: list[str] = []
         for key in sorted(self.objects):
             m = self.objects[key]
             backend = self.backend_for(m.kind)
@@ -461,17 +479,22 @@ class Repo:
                 continue
             if m.pin is None or m.state is None:
                 continue  # nothing pinned yet; will fork after first commit
+            to_fork.append(key)
+
+        def fork_one(key: str) -> str:
+            m = self.objects[key]
+            backend = self.backend_for(m.kind)
+            assert m.pin is not None and m.state is not None
             report = backend.verify(m.locator, m.state, m.pin, deep=False)
             if report.status is VerifyStatus.MISSING:
-                errors[key] = TetherError(f"pin missing: {report.message}")
-                continue
+                raise TetherError(f"pin missing: {report.message}")
             name = working_ref_name(self.workspace.workspace_id, key)
-            try:
-                working_refs[key] = backend.fork(m.locator, m.pin, name)
-            except Exception as exc:
-                errors[key] = exc
-        if errors:
-            raise MultiObjectError("could not fork working refs", errors)
+            return backend.fork(m.locator, m.pin, name)
+
+        try:
+            working_refs.update(self._fanout(fork_one, to_fork))
+        except MultiObjectError as exc:
+            raise MultiObjectError("could not fork working refs", exc.errors) from None
 
         self.workspace.working_refs = working_refs
         self.workspace.base = self.current_manifest_hash()
@@ -554,24 +577,56 @@ class Repo:
         objects = (
             self._objects_at(self.vcs.resolve(rev)) if rev is not None else self.objects
         )
-        reports: dict[str, VerifyReport] = {}
-        for key, m in objects.items():
-            if m.state is None:
-                continue
+        return self._verify_manifests(
+            {key: m for key, m in objects.items() if m.state is not None}, deep
+        )
+
+    def _verify_manifests(
+        self, targets: dict[str, ObjectManifest], deep: bool
+    ) -> dict[str, VerifyReport]:
+        """Verify many manifests concurrently, once per distinct (system, state, pin).
+
+        ``targets`` maps a report label to a manifest. Identical records under
+        different labels (the same pin at many commits) share one backend call.
+        """
+        unique: dict[str, tuple[ObjectManifest, list[str]]] = {}
+        for label, m in targets.items():
             backend = self.backend_for(m.kind)
-            reports[key] = backend.verify(m.locator, m.state, m.pin, deep=deep)
-        return reports
+            sig = _m.canonical_bytes(
+                [
+                    m.kind,
+                    backend.identity(m.locator),
+                    m.state,
+                    m.pin.to_dict() if m.pin else None,
+                ]
+            ).decode()
+            unique.setdefault(sig, (m, []))[1].append(label)
+
+        def verify_one(sig: str) -> VerifyReport:
+            m = unique[sig][0]
+            assert m.state is not None
+            backend = self.backend_for(m.kind)
+            try:
+                return backend.verify(m.locator, m.state, m.pin, deep=deep)
+            except TetherError as exc:
+                return VerifyReport(VerifyStatus.UNKNOWN, str(exc))
+
+        results = self._fanout(verify_one, list(unique))
+        reports: dict[str, VerifyReport] = {}
+        for sig, (_, labels) in unique.items():
+            for label in labels:
+                reports[label] = results[sig]
+        # Preserve the caller's label order.
+        return {label: reports[label] for label in targets}
 
     def _verify_all_history(self, deep: bool) -> dict[str, VerifyReport]:
-        reports: dict[str, VerifyReport] = {}
-        for rev in self.vcs.history_revs():
-            for key, m in self._objects_at(rev).items():
+        targets: dict[str, ObjectManifest] = {}
+        for rev, objects in self._iter_history_objects():
+            for key, m in objects.items():
                 if m.state is None or m.pin is None:
                     continue
-                ident = f"{rev[:12]}:{key}"
-                backend = self.backend_for(m.kind)
-                reports[ident] = backend.verify(m.locator, m.state, m.pin, deep=deep)
-        return reports
+                targets[f"{rev[:12]}:{key}"] = m
+        return self._verify_manifests(targets, deep)
 
     # -- gc -------------------------------------------------------------- #
     def gc(self, *, dry_run: bool = True) -> GcReport:
@@ -584,8 +639,8 @@ class Repo:
 
         history_manifests: list[ObjectManifest] = []
         seen: set[str] = set()
-        for rev in self.vcs.history_revs():
-            for m in self._objects_at(rev).values():
+        for _rev, objects in self._iter_history_objects():
+            for m in objects.values():
                 if m.pin is None:
                     continue
                 backend = self.backend_for(m.kind)
