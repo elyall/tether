@@ -26,7 +26,7 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcebergHandle
-from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, Policy, State, ref_for_pin
+from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
 class IcebergBackend(ObjectBackend):
@@ -46,12 +46,6 @@ class IcebergBackend(ObjectBackend):
         self._catalogs: dict[str, Any] = {}
 
     # -- capability refinement ------------------------------------------ #
-    def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
-        caps = self.capabilities
-        if getattr(policy, "pin", "native") == "record":
-            caps &= ~Capability.PIN  # record strategy creates no native ref
-        return caps
-
     # -- catalog / table ------------------------------------------------- #
     def _catalog(self, locator: Locator):
         from pyiceberg.catalog import load_catalog

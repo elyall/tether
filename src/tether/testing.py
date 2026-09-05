@@ -19,7 +19,7 @@ from tether.manifest import (
     working_ref_name,
 )
 
-__all__ = ["BackendHarness", "assert_backend_conforms", "run_conformance"]
+__all__ = ["BackendHarness", "run_conformance"]
 
 
 @runtime_checkable
@@ -174,7 +174,3 @@ def run_conformance(harness: BackendHarness) -> None:
         if Capability.FORK in caps:
             _fork_checks(harness, loc, state, pid)
         _unpin_checks(harness, loc, state, pid)
-
-
-# Backwards-friendly alias.
-assert_backend_conforms = run_conformance

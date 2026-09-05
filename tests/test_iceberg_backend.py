@@ -182,8 +182,10 @@ def test_history_and_at(backend: IcebergBackend, store: _Store) -> None:
 
 
 def test_record_strategy_drops_pin_capability(backend: IcebergBackend) -> None:
-    native = backend.effective_capabilities(LOCATOR, Policy(pin="native"))
-    record = backend.effective_capabilities(LOCATOR, Policy(pin="record"))
+    from tether.backends.base import effective_capabilities
+
+    native = effective_capabilities(backend, LOCATOR, Policy(pin="native"))
+    record = effective_capabilities(backend, LOCATOR, Policy(pin="record"))
     assert Capability.PIN in native
     assert Capability.PIN not in record
     # Record strategy still verifies via snapshot retention.
