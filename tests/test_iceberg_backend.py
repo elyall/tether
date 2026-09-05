@@ -21,10 +21,12 @@ class _Snap:
         sid: int,
         parent: int | None = None,
         summary: Summary | None = None,
+        timestamp_ms: int | None = None,
     ) -> None:
         self.snapshot_id = sid
         self.parent_snapshot_id = parent
         self.summary = summary
+        self.timestamp_ms = timestamp_ms
 
 
 class _Store:
@@ -157,6 +159,26 @@ def test_diff_walks_snapshot_ancestry(backend: IcebergBackend, store: _Store) ->
     assert [(e.path, e.detail) for e in diverged.entries] == [
         ("total-records", "? -> 99")
     ]
+
+
+def test_history_and_at(backend: IcebergBackend, store: _Store) -> None:
+    store.snapshots[1002] = _Snap(
+        1002,
+        1001,
+        Summary(Operation.APPEND, **{"added-records": "5"}),
+        timestamp_ms=1_700_000_000_000,
+    )
+    store.refs["main"] = SnapshotRef(
+        snapshot_id=1002, snapshot_ref_type=SnapshotRefType.BRANCH
+    )
+    entries = backend.history(LOCATOR, None, 10)
+    assert [e.id for e in entries] == ["1002", "1001"]
+    assert entries[0].refs == ["main"] and entries[0].message == "append: +5 rows"
+    assert entries[0].when == "2023-11-14T22:13:20+00:00"
+    # `at` accepts a snapshot id or a ref name.
+    assert backend.fingerprint(dict(LOCATOR, at="1001"), None)["snapshot_id"] == 1001
+    assert backend.fingerprint(dict(LOCATOR, at="main"), None)["snapshot_id"] == 1002
+    assert backend.history(LOCATOR, "1001", 10)[0].id == "1001"
 
 
 def test_record_strategy_drops_pin_capability(backend: IcebergBackend) -> None:

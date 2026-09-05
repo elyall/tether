@@ -134,3 +134,16 @@ def test_lance_diff_reports_fragments_and_columns(tmp_path: Path) -> None:
     d2 = b.diff(loc, s3, s4)
     assert [(e.path, e.change) for e in d2.entries] == [("column b", "added")]
     assert b.diff(loc, s4, s4).is_empty
+
+    # History lists versions newest first with the branch head marked; `at`
+    # takes a version number or a tag on the base branch.
+    b.pin(loc, s1, "aaaa1111bbbb")
+    log = b.history(loc, None, 10)
+    assert [e.id for e in log] == ["4", "3", "2", "1"]
+    assert log[0].refs == ["main"] and log[-1].refs == ["tether.aaaa1111bbbb"]
+    assert all(e.when for e in log)
+    assert b.fingerprint(dict(loc, at="1"), None) == s1
+    assert b.fingerprint(dict(loc, at="tether.aaaa1111bbbb"), None) == s1
+    assert b.history(loc, None, 2) == log[:2]
+    with pytest.raises(BackendError):
+        b.fingerprint(dict(loc, at="not-a-tag"), None)

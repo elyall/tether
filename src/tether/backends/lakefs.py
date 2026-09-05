@@ -23,11 +23,14 @@ from typing import Any
 from tether.backends.base import (
     MAX_DIFF_ENTRIES,
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError
@@ -47,6 +50,7 @@ class LakeFSBackend(ObjectBackend):
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -98,8 +102,15 @@ class LakeFSBackend(ObjectBackend):
         return {"repository": self._repo_id(locator)}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
-        branch_name = working_ref or self._base_branch(locator)
         repo = self._repo(locator)
+        if working_ref is None and (at := base_at(locator)) is not None:
+            try:
+                return {"commit_id": str(repo.ref(at).get_commit().id)}
+            except self._errors() as exc:
+                raise BackendError(
+                    f"cannot resolve lakefs ref {at!r}: {exc}", kind="lakefs"
+                ) from exc
+        branch_name = working_ref or self._base_branch(locator)
         try:
             branch = repo.branch(branch_name)
             state: State = {"commit_id": str(branch.get_commit().id)}
@@ -110,6 +121,41 @@ class LakeFSBackend(ObjectBackend):
                 f"cannot read lakefs branch {branch_name}: {exc}", kind="lakefs"
             ) from exc
         return state
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        repo = self._repo(locator)
+        start = ref or base_at(locator) or self._base_branch(locator)
+        pointing: dict[str, list[str]] = {}
+        with contextlib.suppress(*self._errors()):
+            for tag in repo.tags():
+                commit = self._tag_commit(repo, str(tag.id))
+                if commit:
+                    pointing.setdefault(commit, []).append(str(tag.id))
+        entries: list[HistoryEntry] = []
+        try:
+            for n, commit in enumerate(repo.ref(start).log(max_amount=limit)):
+                if n >= limit:
+                    break
+                cid = str(commit.id)
+                refs = sorted(pointing.get(cid, []))
+                if n == 0 and start not in refs and not _looks_like_commit(start):
+                    refs.insert(0, start)
+                entries.append(
+                    HistoryEntry(
+                        id=cid,
+                        when=iso_utc(getattr(commit, "creation_date", None)),
+                        message=str(getattr(commit, "message", "") or ""),
+                        refs=refs,
+                    )
+                )
+        except self._errors() as exc:
+            raise BackendError(f"lakefs log failed: {exc}", kind="lakefs") from exc
+        return entries
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         if state.get("dirty"):
@@ -235,6 +281,15 @@ class LakeFSBackend(ObjectBackend):
                 commit_id=commit,
                 prefix=prefix,
             )
+        if target is None and read_only and (at := base_at(locator)) is not None:
+            return LakeFSHandle(
+                key=repo_id,
+                read_only=True,
+                uri=self._uri(locator, at),
+                repository=repo_id,
+                ref=at,
+                prefix=prefix,
+            )
         branch = target or self._base_branch(locator)
         return LakeFSHandle(
             key=repo_id,
@@ -282,6 +337,10 @@ class LakeFSBackend(ObjectBackend):
         except self._errors() as exc:
             raise BackendError(f"lakefs diff failed: {exc}", kind="lakefs") from exc
         return out
+
+
+def _looks_like_commit(ref: str) -> bool:
+    return len(ref) >= 32 and all(c in "0123456789abcdef" for c in ref.lower())
 
 
 def _factory(config: dict) -> LakeFSBackend:

@@ -32,11 +32,14 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError, CapabilityError
@@ -100,6 +103,7 @@ class DuckLakeBackend(ObjectBackend):
         | Capability.CHEAP_FINGERPRINT
         | Capability.RETENTION_BOUND
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -196,8 +200,51 @@ class DuckLakeBackend(ObjectBackend):
             snapshots = self._snapshots(con, alias)
         if not snapshots:  # pragma: no cover - a catalog always has snapshot 0
             raise BackendError("ducklake catalog has no snapshots", kind="ducklake")
-        sid = max(snapshots)
+        at = base_at(locator)
+        if at is not None:
+            if not at.isdigit() or int(at) not in snapshots:
+                raise BackendError(
+                    f"snapshot {at!r} is not in the catalog", kind="ducklake"
+                )
+            sid = int(at)
+        else:
+            sid = max(snapshots)
         return {"snapshot_id": sid, "snapshot_time_us": snapshots[sid]}
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        start = ref if ref is not None else base_at(locator)
+        with self._attached(locator) as (con, alias):
+            names: dict[str, tuple[str, str]] = {}
+            with contextlib.suppress(Exception):
+                for tid, schema, name in con.execute(
+                    _TABLES_SQL.format(alias=alias)
+                ).fetchall():
+                    names[str(tid)] = (str(schema), str(name))
+            rows = con.execute(
+                "SELECT snapshot_id, epoch_us(snapshot_time), changes "
+                f"FROM ducklake_snapshots('{alias}') ORDER BY snapshot_id DESC"
+            ).fetchall()
+        entries: list[HistoryEntry] = []
+        for sid, us, changes in rows:
+            if start is not None and str(start).isdigit() and int(sid) > int(start):
+                continue
+            parts = []
+            for kind, values in dict(changes or {}).items():
+                labels = sorted(_table_label(str(v), names) for v in values)
+                parts.append(f"{_describe({str(kind)})}: {', '.join(labels)}")
+            entries.append(
+                HistoryEntry(
+                    id=str(int(sid)), when=iso_utc(int(us)), message="; ".join(parts)
+                )
+            )
+            if len(entries) >= limit:
+                break
+        return entries
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         raise CapabilityError("ducklake has no tags; snapshots are recorded only")
@@ -257,6 +304,8 @@ class DuckLakeBackend(ObjectBackend):
         metadata = self._metadata(locator)
         alias = _alias_for(metadata)
         sid = int(target["snapshot_id"]) if isinstance(target, dict) else None
+        if sid is None and target is None and (at := base_at(locator)) is not None:
+            sid = int(at) if at.isdigit() else None
         sql = attach_sql(
             metadata, alias, data_path=self._data_path(locator), snapshot_id=sid
         )
@@ -414,8 +463,10 @@ def _describe(kinds: set[str]) -> str:
         "inlined_insert": "rows inserted",
         "inlined_delete": "rows deleted",
         "tables_dropped": "dropped",
+        "schemas_created": "schema created",
+        "schemas_dropped": "schema dropped",
     }
-    return ", ".join(sorted({words.get(k, k) for k in kinds}))
+    return ", ".join(sorted({words.get(k, k.replace("_", " ")) for k in kinds}))
 
 
 def _factory(config: dict) -> DuckLakeBackend:

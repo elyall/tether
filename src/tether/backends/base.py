@@ -50,6 +50,8 @@ class Capability(Flag):
     """Pins have create-if-absent semantics."""
     DIFF = auto()
     """Can describe what changed between two recorded states."""
+    HISTORY = auto()
+    """Can list the system's native history (`ObjectBackend.history`)."""
 
 
 class Tier(Enum):
@@ -195,12 +197,45 @@ class ObjectDiff:
 Listings = tuple[str | None, str | None]
 
 
+@dataclass
+class HistoryEntry:
+    """One native commit / snapshot / version, as listed by `ObjectBackend.history`.
+
+    `id` is what the backend accepts as the locator's `at` field, so a user can
+    pick an entry and register (or re-base) an object at exactly that state.
+    """
+
+    id: str
+    """Native identifier: snapshot id, version, commit hash, ..."""
+    when: str | None = None
+    """ISO-8601 timestamp (UTC) when known."""
+    message: str = ""
+    """Commit message or a synthesized description of the change."""
+    refs: list[str] = field(default_factory=list)
+    """Native branch/tag names pointing here (tether pins appear as `tether.<id>`)."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "when": self.when,
+            "message": self.message,
+            "refs": list(self.refs),
+        }
+
+
 @runtime_checkable
 class ObjectBackend(Protocol):
     """The operations tether needs from one class of system.
 
-    ``listing`` and ``diff`` have default implementations (no listing; diff is a
-    capability error) so backends without ``DIFF`` need not define them.
+    ``listing``, ``diff``, and ``history`` have default implementations (no
+    listing; capability errors) so backends without ``DIFF`` / ``HISTORY`` need
+    not define them.
+
+    Locators may carry an ``at`` field naming a specific native state (a
+    snapshot id, version, commit, or tag). A backend that supports it treats the
+    object as *detached* there: ``fingerprint(locator, None)`` returns that state
+    instead of the base branch's head, so ``commit`` pins it and ``new`` forks
+    from it. Once a working ref exists it takes precedence.
     """
 
     kind: str
@@ -274,6 +309,20 @@ class ObjectBackend(Protocol):
         """Describe what changed from state ``a`` to state ``b``. Requires ``DIFF``."""
         raise CapabilityError(f"{self.kind} backend cannot diff", kind=self.kind)
 
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        """List native history, newest first, starting at ``ref`` (default: base).
+
+        Requires ``HISTORY``. Metadata only; ``limit`` bounds the walk.
+        """
+        raise CapabilityError(
+            f"{self.kind} backend cannot list history", kind=self.kind
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Registry
@@ -327,6 +376,32 @@ def build_backend(kind: str, config: dict | None = None) -> ObjectBackend:
 
 def known_kinds() -> list[str]:
     return sorted(set(_REGISTRY) | set(_BUILTIN_MODULES))
+
+
+def base_at(locator: Locator) -> str | None:
+    """The locator's ``at`` field (a detached base state), if any."""
+    value = locator.get("at")
+    return None if value in (None, "") else str(value)
+
+
+def iso_utc(value: Any) -> str | None:
+    """Render a datetime / epoch value as an ISO-8601 UTC string for reports."""
+    from datetime import UTC, datetime
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat(timespec="seconds")
+    if isinstance(value, int | float):
+        seconds = float(value)
+        if seconds > 1e14:  # microseconds
+            seconds /= 1e6
+        elif seconds > 1e11:  # milliseconds
+            seconds /= 1e3
+        return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+    return str(value)
 
 
 def effective_capabilities(

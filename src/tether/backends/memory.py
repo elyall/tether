@@ -12,11 +12,13 @@ from dataclasses import dataclass, field
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
     register_backend,
 )
 from tether.errors import BackendError
@@ -80,6 +82,7 @@ class MemoryBackend(ObjectBackend):
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, store: MemoryStore | None = None) -> None:
@@ -98,8 +101,34 @@ class MemoryBackend(ObjectBackend):
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         name = self._system(locator)
-        ref = working_ref or self._base_branch(locator)
+        ref = working_ref or base_at(locator) or self._base_branch(locator)
         return {"snapshot_id": self.store.resolve(name, ref)}
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        name = self._system(locator)
+        sys = self.store.system(name)
+        head = self.store.resolve(
+            name, ref or base_at(locator) or self._base_branch(locator)
+        )
+        # Snapshots are created in order; everything up to the head is its past.
+        ids = list(sys.snapshots)
+        upto = ids[: ids.index(head) + 1]
+        pointing: dict[str, list[str]] = {}
+        for branch, sid in sys.branches.items():
+            pointing.setdefault(sid, []).append(branch)
+        for tag, sid in sys.tags.items():
+            pointing.setdefault(sid, []).append(tag)
+        return [
+            HistoryEntry(
+                id=sid, message=f"snapshot {sid}", refs=sorted(pointing.get(sid, []))
+            )
+            for sid in reversed(upto)
+        ][:limit]
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         name = self._system(locator)

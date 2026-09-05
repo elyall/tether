@@ -14,11 +14,14 @@ from urllib.parse import urlparse
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError
@@ -35,6 +38,7 @@ class IcechunkBackend(ObjectBackend):
         | Capability.FORK
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -80,14 +84,69 @@ class IcechunkBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
 
+    def _resolve(self, repo: Any, ref: str) -> str:
+        """Resolve a branch, tag, or snapshot id to a snapshot id."""
+        import icechunk as ic
+
+        with contextlib.suppress(ic.IcechunkError):
+            return str(repo.lookup_branch(ref))
+        with contextlib.suppress(ic.IcechunkError):
+            return str(repo.lookup_tag(ref))
+        try:
+            info = next(iter(repo.ancestry(snapshot_id=ref)))
+        except (ic.IcechunkError, StopIteration) as exc:
+            raise BackendError(
+                f"{ref!r} is not a branch, tag, or snapshot id", kind="icechunk"
+            ) from exc
+        return str(info.id)
+
+    def _refs_by_snapshot(self, repo: Any) -> dict[str, list[str]]:
+        import icechunk as ic
+
+        out: dict[str, list[str]] = {}
+        for branch in sorted(repo.list_branches()):
+            with contextlib.suppress(ic.IcechunkError):
+                out.setdefault(str(repo.lookup_branch(branch)), []).append(branch)
+        for tag in sorted(repo.list_tags()):
+            with contextlib.suppress(ic.IcechunkError):
+                out.setdefault(str(repo.lookup_tag(tag)), []).append(tag)
+        return out
+
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
         return {"uri": self._uri(locator)}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
-        branch = working_ref or self._base_branch(locator)
         repo = self._repo(locator)
+        if working_ref is None and (at := base_at(locator)) is not None:
+            return {"snapshot_id": self._resolve(repo, at)}
+        branch = working_ref or self._base_branch(locator)
         return {"snapshot_id": repo.lookup_branch(branch)}
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        repo = self._repo(locator)
+        start = self._resolve(
+            repo, ref or base_at(locator) or self._base_branch(locator)
+        )
+        refs = self._refs_by_snapshot(repo)
+        entries: list[HistoryEntry] = []
+        for info in repo.ancestry(snapshot_id=start):
+            entries.append(
+                HistoryEntry(
+                    id=str(info.id),
+                    when=iso_utc(info.written_at),
+                    message=str(info.message or ""),
+                    refs=refs.get(str(info.id), []),
+                )
+            )
+            if len(entries) >= limit:
+                break
+        return entries
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         import icechunk as ic
@@ -185,6 +244,16 @@ class IcechunkBackend(ObjectBackend):
             )
         if isinstance(target, dict):
             sid = str(target["snapshot_id"])
+            session = repo.readonly_session(snapshot_id=sid)
+            return IcechunkHandle(
+                key=self._uri(locator),
+                read_only=True,
+                repository=repo,
+                session=session,
+                snapshot_id=sid,
+            )
+        if target is None and read_only and (at := base_at(locator)) is not None:
+            sid = self._resolve(repo, at)
             session = repo.readonly_session(snapshot_id=sid)
             return IcechunkHandle(
                 key=self._uri(locator),

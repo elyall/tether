@@ -18,6 +18,7 @@ except ImportError as exc:  # pragma: no cover - optional dep
         "the tether CLI requires the 'cli' extra: pip install tether-vcs[cli]"
     ) from exc
 
+from tether.backends.base import HistoryEntry
 from tether.errors import TetherError
 from tether.handles import (
     DeltaHandle,
@@ -176,29 +177,65 @@ def add(
         "--pin",
         help="iceberg: native (create a tag) or record (rely on snapshot retention).",
     ),
+    at: str | None = typer.Option(
+        None,
+        "--at",
+        help="Detach the base at a native state (snapshot id, version, commit, or "
+        "tag) instead of the branch head; commit pins it and new forks from it.",
+    ),
+    pick: bool = typer.Option(
+        False,
+        "--pick",
+        help="List the system's history and choose the base state interactively.",
+    ),
 ) -> None:
     """Register an object in the working copy.
 
     The positional LOCATOR is stored as the `uri` field; named options set
-    other locator fields. Nothing is contacted until the next status/commit.
+    other locator fields. Nothing is contacted until the next status/commit
+    (except with --pick, which lists history first).
     """
     repo = _repo()
+    loc = _build_locator(
+        locator,
+        set_,
+        project_id=project_id,
+        database=database,
+        role=role,
+        branch=branch,
+        remote=remote,
+        region=region,
+        repository=repository,
+        prefix=prefix,
+        host=host,
+        port=port,
+        table=table,
+    )
+    if at is not None:
+        loc["at"] = at
+    if pick:
+        try:
+            entries = repo.history_for(kind, loc, limit=20)
+        except TetherError as exc:
+            _fail(exc)
+        chosen = _pick_entry(entries)
+        loc["at"] = chosen.id
+    try:
+        policy = Policy.from_dict({"write": write, "file": file, "pin": pin})
+        repo.add(key, kind, loc, policy=policy)
+    except TetherError as exc:
+        _fail(exc)
+    suffix = f" at {loc['at']}" if "at" in loc else ""
+    typer.echo(f"added {key} ({kind}){suffix}")
+
+
+def _build_locator(
+    locator: str | None, set_: list[str], **fields: object
+) -> dict[str, object]:
     loc: dict[str, object] = {}
     if locator is not None:
         loc["uri"] = locator
-    for name, value in (
-        ("project_id", project_id),
-        ("database", database),
-        ("role", role),
-        ("branch", branch),
-        ("remote", remote),
-        ("region", region),
-        ("repository", repository),
-        ("prefix", prefix),
-        ("host", host),
-        ("port", port),
-        ("table", table),
-    ):
+    for name, value in fields.items():
         if value is not None:
             loc[name] = value
     for item in set_:
@@ -206,12 +243,72 @@ def add(
             _fail(TetherError(f"--set expects key=value, got {item!r}"))
         k, v = item.split("=", 1)
         loc[k] = v
+    return loc
+
+
+def _format_history(entries: list[HistoryEntry], *, numbered: bool = False) -> None:
+    width = max((len(e.id) for e in entries), default=0)
+    for n, e in enumerate(entries, start=1):
+        prefix = f"{n:>3}. " if numbered else "  "
+        when = (e.when or "").replace("T", " ")[:16]
+        refs = f"  [{', '.join(e.refs)}]" if e.refs else ""
+        typer.echo(f"{prefix}{e.id:<{width}}  {when:<16}  {e.message}{refs}")
+
+
+def _pick_entry(entries: list[HistoryEntry]) -> HistoryEntry:
+    if not entries:
+        _fail(TetherError("no history to choose from"))
+    _format_history(entries, numbered=True)
+    answer = typer.prompt("Pick an entry (number or id)", default="1")
+    answer = answer.strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(entries):
+        return entries[int(answer) - 1]
+    for e in entries:
+        if e.id == answer or e.id.startswith(answer):
+            return e
+    _fail(TetherError(f"no entry matches {answer!r}"))
+
+
+@app.command()
+def log(
+    target: str = typer.Argument(
+        ..., help="Object key; or, with --kind, a locator (uri/path) to browse."
+    ),
+    kind: str | None = typer.Option(
+        None, "--kind", help="Browse an unregistered object of this backend kind."
+    ),
+    ref: str | None = typer.Option(
+        None,
+        "--ref",
+        help="Start from this branch/tag/id (default: working ref or base).",
+    ),
+    limit: int = typer.Option(20, "-n", "--limit", help="Max entries."),
+    branch: str | None = typer.Option(
+        None, "--branch", help="With --kind: base branch."
+    ),
+    set_: list[str] = typer.Option(
+        [], "--set", help="With --kind: extra locator field key=value (repeatable)."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """List an object's native history (snapshots, versions, commits), newest first.
+
+    Entry ids are valid values for `tether add --at`; native branches, tags,
+    and tether pins pointing at an entry are shown in brackets.
+    """
+    repo = _repo()
     try:
-        policy = Policy.from_dict({"write": write, "file": file, "pin": pin})
-        repo.add(key, kind, loc, policy=policy)
+        if kind is not None:
+            loc = _build_locator(target, set_, branch=branch)
+            entries = repo.history_for(kind, loc, ref=ref, limit=limit)
+        else:
+            entries = repo.history(target, ref=ref, limit=limit)
     except TetherError as exc:
         _fail(exc)
-    typer.echo(f"added {key} ({kind})")
+    if json_out:
+        _emit([e.to_dict() for e in entries], as_json=True)
+        return
+    _format_history(entries)
 
 
 @app.command()

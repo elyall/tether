@@ -209,6 +209,12 @@ class FileBackend(ObjectBackend):
         return {"uri": self._uri(locator)}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
+        if locator.get("at"):
+            raise BackendError(
+                "file objects have no history to detach from (`at`); "
+                "use `--file versioned` on a versioned bucket instead",
+                kind="file",
+            )
         scheme, root, path = _parse(self._uri(locator))
         if scheme == "local":
             return self._fingerprint_local(Path(path))

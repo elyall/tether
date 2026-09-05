@@ -29,11 +29,14 @@ from urllib.parse import urlparse
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError
@@ -70,6 +73,12 @@ class DoltClient(Protocol):
 
     def diff_stat(self, from_ref: str, to_ref: str) -> list[dict[str, Any]]:
         """Rows of ``dolt_diff_stat``: table_name, rows_added/deleted/modified, ..."""
+
+    def resolve(self, ref: str) -> str | None:
+        """Resolve a branch, tag, or commit hash to a commit hash (``HASHOF``)."""
+
+    def log(self, ref: str, limit: int) -> list[dict[str, Any]]:
+        """Rows of ``DOLT_LOG(ref)``: commit_hash, committer, date, message."""
 
 
 class SqlDoltClient:
@@ -153,6 +162,19 @@ class SqlDoltClient:
             "SELECT * FROM dolt_diff_stat(%s, %s)", (from_ref, to_ref)
         )
 
+    def resolve(self, ref: str) -> str | None:
+        try:
+            row = self._one("SELECT HASHOF(%s)", (ref,))
+        except Exception:  # unknown ref raises in Dolt
+            return None
+        return str(row[0]) if row and row[0] else None
+
+    def log(self, ref: str, limit: int) -> list[dict[str, Any]]:
+        return self._rows_as_dicts(
+            "SELECT commit_hash, committer, date, message FROM DOLT_LOG(%s) LIMIT %s",
+            (ref, int(limit)),
+        )
+
 
 class DoltBackend(ObjectBackend):
     kind = "dolt"
@@ -163,6 +185,7 @@ class DoltBackend(ObjectBackend):
         | Capability.FORK
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -225,8 +248,14 @@ class DoltBackend(ObjectBackend):
         return {"host": host, "port": port, "database": database}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
+        client = self._client(locator)
+        if working_ref is None and (at := base_at(locator)) is not None:
+            commit = client.resolve(at)
+            if commit is None:
+                raise BackendError(f"cannot resolve dolt ref {at!r}", kind="dolt")
+            return {"commit": commit}
         branch = working_ref or self._base_branch(locator)
-        head = self._client(locator).branch_head(branch)
+        head = client.branch_head(branch)
         if head is None:
             raise BackendError(f"dolt branch not found: {branch}", kind="dolt")
         commit, dirty = head
@@ -234,6 +263,32 @@ class DoltBackend(ObjectBackend):
         if dirty:
             state["dirty"] = True
         return state
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        client = self._client(locator)
+        start = ref or base_at(locator) or self._base_branch(locator)
+        pointing: dict[str, list[str]] = {}
+        for tag in client.list_tags():
+            commit = client.tag_hash(tag)
+            if commit:
+                pointing.setdefault(commit, []).append(tag)
+        head = client.branch_head(start)
+        if head is not None:
+            pointing.setdefault(head[0], []).insert(0, start)
+        return [
+            HistoryEntry(
+                id=str(row.get("commit_hash")),
+                when=iso_utc(row.get("date")),
+                message=str(row.get("message") or ""),
+                refs=pointing.get(str(row.get("commit_hash")), []),
+            )
+            for row in client.log(start, limit)
+        ]
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         if state.get("dirty"):
@@ -329,6 +384,10 @@ class DoltBackend(ObjectBackend):
         elif isinstance(target, dict):
             commit = str(target["commit"])
             ref = commit
+            ro = True
+        elif target is None and read_only and (at := base_at(locator)) is not None:
+            ref = at
+            commit = self._client(locator).resolve(at)
             ro = True
         else:
             ref = target or self._base_branch(locator)

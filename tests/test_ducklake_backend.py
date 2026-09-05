@@ -170,6 +170,19 @@ def test_ducklake_diff_per_table(tmp_path: Path) -> None:
     assert b.diff(loc, s2, s2).is_empty
     assert "older" in b.diff(loc, s2, s1).note
 
+    # History describes each snapshot's changes; `at` fixes the snapshot.
+    log = b.history(loc, None, 3)
+    assert [e.id for e in log] == [
+        str(s2["snapshot_id"]),
+        str(s2["snapshot_id"] - 1),
+        str(s2["snapshot_id"] - 2),
+    ]
+    assert "dropped" in log[0].message and log[0].when is not None
+    at = b.fingerprint(dict(loc, at=str(s1["snapshot_id"])), None)
+    assert at == s1
+    with pytest.raises(BackendError):
+        b.fingerprint(dict(loc, at="999"), None)
+
 
 def test_attach_sql_quotes_and_options() -> None:
     assert (

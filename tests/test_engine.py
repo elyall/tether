@@ -272,6 +272,44 @@ def test_new_auto_fork_reforks_after_commit(vcs_root: Path) -> None:
     assert not repo.is_stale()
 
 
+def test_history_and_detached_base(vcs_root: Path) -> None:
+    from tether.errors import CapabilityError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    s1 = store.write(system, "main", {"v": 1})
+    s2 = store.write(system, "main", {"v": 2})
+
+    log = repo.history("db")
+    assert [e.id for e in log][:3] == [s2, s1, f"{system}:s0"]
+    assert log[0].refs == ["main"]
+    assert repo.history("db", limit=1) == log[:1]
+    assert repo.history_for("memory", {"system": system})[0].id == s2
+
+    # A detached base: fingerprint, commit, and fork all use the chosen state.
+    repo.remove("db")
+    repo.add("db", "memory", {"system": system, "branch": "main", "at": s1})
+    assert repo.snapshot()["db"] == {"snapshot_id": s1}
+    ro = repo.open("db", read_only=True)
+    assert isinstance(ro, MemoryHandle) and ro.read() == {"v": 1}
+    res = repo.commit("adopt at s1")
+    pin = res.pinned["db"]
+    assert pin is not None and store.system(system).tags[pin.ref] == s1
+    repo.new()
+    wref = repo.workspace.working_refs["db"]
+    assert store.system(system).branches[wref] == s1
+    assert store.system(system).branches["main"] == s2  # untouched
+
+    # Objects whose backend lacks HISTORY refuse cleanly.
+    (vcs_root / "f.bin").write_bytes(b"x")
+    repo.add("f", "file", {"uri": str(vcs_root / "f.bin")})
+    with pytest.raises(CapabilityError):
+        repo.history("f")
+    with pytest.raises(ConfigError):
+        repo.history("nope")
+
+
 def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
     # Guard against accidental prefix drift between pin() and gc().
     assert ref_for_pin("abc") == "tether.abc"

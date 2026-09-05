@@ -46,6 +46,21 @@ def _fingerprint_checks(h: BackendHarness, loc: Locator) -> tuple[dict, dict]:
     return s1, s2
 
 
+def _history_checks(h: BackendHarness, loc: Locator, s1: dict, s2: dict) -> None:
+    b = h.backend
+    entries = b.history(loc, None, 10)
+    assert entries, "history must list at least the current state"
+    assert all(isinstance(e.id, str) and e.id for e in entries), "ids must be strings"
+    # The newest entry is the current state, addressable through `at`.
+    detached = dict(loc, at=entries[0].id)
+    assert b.fingerprint(detached, None) == s2, "history[0] must be the current state"
+    # An older entry (when there is one) resolves to a different state.
+    if len(entries) > 1:
+        older = b.fingerprint(dict(loc, at=entries[1].id), None)
+        assert older != s2, "older history entries must be distinct states"
+    assert b.history(loc, None, 1) == entries[:1], "limit must bound the result"
+
+
 def _diff_checks(h: BackendHarness, loc: Locator, s1: dict, s2: dict) -> None:
     b = h.backend
     listings = (b.listing(loc, s1), b.listing(loc, s2))
@@ -139,6 +154,9 @@ def run_conformance(harness: BackendHarness) -> None:
 
     if Capability.DIFF in caps:
         _diff_checks(harness, loc, before, state)
+
+    if Capability.HISTORY in caps:
+        _history_checks(harness, loc, before, state)
 
     if Capability.ADDRESSABLE in caps:
         _addressable_checks(harness, loc, state)

@@ -18,11 +18,13 @@ from pathlib import Path
 from tether import manifest as _m
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     ObjectBackend,
     ObjectDiff,
     Tier,
     VerifyReport,
     VerifyStatus,
+    base_at,
     build_backend,
     effective_capabilities,
     tier_of,
@@ -778,8 +780,14 @@ class Repo:
                 )
             return backend.open(m.locator, working_ref, read_only=False)
 
-        # Read-only handle at the current working ref / base.
-        return backend.open(m.locator, self._working_ref(key), read_only=True)
+        # Read-only handle at the current working ref / base. A detached base
+        # (`at` in the locator) reads at that state rather than the branch head.
+        working_ref = self._working_ref(key)
+        detached = working_ref is None and base_at(m.locator) is not None
+        if detached and Capability.ADDRESSABLE in eff:
+            state = m.state or backend.fingerprint(m.locator, None)
+            return backend.open(m.locator, state, read_only=True)
+        return backend.open(m.locator, working_ref, read_only=True)
 
     def _open_at_rev(self, key: str, rev: str) -> Handle:
         objects = self._objects_at(self.vcs.resolve(rev))
@@ -800,6 +808,50 @@ class Repo:
             key=key,
             kind=m.kind,
         )
+
+    # -- history --------------------------------------------------------- #
+    def history(
+        self,
+        key: str,
+        *,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        """List an object's native history (snapshots, versions, commits).
+
+        Newest first, starting at ``ref`` (default: the current working ref, or
+        the locator's base branch). Entry ids are valid values for the locator's
+        ``at`` field. Requires the backend's ``HISTORY`` capability.
+
+        Raises:
+            ConfigError: Unknown key.
+            CapabilityError: The backend cannot list history.
+        """
+        if key not in self.objects:
+            raise ConfigError(f"no such object: {key}")
+        m = self.objects[key]
+        backend = self.backend_for(m.kind)
+        eff = effective_capabilities(backend, m.locator, m.policy)
+        if Capability.HISTORY not in eff:
+            raise CapabilityError(
+                f"{key!r} ({m.kind}) cannot list history", key=key, kind=m.kind
+            )
+        start = ref if ref is not None else self._working_ref(key)
+        return backend.history(m.locator, start, limit)
+
+    def history_for(
+        self,
+        kind: str,
+        locator: dict,
+        *,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        """List native history for a not-yet-registered locator (see `history`)."""
+        backend = self.backend_for(kind)
+        if Capability.HISTORY not in backend.capabilities:
+            raise CapabilityError(f"{kind} backend cannot list history", kind=kind)
+        return backend.history(dict(locator), ref, limit)
 
     # -- verify ---------------------------------------------------------- #
     def verify(

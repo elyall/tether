@@ -15,11 +15,13 @@ from pathlib import Path
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
     register_backend,
 )
 from tether.errors import BackendError
@@ -37,6 +39,7 @@ class GitBackend(ObjectBackend):
         | Capability.CHEAP_FINGERPRINT
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -69,7 +72,8 @@ class GitBackend(ObjectBackend):
         return proc.stdout.strip()
 
     def _base_ref(self, locator: Locator) -> str:
-        return str(locator.get("ref", "HEAD"))
+        # `at` (any commit-ish) is the cross-backend spelling of `ref`.
+        return base_at(locator) or str(locator.get("ref", "HEAD"))
 
     def _change_id(self, locator: Locator, sha: str) -> str | None:
         if not (self._path(locator) / ".jj").exists():
@@ -216,6 +220,35 @@ class GitBackend(ObjectBackend):
         ref = target or self._base_ref(locator)
         sha = self._run(locator, "rev-parse", f"{ref}^{{commit}}")
         return GitHandle(key=path, read_only=read_only, path=path, sha=sha)
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        start = ref or self._base_ref(locator)
+        out = self._run(
+            locator,
+            "log",
+            f"--max-count={int(limit)}",
+            "--format=%H%x1f%cI%x1f%D%x1f%s",
+            start,
+            "--",
+        )
+        entries: list[HistoryEntry] = []
+        for line in out.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) < 4:
+                continue
+            sha, when, decorations, subject = parts[0], parts[1], parts[2], parts[3]
+            refs = [
+                d.strip().removeprefix("HEAD -> ").removeprefix("tag: ")
+                for d in decorations.split(",")
+                if d.strip() and d.strip() != "HEAD"
+            ]
+            entries.append(HistoryEntry(id=sha, when=when, message=subject, refs=refs))
+        return entries
 
     def diff(
         self,

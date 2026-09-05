@@ -28,18 +28,27 @@ from tether.backends.lakefs import LakeFSBackend  # noqa: E402
 @dataclass
 class _Commit:
     id: str
+    message: str = ""
+    creation_date: int = 0
+    parents: list[str] = field(default_factory=list)
 
 
 @dataclass
 class FakeRepoState:
     commits: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    meta: dict[str, _Commit] = field(default_factory=dict)
     branches: dict[str, str] = field(default_factory=dict)  # name -> commit id
     staged: dict[str, dict[str, bytes]] = field(default_factory=dict)
     tags: dict[str, str] = field(default_factory=dict)
 
-    def new_commit(self, tree: dict[str, bytes]) -> str:
+    def new_commit(
+        self, tree: dict[str, bytes], parent: str | None = None, message: str = ""
+    ) -> str:
         cid = hashlib.sha1(repr(sorted(tree.items())).encode()).hexdigest()
         self.commits[cid] = dict(tree)
+        self.meta[cid] = _Commit(
+            cid, message, 1_700_000_000 + len(self.meta), [parent] if parent else []
+        )
         return cid
 
 
@@ -61,7 +70,16 @@ class FakeRef:
         cid = s.branches.get(self.id) or s.tags.get(self.id) or self.id
         if cid not in s.commits:
             raise NotFoundException(status=404, reason=f"ref {self.id} not found")
-        return _Commit(cid)
+        return s.meta[cid]
+
+    def log(self, max_amount: int | None = None, **_):
+        cursor: str | None = self.get_commit().id
+        n = 0
+        while cursor is not None and (max_amount is None or n < max_amount):
+            commit = self._s.meta[cursor]
+            yield commit
+            n += 1
+            cursor = commit.parents[0] if commit.parents else None
 
     def diff(
         self,
@@ -112,10 +130,11 @@ class FakeBranch(FakeRef):
         self._s.staged.setdefault(self.id, {})[path] = data
 
     def commit(self, message: str) -> FakeRef:
-        base = dict(self._s.commits[self._s.branches[self.id]])
+        parent = self._s.branches[self.id]
+        base = dict(self._s.commits[parent])
         base.update(self._s.staged.pop(self.id, {}))
         base["__msg__"] = message.encode()
-        cid = self._s.new_commit(base)
+        cid = self._s.new_commit(base, parent=parent, message=message)
         self._s.branches[self.id] = cid
         return FakeRef(self._s, cid)
 
@@ -152,6 +171,9 @@ class FakeRepository:
 
     def commit(self, commit_id: str) -> FakeRef:
         return FakeRef(self._s, commit_id)
+
+    def ref(self, ref_id: str) -> FakeRef:
+        return FakeRef(self._s, ref_id)
 
 
 class FakeLakeFS:
@@ -252,6 +274,18 @@ def test_lakefs_dirty_branch_is_reported_and_refused(
         "raw/c.bin": "added",
     }
     assert b.diff(loc, later, later).is_empty
+
+    # History walks the branch's commits, newest first, with refs; `at` pins
+    # an older commit as the base.
+    entries = b.history(loc, None, 10)
+    assert [e.id for e in entries][:2] == [later["commit_id"], state["commit_id"]]
+    assert entries[0].refs[0] == "main" and entries[0].message == "more"
+    assert pin.ref in entries[1].refs
+    detached = dict(loc, at=state["commit_id"])
+    assert b.fingerprint(detached, None) == state
+    assert b.fingerprint(dict(loc, at=pin.ref), None) == state
+    ro_at = b.open(detached, None, read_only=True)
+    assert isinstance(ro_at, LakeFSHandle) and ro_at.ref == state["commit_id"]
 
     # Identity is the repository: prefix does not change the pin id.
     assert b.identity(loc) == {"repository": loc["repository"]}

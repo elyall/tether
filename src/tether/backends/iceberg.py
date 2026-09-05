@@ -14,11 +14,14 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError
@@ -35,6 +38,7 @@ class IcebergBackend(ObjectBackend):
         | Capability.FORK
         | Capability.RETENTION_BOUND
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -86,16 +90,65 @@ class IcebergBackend(ObjectBackend):
             "catalog_name": str(locator.get("catalog_name", "default")),
         }
 
+    def _resolve(self, table: Any, ref: str) -> int:
+        """Resolve a branch/tag name or a snapshot id to a snapshot id."""
+        snap = table.snapshot_by_name(ref)
+        if snap is not None:
+            return int(snap.snapshot_id)
+        if ref.isdigit():
+            wanted = int(ref)
+            for s in table.snapshots():
+                if int(s.snapshot_id) == wanted:
+                    return wanted
+        raise BackendError(f"no snapshot for ref {ref!r}", kind="iceberg")
+
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         table = self._table(locator)
-        branch = working_ref or self._base_branch(locator)
-        snap = table.snapshot_by_name(branch)
-        if snap is None:
-            raise BackendError(f"no snapshot for ref {branch!r}", kind="iceberg")
+        ref = working_ref or base_at(locator) or self._base_branch(locator)
         return {
-            "snapshot_id": int(snap.snapshot_id),
+            "snapshot_id": self._resolve(table, ref),
             "metadata_location": table.metadata_location,
         }
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        table = self._table(locator)
+        start = self._resolve(
+            table, ref or base_at(locator) or self._base_branch(locator)
+        )
+        by_id = {int(s.snapshot_id): s for s in table.snapshots()}
+        pointing: dict[int, list[str]] = {}
+        for name, r in self._refs(table).items():
+            pointing.setdefault(int(r.snapshot_id), []).append(name)
+        entries: list[HistoryEntry] = []
+        cursor = by_id.get(start)
+        while cursor is not None and len(entries) < limit:
+            sid = int(cursor.snapshot_id)
+            summary = _summary(cursor)
+            op = summary.get("operation", "")
+            counts = ", ".join(
+                f"{sign}{summary[k]} {label}"
+                for k, sign, label in (
+                    ("added-records", "+", "rows"),
+                    ("deleted-records", "-", "rows"),
+                )
+                if summary.get(k) not in (None, "0")
+            )
+            entries.append(
+                HistoryEntry(
+                    id=str(sid),
+                    when=iso_utc(getattr(cursor, "timestamp_ms", None)),
+                    message=f"{op}: {counts}" if counts else op,
+                    refs=sorted(pointing.get(sid, [])),
+                )
+            )
+            parent = getattr(cursor, "parent_snapshot_id", None)
+            cursor = by_id.get(int(parent)) if parent is not None else None
+        return entries
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         table = self._table(locator)

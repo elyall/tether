@@ -28,22 +28,53 @@ from tether.testing import run_conformance
 class FakeDoltDb:
     # commit -> {table: row count}; enough to fake dolt_diff_summary/stat.
     commits: dict[str, dict[str, int]] = field(default_factory=dict)
+    parents: dict[str, str | None] = field(default_factory=dict)
+    messages: dict[str, str] = field(default_factory=dict)
     branches: dict[str, str] = field(default_factory=dict)  # name -> commit
     dirty: set[str] = field(default_factory=set)
     tags: dict[str, str] = field(default_factory=dict)
 
-    def new_commit(self, seed: str, tables: dict[str, int] | None = None) -> str:
+    def new_commit(
+        self,
+        seed: str,
+        tables: dict[str, int] | None = None,
+        parent: str | None = None,
+        message: str = "",
+    ) -> str:
         h = hashlib.sha1(seed.encode()).hexdigest()[:32]
         self.commits[h] = dict(tables or {})
+        self.parents[h] = parent
+        self.messages[h] = message
         return h
 
-    def resolve(self, ref: str) -> str:
+    def _lookup(self, ref: str) -> str:
         cid = self.branches.get(ref) or self.tags.get(ref) or ref
         if cid not in self.commits:
             raise RuntimeError(f"unknown ref {ref}")
         return cid
 
     # DoltClient protocol ------------------------------------------------- #
+    def resolve(self, ref: str) -> str | None:
+        try:
+            return self._lookup(ref)
+        except RuntimeError:
+            return None
+
+    def log(self, ref: str, limit: int) -> list[dict]:
+        rows: list[dict] = []
+        cursor: str | None = self.resolve(ref)
+        while cursor is not None and len(rows) < limit:
+            rows.append(
+                {
+                    "commit_hash": cursor,
+                    "committer": "t",
+                    "date": 1_700_000_000 + len(rows),
+                    "message": self.messages.get(cursor, ""),
+                }
+            )
+            cursor = self.parents.get(cursor)
+        return rows
+
     def branch_head(self, branch: str) -> tuple[str, bool] | None:
         if branch not in self.branches:
             return None
@@ -58,7 +89,7 @@ class FakeDoltDb:
     def create_tag(self, name: str, ref: str) -> None:
         if name in self.tags:
             raise RuntimeError("tag exists")
-        self.tags[name] = self.resolve(ref)
+        self.tags[name] = self._lookup(ref)
 
     def delete_tag(self, name: str) -> None:
         del self.tags[name]
@@ -69,7 +100,7 @@ class FakeDoltDb:
     def create_branch(self, name: str, ref: str) -> None:
         if name in self.branches:
             raise RuntimeError("branch exists")
-        self.branches[name] = self.resolve(ref)
+        self.branches[name] = self._lookup(ref)
 
     def delete_branch(self, name: str) -> None:
         del self.branches[name]
@@ -77,8 +108,8 @@ class FakeDoltDb:
 
     def diff_summary(self, from_ref: str, to_ref: str) -> list[dict]:
         ta, tb = (
-            self.commits[self.resolve(from_ref)],
-            self.commits[self.resolve(to_ref)],
+            self.commits[self._lookup(from_ref)],
+            self.commits[self._lookup(to_ref)],
         )
         rows = []
         for table in sorted(set(ta) | set(tb)):
@@ -102,8 +133,8 @@ class FakeDoltDb:
 
     def diff_stat(self, from_ref: str, to_ref: str) -> list[dict]:
         ta, tb = (
-            self.commits[self.resolve(from_ref)],
-            self.commits[self.resolve(to_ref)],
+            self.commits[self._lookup(from_ref)],
+            self.commits[self._lookup(to_ref)],
         )
         rows = []
         for table in sorted(set(ta) | set(tb)):
@@ -129,12 +160,13 @@ class FakeDoltDb:
     def commit(
         self, branch: str, msg: str, tables: dict[str, int] | None = None
     ) -> str:
-        base = dict(self.commits[self.branches[branch]])
+        parent = self.branches[branch]
+        base = dict(self.commits[parent])
         if tables is None:
             base["t"] = base.get("t", 0) + 1  # default mutation: one more row in t
         else:
             base.update(tables)
-        cid = self.new_commit(f"{self.branches[branch]}:{msg}", base)
+        cid = self.new_commit(f"{parent}:{msg}", base, parent=parent, message=msg)
         self.branches[branch] = cid
         self.dirty.discard(branch)
         return cid
@@ -254,6 +286,18 @@ def test_dolt_dirty_branch_and_handles(fake: tuple[DoltBackend, FakeDolt]) -> No
     # Content diff: per-table summary + row stats between two commits.
     db.commit("main", "reshape", {"t": 7, "u": 3})
     later = b.fingerprint(loc, None)
+
+    # History and detached bases (`at` = commit hash or tag).
+    entries = b.history(loc, None, 10)
+    assert [e.id for e in entries][:2] == [later["commit"], state["commit"]]
+    assert entries[0].refs == ["main"] and entries[0].message == "reshape"
+    assert pin.ref in entries[1].refs
+    assert b.fingerprint(dict(loc, at=state["commit"]), None) == state
+    assert b.fingerprint(dict(loc, at=pin.ref), None) == state
+    with pytest.raises(BackendError):
+        b.fingerprint(dict(loc, at="nope"), None)
+    at_handle = b.open(dict(loc, at=pin.ref), None, read_only=True)
+    assert isinstance(at_handle, DoltHandle) and at_handle.commit == state["commit"]
     d = b.diff(loc, state, later)
     assert d.unit == "tables" and (d.added, d.removed, d.modified) == (1, 0, 1)
     by_path = {e.path: e for e in d.entries}
@@ -340,6 +384,7 @@ def test_sql_client_statements() -> None:
     client.delete_branch("b")
     assert client.tag_hash("nope") is None and client.branch_head("nope") is None
     assert client.diff_summary("a", "b") == [] and client.diff_stat("a", "b") == []
+    assert client.resolve("main") is None and client.log("main", 5) == []
     statements = [entry for entry in log if entry[0] not in ("CONNECT", "CLOSE")]
     assert statements == [
         ("CALL DOLT_TAG(%s, %s)", ("tether.x", "abc123")),
@@ -350,6 +395,11 @@ def test_sql_client_statements() -> None:
         ("SELECT hash, dirty FROM dolt_branches WHERE name = %s", ("nope",)),
         ("SELECT * FROM dolt_diff_summary(%s, %s)", ("a", "b")),
         ("SELECT * FROM dolt_diff_stat(%s, %s)", ("a", "b")),
+        ("SELECT HASHOF(%s)", ("main",)),
+        (
+            "SELECT commit_hash, committer, date, message FROM DOLT_LOG(%s) LIMIT %s",
+            ("main", 5),
+        ),
     ]
     # Dict rows come back keyed by cursor description.
     columns = ["table_name", "diff_type", "data_change", "schema_change"]

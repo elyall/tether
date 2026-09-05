@@ -85,3 +85,10 @@ def test_git_backend_lifecycle(vcs_root: Path) -> None:
         e.key: e for e in repo.diff(res.vcs_commit, res2.vcs_commit, content=True)
     }
     assert entries["code"].detail is not None and entries["code"].detail.modified == 1
+
+    # History from a ref, with decorations; `at` is any commit-ish.
+    log = backend.history({"path": str(code)}, "HEAD", 10)
+    assert [e.id for e in log][:2] == [sha2, sha1]
+    assert log[0].message == "add util" and "HEAD" not in log[0].refs
+    assert pin.ref in backend.history({"path": str(code)}, sha0, 10)[0].refs
+    assert backend.fingerprint({"path": str(code), "at": sha0}, None)["sha"] == sha0

@@ -168,6 +168,12 @@ class NeonBackend(ObjectBackend):
         }
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
+        if locator.get("at"):
+            raise BackendError(
+                "neon does not support a detached base (`at`); an LSN is only "
+                "meaningful within the history window -- pin from a branch instead",
+                kind="neon",
+            )
         project_id = self._project(locator)
         branch = self._require_branch(
             project_id, working_ref or self._source_branch(locator)

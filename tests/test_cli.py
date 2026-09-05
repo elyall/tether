@@ -85,6 +85,54 @@ def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert detail["added"] == 1 and detail["entries"][0]["path"] == "rows"
 
 
+def test_cli_log_and_pick(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    s2 = store.write(system, "main", {"v": 2})
+    assert runner.invoke(app, ["init"]).exit_code == 0
+
+    # Browse an unregistered object by kind + locator fields.
+    r = runner.invoke(
+        app,
+        ["log", "unused", "--kind", "memory", "--set", f"system={system}", "--json"],
+    )
+    assert r.exit_code == 0, r.output
+    ids = [e["id"] for e in json.loads(r.output)]
+    assert ids[:2] == [s2, s1]
+
+    # --at registers a detached base.
+    r = runner.invoke(
+        app,
+        ["add", "db", "--kind", "memory", "--set", f"system={system}", "--at", s1],
+    )
+    assert r.exit_code == 0, r.output
+    assert f"at {s1}" in r.output
+    r = runner.invoke(app, ["snapshot", "--json"])
+    assert json.loads(r.output)["db"] == {"snapshot_id": s1}
+
+    # log on a registered object starts at its base (here the detached `at`);
+    # --ref browses another ref. Human format: newest first with refs.
+    r = runner.invoke(app, ["log", "db", "-n", "2"])
+    assert r.exit_code == 0, r.output
+    lines = [line for line in r.output.splitlines() if line.strip()]
+    assert len(lines) == 2 and s1 in lines[0] and f"{system}:s0" in lines[1]
+    r = runner.invoke(app, ["log", "db", "--ref", "main", "-n", "1"])
+    assert r.exit_code == 0, r.output
+    assert s2 in r.output and "[main]" in r.output
+
+    # --pick lists numbered entries and reads the choice from stdin.
+    r = runner.invoke(
+        app,
+        ["add", "db2", "--kind", "memory", "--set", f"system={system}", "--pick"],
+        input="2\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert "  1. " in r.output and f"added db2 (memory) at {s1}" in r.output
+
+
 def test_cli_snapshot_auto_config(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

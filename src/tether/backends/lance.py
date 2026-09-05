@@ -24,11 +24,14 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError
@@ -55,6 +58,7 @@ class LanceBackend(ObjectBackend):
         | Capability.FORK
         | Capability.ATOMIC_REF
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -66,6 +70,17 @@ class LanceBackend(ObjectBackend):
         if not uri:
             raise BackendError("lance locator needs 'uri'", kind="lance")
         return str(uri)
+
+    def _resolve_at(self, ds: Any, locator: Locator, at: str) -> tuple[str, int]:
+        """Resolve an ``at`` value -- a tag name or a version number -- to a ref."""
+        tags = ds.tags.list()
+        if at in tags:
+            return _tag_target(tags[at])
+        if at.isdigit():
+            return self._base_branch(locator), int(at)
+        raise BackendError(
+            f"{at!r} is neither a tag nor a version number", kind="lance"
+        )
 
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", MAIN))
@@ -107,8 +122,12 @@ class LanceBackend(ObjectBackend):
         return {"uri": self._uri(locator)}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
-        branch = working_ref or self._base_branch(locator)
         ds = self._dataset(locator)
+        if working_ref is None and (at := base_at(locator)) is not None:
+            branch, version = self._resolve_at(ds, locator, at)
+            self._checkout(ds, (branch, version))  # validate it exists
+            return {"branch": branch, "version": version}
+        branch = working_ref or self._base_branch(locator)
         version = int(self._at_branch(ds, branch).version)
         if branch != MAIN:
             meta = ds.branches.list().get(branch)
@@ -237,6 +256,17 @@ class LanceBackend(ObjectBackend):
                 version=int(checked.version),
                 branch=branch,
             )
+        if target is None and read_only and (at := base_at(locator)) is not None:
+            branch, version = self._resolve_at(ds, locator, at)
+            checked = self._checkout(ds, (branch, version))
+            return LanceHandle(
+                key=uri,
+                read_only=True,
+                uri=uri,
+                dataset=checked,
+                version=int(checked.version),
+                branch=branch,
+            )
         branch = target or self._base_branch(locator)
         checked = self._at_branch(ds, branch)
         return LanceHandle(
@@ -247,6 +277,48 @@ class LanceBackend(ObjectBackend):
             version=int(checked.version),
             branch=branch,
         )
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        ds = self._dataset(locator)
+        branch = ref or self._base_branch(locator)
+        head: int | None = None
+        if ref is None and (at := base_at(locator)) is not None:
+            branch, head = self._resolve_at(ds, locator, at)
+        bds = self._at_branch(ds, branch)
+        tags_here: dict[int, list[str]] = {}
+        for name, meta in ds.tags.list().items():
+            tag_branch, tag_version = _tag_target(meta)
+            if tag_branch == branch:
+                tags_here.setdefault(tag_version, []).append(name)
+        entries: list[HistoryEntry] = []
+        versions = sorted(bds.versions(), key=lambda v: int(v["version"]), reverse=True)
+        for v in versions:
+            number = int(v["version"])
+            if head is not None and number > head:
+                continue
+            refs = sorted(tags_here.get(number, []))
+            if number == int(bds.version):
+                refs.insert(0, branch)
+            meta = v.get("metadata") or {}
+            message = str(meta.get("message") or "")
+            if not message and meta:
+                message = ", ".join(f"{k}={val}" for k, val in sorted(meta.items()))
+            entries.append(
+                HistoryEntry(
+                    id=str(number),
+                    when=iso_utc(v.get("timestamp")),
+                    message=message,
+                    refs=refs,
+                )
+            )
+            if len(entries) >= limit:
+                break
+        return entries
 
     def diff(
         self,

@@ -98,5 +98,14 @@ def test_delta_diff_lists_commits(tmp_path: Path) -> None:
     assert b.diff(loc, s2, s2).is_empty
     recreated = b.diff(loc, s0, dict(s2, table_id="other"))
     assert "recreated" in recreated.note
+
+    # History is the transaction log; `at` fixes the recorded version.
+    log = b.history(loc, None, 10)
+    assert [e.id for e in log] == ["2", "1", "0"]
+    assert log[1].message == "WRITE: +2 rows" and log[0].when is not None
+    assert b.fingerprint(dict(loc, at="1"), None)["version"] == 1
+    assert b.history(loc, "1", 10)[0].id == "1"
+    with pytest.raises(BackendError):
+        b.fingerprint(dict(loc, at="v1"), None)
     with pytest.raises(CapabilityError):
         b.fork(loc, Pin(id="abc", ref="tether.abc"), "x")

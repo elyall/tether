@@ -18,11 +18,14 @@ from typing import Any
 
 from tether.backends.base import (
     Capability,
+    HistoryEntry,
     Listings,
     ObjectBackend,
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    base_at,
+    iso_utc,
     register_backend,
 )
 from tether.errors import BackendError, CapabilityError
@@ -38,6 +41,7 @@ class DeltaBackend(ObjectBackend):
         | Capability.CHEAP_FINGERPRINT
         | Capability.RETENTION_BOUND
         | Capability.DIFF
+        | Capability.HISTORY
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -89,8 +93,45 @@ class DeltaBackend(ObjectBackend):
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         # The file list is not needed to read the version; skip loading it.
-        dt = self._table(locator, without_files=True)
+        at = base_at(locator)
+        version = int(at) if at is not None and at.isdigit() else None
+        if at is not None and version is None:
+            raise BackendError(
+                f"delta `at` must be a version number, got {at!r}", kind="delta"
+            )
+        dt = self._table(locator, version=version, without_files=True)
         return {"version": int(dt.version()), "table_id": str(dt.metadata().id)}
+
+    def history(
+        self,
+        locator: Locator,
+        ref: str | None = None,
+        limit: int = 20,
+    ) -> list[HistoryEntry]:
+        start = ref if ref is not None else base_at(locator)
+        version = int(start) if start is not None and str(start).isdigit() else None
+        dt = self._table(locator, version=version, without_files=True)
+        entries: list[HistoryEntry] = []
+        for commit in dt.history(limit):
+            metrics = commit.get("operationMetrics") or {}
+            parts = [
+                f"{sign}{metrics[k]} {label}"
+                for k, sign, label in (
+                    ("num_added_rows", "+", "rows"),
+                    ("num_deleted_rows", "-", "rows"),
+                    ("num_updated_rows", "~", "rows"),
+                )
+                if metrics.get(k) not in (None, 0, "0")
+            ]
+            op = str(commit.get("operation", "COMMIT"))
+            entries.append(
+                HistoryEntry(
+                    id=str(commit.get("version")),
+                    when=iso_utc(commit.get("timestamp")),
+                    message=f"{op}: {', '.join(parts)}" if parts else op,
+                )
+            )
+        return entries[:limit]
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         raise CapabilityError("delta has no native tags; versions are recorded only")
