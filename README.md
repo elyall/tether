@@ -2,7 +2,7 @@
 
 **jj-style version control for heterogeneous datasets.**
 
-> Status: alpha. See the [changelog](https://github.com/tether-vcs/tether/blob/main/CHANGELOG.md).
+> Status: alpha. See the [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md).
 >
 > State: vibe coded with Claude Fable 5.1.
 
@@ -27,10 +27,10 @@ Think of it as **DVC for *branchable* systems**: like DVC it commits small
 manifests into your git/jj repo, but where DVC only fingerprints files, tether
 also *pins* and *forks* live systems.
 
-Documentation: <https://tether-vcs.github.io/tether/> -- user guide (getting
+Documentation: <https://evanlyall.com/tether/> -- user guide (getting
 started, concepts, pinning, branching and writing, CLI, configuration,
 backends, writing a backend) plus the generated API and CLI reference. The
-guide sources live in [`user_guide/`](https://github.com/tether-vcs/tether/tree/main/user_guide).
+guide sources live in [`user_guide/`](https://github.com/elyall/tether/tree/main/user_guide).
 
 ## Why this exists (prior art)
 

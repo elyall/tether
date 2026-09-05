@@ -8,8 +8,13 @@
 display_name: tether
 parser: google
 dynamic: true
-repo: https://github.com/tether-vcs/tether
-site_url: https://tether-vcs.github.io/tether/
+repo: https://github.com/elyall/tether
+# Project Pages are served under the account's custom domain, so the canonical
+# base must be set explicitly (it would otherwise derive elyall.github.io).
+site_url: https://evanlyall.com/tether/
+seo:
+  canonical:
+    base_url: https://evanlyall.com/tether/
 
 # Narrative docs live in user_guide/ (numeric prefixes order the sidebar).
 homepage: index

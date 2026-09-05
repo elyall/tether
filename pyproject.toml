@@ -71,9 +71,10 @@ all = [
 tether = "tether.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/tether-vcs/tether"
-Repository = "https://github.com/tether-vcs/tether"
-Changelog = "https://github.com/tether-vcs/tether/blob/main/CHANGELOG.md"
+Homepage = "https://evanlyall.com/tether/"
+Documentation = "https://evanlyall.com/tether/"
+Repository = "https://github.com/elyall/tether"
+Changelog = "https://github.com/elyall/tether/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
