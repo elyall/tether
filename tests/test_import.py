@@ -5,6 +5,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +15,13 @@ from tether.manifest import Policy
 from tether.plan import Plan
 from tether.registry import CANONICAL_COLUMNS, ImportSpec, read_source, specs_from_rows
 from tether.repo import Repo
+
+
+def _pg(dsn: str) -> Any:
+    """A psycopg connection, untyped: tests run dynamic SQL ty cannot check."""
+    import psycopg
+
+    return psycopg.connect(dsn)
 
 
 def _system() -> str:
@@ -117,6 +125,66 @@ def test_read_source_csv_jsonl_sqlite(tmp_path: Path) -> None:
         read_source(str(db), table="data_object", query="SELECT 1")
     with pytest.raises(ConfigError):
         read_source(str(tmp_path / "missing.sqlite"), table="t")
+
+
+def test_read_source_postgres(pg_dsn: str) -> None:
+    with _pg(pg_dsn) as conn:
+        conn.execute("CREATE TABLE data_object (name TEXT, object_uri TEXT, type TEXT)")
+        conn.execute(
+            "INSERT INTO data_object VALUES "
+            "('plate1', 's3://lab/plate1', 'IcechunkStore'), "
+            "('notes', 's3://lab/n', 'File')"
+        )
+        conn.commit()
+    got = read_source(
+        pg_dsn,
+        query=(
+            "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, object_uri AS uri "
+            "FROM data_object WHERE type = 'IcechunkStore'"
+        ),
+    )
+    assert got == [{"key": "zarr/plate1", "kind": "icechunk", "uri": "s3://lab/plate1"}]
+    assert {r["name"] for r in read_source(pg_dsn, table="data_object")} == {
+        "plate1",
+        "notes",
+    }
+    with pytest.raises(ConfigError):
+        read_source(pg_dsn)
+
+
+def test_publish_then_import_from_postgres(vcs_root: Path, pg_dsn: str) -> None:
+    """The registry direction end to end: publish, edit in SQL, import back."""
+    repo = Repo.init(vcs_root)
+    repo.add("db", "memory", {"system": _system(), "branch": "main"})
+    repo.commit("baseline")
+    repo.export().to_postgres(pg_dsn, schema="tether")
+
+    # A registry-side edit: flip the pin policy and add a second object.
+    with _pg(pg_dsn) as conn:
+        conn.execute("UPDATE tether.objects SET policy_pin = 'record' WHERE key = 'db'")
+        conn.execute(
+            "CREATE TABLE registry AS SELECT key, kind, locator_json, "
+            "policy_write, policy_file, policy_pin FROM tether.objects_head"
+        )
+        conn.execute(
+            "INSERT INTO registry VALUES ('db/two', 'memory', %s::jsonb, 'fork', "
+            "'immutable', 'native')",
+            (json.dumps({"system": _system(), "branch": "main"}),),
+        )
+        conn.commit()
+
+    rows = read_source(pg_dsn, table="registry")
+    assert isinstance(rows[0]["locator_json"], dict)  # JSONB comes back parsed
+    specs, notes = specs_from_rows(rows, repo.config.defaults)
+    assert notes == []
+    plan = repo.plan_import(specs, sync=True)
+    assert sorted((a.op, a.key) for a in plan.actions) == [
+        ("add", "db/two"),
+        ("update", "db"),
+    ]
+    report = repo.apply_import(plan)
+    assert report.updated == ["db"] and report.added == ["db/two"]
+    assert repo.objects["db"].policy.pin == "record"
 
 
 def test_plan_and_apply_import(vcs_root: Path) -> None:

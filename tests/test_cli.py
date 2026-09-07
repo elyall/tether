@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,6 +14,13 @@ from tether.cli import app  # noqa: E402
 from tether.repo import Repo  # noqa: E402
 
 runner = typer_testing.CliRunner()
+
+
+def _pg(dsn: str) -> Any:
+    """A psycopg connection, untyped: tests run dynamic SQL ty cannot check."""
+    import psycopg
+
+    return psycopg.connect(dsn)
 
 
 def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,3 +370,63 @@ def test_cli_export_publish_import(
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["removed"] == ["scratch/other"]
     assert "scratch/other" not in Repo.find(".").objects
+
+
+def test_cli_publish_and_import_postgres(
+    vcs_root: Path, pg_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+
+    # --dry-run plans per-table counts and creates nothing.
+    r = runner.invoke(app, ["publish", "--to", pg_dsn, "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "plan: publish" in r.output and "tether.objects" in r.output
+    with _pg(pg_dsn) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM information_schema.schemata "
+                "WHERE schema_name = 'tether'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    # The DSN can come from the environment; the second run skips known commits.
+    monkeypatch.setenv("TETHER_PUBLISH_DSN", pg_dsn)
+    r = runner.invoke(app, ["publish", "--json"])
+    assert r.exit_code == 0, r.output
+    first = json.loads(r.output)
+    assert first["schema"] == "tether" and first["upserted"]["objects"] >= 1
+    r = runner.invoke(app, ["publish", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["skipped_commits"] == first["upserted"]["commits"]
+
+    # Import from the published tables through a query.
+    with _pg(pg_dsn) as conn:
+        conn.execute(
+            "CREATE TABLE registry AS "
+            "SELECT key, kind, locator_json FROM tether.objects_head"
+        )
+        other = f"sys-{uuid.uuid4().hex[:8]}"
+        default_store().system(other)
+        conn.execute(
+            "INSERT INTO registry VALUES ('scratch/two', 'memory', %s::jsonb)",
+            (json.dumps({"system": other}),),
+        )
+        conn.commit()
+    r = runner.invoke(app, ["import", pg_dsn, "--table", "registry", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output) == {
+        "added": ["scratch/two"],
+        "updated": [],
+        "removed": [],
+        "unchanged": ["db"],
+    }
+    assert "scratch/two" in Repo.find(".").objects

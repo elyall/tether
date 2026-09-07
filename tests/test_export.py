@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +21,13 @@ from tether.export import (
 )
 from tether.manifest import Policy
 from tether.repo import Repo
+
+
+def _pg(dsn: str) -> Any:
+    """A psycopg connection, untyped: tests run dynamic SQL ty cannot check."""
+    import psycopg
+
+    return psycopg.connect(dsn)
 
 
 def _dataset(vcs_root: Path) -> tuple[Repo, str, list[str]]:
@@ -308,27 +315,81 @@ def test_publish_dry_run_writes_nothing(vcs_root: Path) -> None:
     assert fake.commits == 0 and fake.rollbacks >= 1
 
 
-@pytest.mark.skipif(not os.environ.get("TETHER_TEST_PG"), reason="needs TETHER_TEST_PG")
-def test_publish_live_round_trip(vcs_root: Path) -> None:  # pragma: no cover
-    psycopg = pytest.importorskip("psycopg")
-    repo, _system, _commits = _dataset(vcs_root)
-    schema = f"tether_test_{uuid.uuid4().hex[:8]}"
-    dsn = os.environ["TETHER_TEST_PG"]
-    try:
-        first = repo.export().to_postgres(dsn, schema=schema)
-        assert first.skipped_commits == 0
-        second = repo.export().to_postgres(dsn, schema=schema)
-        assert second.skipped_commits == first.upserted["commits"]
-        with psycopg.connect(dsn) as conn:
-            n = conn.execute(f"SELECT COUNT(*) FROM {schema}.objects").fetchone()[0]
-            assert n == 6
-            head = conn.execute(
-                f"SELECT COUNT(*) FROM {schema}.objects_head"
-            ).fetchone()[0]
-            assert head in (0, 2)
-    finally:
-        with psycopg.connect(dsn) as conn:
-            conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+def test_publish_live(vcs_root: Path, pg_dsn: str) -> None:
+    """Round trip against a real Postgres: DDL, upserts, casts, incremental runs."""
+    repo, system, commits = _dataset(vcs_root)
+
+    first = repo.export().to_postgres(pg_dsn, schema="tether")
+    assert first.skipped_commits == 0 and first.upserted["objects"] == 6 + _extra(repo)
+
+    with _pg(pg_dsn) as conn:
+
+        def one(sql: str) -> object:
+            return conn.execute(sql).fetchone()[0]
+
+        assert one("SELECT COUNT(*) FROM tether.objects") == 6 + _extra(repo)
+        assert one("SELECT COUNT(*) FROM tether.objects_head") == 2
+        # JSONB and TIMESTAMPTZ really are typed on the server side.
+        assert one(
+            "SELECT state_json->>'snapshot_id' FROM tether.objects "
+            f"WHERE key = 'db' AND commit_id = '{commits[0]}'"
+        )
+        assert (
+            one("SELECT pg_typeof(committed_at)::text FROM tether.commits LIMIT 1")
+            == "timestamp with time zone"
+        )
+        assert one(
+            "SELECT pg_typeof(locator_json)::text FROM tether.objects LIMIT 1"
+        ) == ("jsonb")
+        assert (
+            one("SELECT recoverable FROM tether.objects WHERE key = 'db' LIMIT 1")
+            is True
+        )
+        assert one("SELECT value FROM tether.tether_meta WHERE key = 'head'") == (
+            repo.vcs.current_rev()
+        )
+        # The dedup table and the pins view line up with the SQLite export.
+        assert one("SELECT COUNT(*) FROM tether.object_states") == 4
+        assert (
+            one("SELECT MAX(commits) FROM tether.object_pins") == 2 + _extra(repo) // 2
+        )
+
+    # Publishing again writes no commit rows but refreshes refs and meta.
+    second = repo.export().to_postgres(pg_dsn, schema="tether")
+    assert second.skipped_commits == first.upserted["commits"]
+    assert second.upserted["commits"] == 0 and second.upserted["objects"] == 0
+    assert second.upserted["refs"] >= 1
+
+    # A new commit publishes incrementally; the head ref moves with it.
+    default_store().write(system, "main", {"v": 3})
+    c4 = repo.commit("again").vcs_commit
+    third = repo.export().to_postgres(pg_dsn, schema="tether")
+    assert third.upserted["commits"] == 1 + _extra(repo) // 2  # c4 (+ jj's new @)
+    with _pg(pg_dsn) as conn:
+        head = conn.execute("SELECT commit_id FROM tether.refs WHERE kind = 'head'")
+        assert head.fetchone()[0] == repo.vcs.current_rev()
+        n = conn.execute(
+            "SELECT COUNT(*) FROM tether.objects WHERE commit_id = %s", (c4,)
+        )
+        assert n.fetchone()[0] == 2
+
+    # A caller-owned connection is reused and left open; dry_run writes nothing.
+    with _pg(pg_dsn) as conn:
+        report = repo.export().to_postgres(
+            connection=conn, schema="tether", dry_run=True
+        )
+        assert report.dry_run and report.upserted["commits"] == 0
+        assert not conn.closed
+        # A fresh schema holds exactly the reachable history. `tether` (published
+        # incrementally) may hold one more: jj rewrote the old working-copy
+        # commit at `commit("again")`, and publish never deletes commit rows.
+        other = repo.export().to_postgres(connection=conn, schema="tether_two")
+        reachable = repo.export().row_counts()["commits"]
+        assert other.upserted["commits"] == reachable
+        n = conn.execute("SELECT COUNT(*) FROM tether_two.commits").fetchone()[0]
+        assert n == reachable
+        n = conn.execute("SELECT COUNT(*) FROM tether.commits").fetchone()[0]
+        assert n == reachable + _extra(repo) // 2
 
 
 def test_bundle_row_counts_and_getitem(vcs_root: Path) -> None:

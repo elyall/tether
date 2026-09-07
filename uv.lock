@@ -1594,6 +1594,18 @@ wheels = [
 ]
 
 [[package]]
+name = "mirakuru"
+version = "3.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "psutil", marker = "sys_platform != 'cygwin'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/82/70/d15022d73ed8c18977a8dc4860b3e1f83259fd8dddd8eaea0bb35c25afb9/mirakuru-3.0.3.tar.gz", hash = "sha256:70ec0b03a474fd5c29ce2d2050e15546e91f4e7d5f709d209ad45d091deaa2f6", size = 28257, upload-time = "2026-09-03T12:23:03.529Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/3e/4255fde6cd809861c677567513e767bda508a2d1264ec05d49258455ebb5/mirakuru-3.0.3-py3-none-any.whl", hash = "sha256:a506fa39a401873b12c31fe902a40249e67f54e32351e42a77fd3e94a789f6f2", size = 28433, upload-time = "2026-09-03T12:23:02.155Z" },
+]
+
+[[package]]
 name = "mistune"
 version = "3.3.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2223,6 +2235,15 @@ wheels = [
 ]
 
 [[package]]
+name = "port-for"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/db/cb50b1dd5ce6d1ffdfb93ff358c714c57367cc59beafe14209c21c0b3408/port_for-1.1.0.tar.gz", hash = "sha256:b9e949f0ec7101094c4b0f096fad80d0aa90818854fa69a9d750fa4fd1e7b4ba", size = 17414, upload-time = "2026-09-05T11:37:50.459Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/8b/823aec43117b17fcecd241b3c893c4e6f9156a878b139b2d684d71fe25f7/port_for-1.1.0-py3-none-any.whl", hash = "sha256:99c543583dc33942b64ae5e3b80d71c536bd2eb1c568730d533776e0d0ff9264", size = 17041, upload-time = "2026-09-05T11:37:49.335Z" },
+]
+
+[[package]]
 name = "prometheus-client"
 version = "0.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2762,6 +2783,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/51/a849f96e117386044471c8ec2bd6cfebacda285da9525c9106aeb28da671/pytest_cov-7.1.0.tar.gz", hash = "sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2", size = 55592, upload-time = "2026-03-21T20:11:16.284Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/7a/d968e294073affff457b041c2be9868a40c1c71f4a35fcc1e45e5493067b/pytest_cov-7.1.0-py3-none-any.whl", hash = "sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678", size = 22876, upload-time = "2026-03-21T20:11:14.438Z" },
+]
+
+[[package]]
+name = "pytest-postgresql"
+version = "9.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mirakuru" },
+    { name = "packaging" },
+    { name = "port-for" },
+    { name = "psycopg" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/7f/75f3bddd42f8db32cd761d65a1ff78f1703437d3967af7e70ef14605391b/pytest_postgresql-9.1.0.tar.gz", hash = "sha256:d340789d6f43cac901fc14f52b15723279bd66db4db7a6506d969417c36cdf04", size = 46801, upload-time = "2026-09-04T12:22:34.831Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/ac/7151f908b4744672b96b2234faf485a11e7c4e485618079049f9f31dda03/pytest_postgresql-9.1.0-py3-none-any.whl", hash = "sha256:78d5b04e321c1d9b2ac86c837aa536f833f4141bd297196d54b6755a3aeba008", size = 41999, upload-time = "2026-09-04T12:22:33.362Z" },
 ]
 
 [[package]]
@@ -3341,6 +3378,7 @@ dev = [
     { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pytest-postgresql" },
     { name = "respx" },
     { name = "ruff" },
     { name = "ty" },
@@ -3390,6 +3428,7 @@ dev = [
     { name = "pyarrow", specifier = ">=15" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=5" },
+    { name = "pytest-postgresql", specifier = ">=6.1" },
     { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "ty", specifier = ">=0.0.1a1" },

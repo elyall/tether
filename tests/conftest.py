@@ -13,8 +13,59 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pytest_postgresql import factories
 
 _BIN = "/Users/elyall/Documents/Code/.bin"
+
+
+# --------------------------------------------------------------------------- #
+# Ephemeral Postgres (publish / import tests)
+# --------------------------------------------------------------------------- #
+def _find_pg_ctl() -> str | None:
+    """Locate ``pg_ctl`` on PATH or in the usual install dirs (Homebrew, Debian).
+
+    ``None`` keeps collection working when Postgres is absent; tests that need
+    it skip through ``pg_dsn`` instead of failing at import.
+    """
+    found = shutil.which("pg_ctl")
+    if found:
+        return found
+    candidates = [
+        "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+        "/opt/homebrew/opt/postgresql@16/bin/pg_ctl",
+        "/usr/local/opt/postgresql@16/bin/pg_ctl",
+        "/usr/lib/postgresql/17/bin/pg_ctl",
+        "/usr/lib/postgresql/16/bin/pg_ctl",
+        "/usr/lib/postgresql/15/bin/pg_ctl",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+_PG_CTL = _find_pg_ctl()
+# One cluster per session; `postgresql` hands each test a fresh database.
+postgresql_proc = (
+    factories.postgresql_proc(executable=_PG_CTL)
+    if _PG_CTL
+    else factories.postgresql_proc()
+)
+postgresql = factories.postgresql("postgresql_proc")
+
+
+@pytest.fixture
+def pg_dsn(request: pytest.FixtureRequest) -> str:
+    """libpq DSN of a fresh database on the session's ephemeral cluster.
+
+    Skips when no Postgres binaries are installed.
+    """
+    if _PG_CTL is None:
+        pytest.skip("PostgreSQL (pg_ctl) not installed")
+    conn = request.getfixturevalue("postgresql")
+    info = conn.info
+    auth = info.user + (f":{info.password}" if info.password else "")
+    return f"postgresql://{auth}@{info.host}:{info.port}/{info.dbname}"
 
 
 @pytest.fixture(scope="session")

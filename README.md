@@ -399,6 +399,11 @@ uv run ty check
 uv run pytest
 ```
 
+The `publish` / `import` tests start an ephemeral PostgreSQL cluster through
+`pytest-postgresql`; they need `pg_ctl` on `PATH` or a Homebrew / Debian
+install (`brew install postgresql@16`; GitHub's Ubuntu runners ship it) and
+skip otherwise.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

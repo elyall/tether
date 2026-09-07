@@ -125,7 +125,10 @@ schema are skipped; `refs`, `workspace`, and `tether_meta` describe *now* and
 are rewritten; everything runs in one transaction with
 `INSERT ... ON CONFLICT DO UPDATE`. Tables and views are created with
 `IF NOT EXISTS`, so the first run needs `CREATE` on the database and later
-runs only need write access to the schema.
+runs only need write access to the schema. Like `--append`, it never deletes
+commit rows: a jj commit rewritten after it was published keeps its row under
+its old id (no ref points at it, so `objects_head` is unaffected). Drop and
+republish the schema when that matters.
 
 The DSN comes from `--to` or `$TETHER_PUBLISH_DSN`, never from `tether.toml`
 -- the same rule as backend credentials. Needs the `postgres` extra

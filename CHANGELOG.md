@@ -31,6 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - VCS adapters gained `commit_info(revs)` (one batched `git log --stdin`; jj
   change ids) and `refs()` (bookmarks / branches, tags, head).
 - `postgres` extra (`psycopg`) for `publish` and Postgres `import` sources.
+- Dev: `pytest-postgresql` runs the `publish` / Postgres `import` tests against
+  an ephemeral cluster (skipped when `pg_ctl` is not installed).
 - User-guide page "Registries and SQL".
 
 ## [0.1.0a4] - 2026-09-05
