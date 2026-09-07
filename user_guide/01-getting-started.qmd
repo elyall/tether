@@ -74,6 +74,8 @@ Where to next:
   writable handles, and committing your changes.
 - [Reclaiming storage](05-reclaiming-storage.qmd) covers plans (`--dry-run`),
   pin-less forks, dropping history, and `gc`.
+- [Registries and SQL](09-registries-and-sql.qmd) exports history as tables,
+  publishes them to Postgres, and imports the object set from a registry.
 - [Concepts](02-concepts.qmd) explains the model (tiers, pins, forks, stale
   working copies) in one page.
 

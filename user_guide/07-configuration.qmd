@@ -50,6 +50,19 @@ A `Policy` is stored per object (`[policy]` in its manifest) and set with the
 | `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
 | `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming storage](05-reclaiming-storage.qmd). |
 
+## Import query
+
+`[import] query` is the default SQL for `tether import` when neither `--table`
+nor `--query` is given. It must yield tether's canonical columns (`key`,
+`kind`, `uri` / `locator_json`, optional `policy_*`, `at`); the source (DSN or
+file) is still passed on the command line, so no credentials land in the repo.
+See [Registries and SQL](09-registries-and-sql.qmd).
+
+```toml
+[import]
+query = "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object WHERE type = 'IcechunkStore'"
+```
+
 ## Backend options
 
 `[backends.<kind>]` is handed to the backend when it is first used. Only

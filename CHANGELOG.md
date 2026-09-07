@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Registries and SQL. `tether export PATH` derives relational tables from the
+  manifests in VCS history -- `commits`, `commit_parents`, `refs`, `objects`,
+  `object_states` (distinct system/state pairs), optional `listings` /
+  `listing_entries` and `workspace`, plus `objects_head` / `object_pins`
+  views -- into SQLite (default, `--append` upserts), or Parquet / CSV / JSONL
+  directories with a `schema.json`. `tether publish --to DSN` upserts the same
+  tables into a Postgres schema (`--schema`, default `tether`), skipping
+  commits already present and rewriting `refs` / `tether_meta`; `--dry-run`
+  prints per-table counts; the DSN comes from `--to` or `$TETHER_PUBLISH_DSN`.
+  `tether import SOURCE` reads rows with the canonical object columns (`key`,
+  `kind`, `uri` / `locator_json`, `policy_*`, `at`) from a Postgres DSN, SQLite
+  file, `.csv`, or `.jsonl` (`--table` / `--query`, or `[import] query` in
+  `tether.toml`) and plans `add` / `update` / `remove` (`--sync`) on the
+  manifests with `--dry-run` / `--plan` / `--from-plan` like the other planned
+  commands; a kind change is refused. Python: `Repo.export()` ->
+  `ExportBundle` (`to_sqlite`, `to_dir`, `to_arrow`, `to_postgres`,
+  `row_counts`), `Repo.plan_import` / `apply_import` / `import_objects`,
+  `tether.export.TABLES` as the single schema definition, and
+  `tether.registry.read_source`. One table definition drives SQLite DDL,
+  Postgres DDL (JSONB / TIMESTAMPTZ), and Arrow types.
+- VCS adapters gained `commit_info(revs)` (one batched `git log --stdin`; jj
+  change ids) and `refs()` (bookmarks / branches, tags, head).
+- `postgres` extra (`psycopg`) for `publish` and Postgres `import` sources.
+- User-guide page "Registries and SQL".
+
 ## [0.1.0a4] - 2026-09-05
 
 ### Fixed

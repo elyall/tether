@@ -1,0 +1,227 @@
+---
+title: "Registries and SQL"
+---
+
+Data registries keep pointers and metadata in SQL: one row per object saying
+what exists and where. tether keeps its own facts as TOML manifests in the
+VCS, because that is what gives it diffs, merges, undo, and a cheap history
+walk. The two meet through three commands that treat SQL tables as a *derived
+view* of the manifests -- never the other way round:
+
+| Direction | Command | What moves |
+| --- | --- | --- |
+| manifests -> file | `tether export` | commits, objects, states, refs as SQLite / Parquet / CSV / JSONL |
+| manifests -> database | `tether publish` | the same tables upserted into a Postgres schema |
+| registry -> manifests | `tether import` | which objects to track (and where to start), as `add` / `update` / `remove` |
+
+Nothing in this page changes how tether records or pins state: `commit`
+still does that, and only `commit` does.
+
+## The tables
+
+Every output shares one schema (`tether.export.TABLES`), so a SQLite export and
+a Postgres schema have the same columns. JSON columns are `TEXT` in SQLite and
+`JSONB` in Postgres; timestamps are ISO-8601 text and `TIMESTAMPTZ`.
+
+| Table | Key | Row |
+| --- | --- | --- |
+| `commits` | `commit_id` | one VCS commit: `change_id` (jj), author, `authored_at`, `committed_at`, `message`, `manifest_hash` |
+| `commit_parents` | `commit_id, parent_id` | one edge of the commit graph (`position` 0 = first parent) |
+| `refs` | `name, kind` | a bookmark / branch / tag / `head` and the commit it points at |
+| `objects` | `commit_id, key` | one manifest at one commit: `kind`, `uri`, `locator_json`, `identity_json`, `identity_hash`, `policy_*`, `state_json`, `state_hash`, `pin_id`, `pin_ref`, `recoverable`, `captured_at` |
+| `object_states` | `kind, identity_hash, state_hash` | one distinct (system, state): the *versions* a registry keys on, with `first_commit_id` |
+| `listings`, `listing_entries` | `listing_name` (`, path`) | per-file listings for directory / prefix objects (`--listings`) |
+| `workspace` | `workspace_id, key` | this checkout's working refs and last snapshot (`--workspace`) |
+| `tether_meta` | `key` | `schema_version`, `exported_at`, `head`, `vcs`, `tether_version` |
+
+Two views come along: `objects_head` (the objects at the exported head) and
+`object_pins` (each pin and how many commits reference it). `uri` is the
+locator's `uri` when it has one -- the natural join key to a catalog's
+`object_uri` column. `identity_hash` and `state_hash` are blake2b digests of
+the same canonical JSON that produces `pin_id`, so the same state on the same
+system hashes the same everywhere.
+
+## Export
+
+```bash
+tether export tether.sqlite                       # every reachable commit
+tether export tether.sqlite --rev main            # one revision
+tether export dump/ --format parquet --listings   # one file per table + schema.json
+tether export tether.sqlite --append              # upsert into an existing file
+```
+
+`--append` never deletes: a jj commit that was later rewritten or abandoned
+keeps its rows. Rebuild without `--append` now and then, or let `publish`
+(below) do the incremental work against a database.
+
+Query it in place:
+
+```bash
+sqlite3 tether.sqlite "SELECT key, pin_ref, state_json FROM objects_head"
+```
+
+```python
+import duckdb
+
+con = duckdb.connect()
+con.sql("ATTACH 'tether.sqlite' AS t (TYPE sqlite)")
+con.sql("""
+    SELECT key, json_extract_string(state_json, '$.snapshot_id') AS snapshot
+    FROM t.objects_head WHERE kind = 'icechunk'
+""").show()
+```
+
+Or skip the file:
+
+```python
+from tether import Repo
+
+bundle = Repo.find(".").export(listings=True)
+tables = bundle.to_arrow()          # dict[str, pyarrow.Table]
+bundle.to_sqlite("tether.sqlite")   # or .to_dir("dump", "parquet")
+```
+
+### Joining a registry
+
+Suppose a catalog has `data_object(object_uri, plate_name, ...)` and analysis
+results carry `tether_rev` (the VCS commit that produced them, e.g. from
+`TETHER_REV`). Which Icechunk snapshot did each result read?
+
+```sql
+SELECT m.metric_id, d.plate_name,
+       json_extract_string(o.state_json, '$.snapshot_id') AS snapshot_id,
+       o.pin_ref
+FROM metric m
+JOIN t.objects o ON o.commit_id = m.tether_rev AND o.kind = 'icechunk'
+JOIN data_object d ON d.object_uri = o.uri;
+```
+
+No tether process is involved; the export is a plain table.
+
+## Publish
+
+`publish` writes the same tables into Postgres and is meant to run after every
+`tether commit`, from CI or a Dagster step:
+
+```bash
+export TETHER_PUBLISH_DSN=postgresql://tether@db.internal/rb   # or --to
+tether publish --dry-run          # per-table row counts, nothing written
+tether publish                    # schema `tether`; --schema to change it
+```
+
+```
+published 9 row(s) to schema 'tether' (12 commit(s) already present)
+  commits            1 row(s)
+  commit_parents     1 row(s)
+  refs               3 row(s)
+  objects            2 row(s)
+  object_states      1 row(s)
+  tether_meta        5 row(s)
+```
+
+It is idempotent and incremental: commits are immutable, so rows of
+`commits`, `commit_parents`, and `objects` whose commit is already in the
+schema are skipped; `refs`, `workspace`, and `tether_meta` describe *now* and
+are rewritten; everything runs in one transaction with
+`INSERT ... ON CONFLICT DO UPDATE`. Tables and views are created with
+`IF NOT EXISTS`, so the first run needs `CREATE` on the database and later
+runs only need write access to the schema.
+
+The DSN comes from `--to` or `$TETHER_PUBLISH_DSN`, never from `tether.toml`
+-- the same rule as backend credentials. Needs the `postgres` extra
+(`pip install 'tether-vcs[postgres]'`).
+
+From Python, `bundle.to_postgres(dsn, schema="tether")` returns a
+`PublishReport`; pass `connection=` to reuse an open connection or pool.
+
+## Import
+
+`import` runs the other way. The registry says what to track; tether writes
+the manifests. Rows must have tether's canonical columns:
+
+| Column | Required | Meaning |
+| --- | --- | --- |
+| `key` | yes | object key |
+| `kind` | yes | backend kind |
+| `uri` | one of | becomes `locator.uri` |
+| `locator_json` | `uri` / `locator_json` | full locator as a JSON object (merged over `uri`) |
+| `policy_write`, `policy_file`, `policy_pin` | no | default from `[defaults]` in `tether.toml` |
+| `at` | no | detached base state, exactly like `add --at` |
+
+Other columns are ignored (and named in the plan). The mapping from your
+registry's columns is SQL on your side, which keeps tether free of
+per-registry options:
+
+```bash
+tether import postgresql://reader@db.internal/rb --query "
+  SELECT 'zarr/' || plate_name AS key,
+         'icechunk'            AS kind,
+         object_uri            AS uri
+  FROM data_object
+  WHERE type = 'IcechunkStore'
+" --dry-run
+```
+
+```
+plan: import (2 write(s))
+                 add  zarr/plate1  [icechunk] s3://lab-data/plate1.icechunk  register
+              update  zarr/plate2  [icechunk] s3://lab-data/plate2.icechunk  locator changed; committed state kept
+                      zarr/plate3: unchanged
+```
+
+Sources: a Postgres DSN, a SQLite file (`--table` or `--query`), a `.csv`, or a
+`.jsonl`. A standing query can live in `tether.toml` (it holds no
+credentials):
+
+```toml
+[import]
+query = "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object WHERE type = 'IcechunkStore'"
+```
+
+Then `tether import postgresql://...` is enough. The plan has three verbs:
+
+- `add`: the key is new.
+- `update`: the key exists and its locator or policy differs. The manifest's
+  committed `state` and `pin` are kept; the next `status` shows whether the
+  object moved.
+- `remove`: only with `--sync`, for registered keys the source no longer
+  lists. Like `tether remove`, this leaves working branches for `gc`.
+
+A key whose `kind` would change is refused -- remove and re-add it
+explicitly. `--plan FILE` / `--from-plan FILE` work as for the other planned
+commands, and apply refuses a plan whose manifests have changed underneath
+it. After importing, run `tether status` and `tether commit`: import changed
+*what is tracked*; commit records *what state it is in*.
+
+### Round trip
+
+The canonical columns are a subset of the `objects` table, so an export can be
+edited and imported back:
+
+```bash
+tether export snap.sqlite
+sqlite3 snap.sqlite "UPDATE objects SET policy_pin = 'record' WHERE key LIKE 'scratch/%'"
+tether import snap.sqlite --sync --query "
+  SELECT key, kind, locator_json, policy_write, policy_file, policy_pin
+  FROM objects_head
+"
+```
+
+An unmodified export imports as an empty plan.
+
+## Prior art
+
+This shape -- files are canonical, tables are a rebuildable index -- is how
+every comparable tool lands. [git-history](https://github.com/simonw/git-history)
+turns a file's git history into `commits` / `item` / `item_version` tables;
+[Quilt](https://docs.quilt.bio) keeps package manifests in S3 and maintains
+`package_revision` / `package_tag` / `package_manifest` / `package_entry`
+Iceberg tables beside them; [Dolt](https://www.dolthub.com) exposes its
+version graph as `dolt_log` / `dolt_history_*` system tables; Iceberg exposes
+`$snapshots` / `$history` / `$files`. [Kart](https://kartproject.org) is the
+model for the reverse direction: git holds the data, a SQL database is a
+working copy, and `kart commit` folds edits back -- which is what `import`
+followed by `tether commit` does for the object set. Even
+[Fossil](https://fossil-scm.org), a VCS stored *in* SQLite, treats its SQL
+metadata as a cache that `fossil rebuild` can recompute from the canonical
+artifacts.

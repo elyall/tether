@@ -29,6 +29,7 @@ are therefore the VCS's, not tether's.
 | detached head | an object registered `--at` a state that is not a branch head; `commit` pins it, `new` forks from it |
 | -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins, dead workspaces' branches) |
 | `jj abandon` / `jj squash` | the VCS's own; what history no longer names, `gc` releases |
+| -- | **export** / **publish** (history as SQL tables) and **import** (the object set from a registry query) |
 
 ## State, pin, fork
 

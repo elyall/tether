@@ -47,6 +47,9 @@ cli:
       contents: [commit, new, open]
     - title: Maintenance
       contents: [gc]
+    - title: Registries
+      desc: Derive SQL tables from history, push them to Postgres, or import the object set from a registry.
+      contents: [export, publish, import]
 
 # Releases are not published yet; enable once GitHub Releases exist.
 changelog:
@@ -107,6 +110,14 @@ reference:
       desc: Capability-parametrized checks for backend authors.
       contents:
         - testing
+    - title: Registries
+      desc: >-
+        Export tables (`ExportBundle`, `TABLES`), Postgres publishing, and the
+        canonical import columns / sources for `import`.
+      contents:
+        - export
+        - registry
+        - ImportReport
     - title: VCS adapters
       desc: How tether reads and writes history through jj or git.
       contents:
@@ -138,3 +149,4 @@ skill:
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on `commit`, `new`, and `gc`; save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."
+    - "For registries, run `tether publish` after each `tether commit` (or `tether export` for a file); join `objects.uri` to the catalog's `object_uri` and `objects.commit_id` to a `tether_rev` column. `tether import` only changes what is tracked; commit afterwards."

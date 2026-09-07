@@ -66,7 +66,8 @@ import and the command you run are both `tether`.
 
 Extras: `cli`, `objectstore` (S3/GCS/Azure for `file`; `s3`/`gcs`/`azure` are
 aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,
-`dolt`, `all`. `git`/`jj` must be on `PATH`.
+`dolt`, `postgres` (`tether publish` / `import` against Postgres), `all`.
+`git`/`jj` must be on `PATH`.
 
 ## Quickstart
 
@@ -161,6 +162,7 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 | `.dvc` files | `.tether/objects/<key>.toml` (committed) |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff (files, tables, arrays, fragments, commits) |
 | -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins) |
+| -- | **export** / **publish** (history as SQL tables) and **import** (object set from a registry query) |
 
 ## Repository layout
 
@@ -252,6 +254,28 @@ engine a per-file listing at commit time; it is stored content-addressed under
 `.dir` files). Diffs of commits made before listings existed fall back to a
 count/size summary. `gc` removes listings no manifest references. Entries are
 capped at 2000 per object; counts are exact.
+
+## Registries and SQL
+
+Data registries keep pointers and metadata in SQL; tether keeps its facts as
+TOML in the VCS. Three commands bridge them without moving the source of
+truth (the same shape as git-history, Quilt's package tables, and Kart's SQL
+working copy; see the [guide](https://evanlyall.com/tether/user-guide/registries-and-sql.html)):
+
+```bash
+tether export tether.sqlite                 # commits, objects, object_states, refs, ... (also parquet/csv/jsonl)
+tether publish --to postgresql://.../rb     # same tables upserted into a Postgres schema; incremental by commit
+tether import postgresql://.../rb --query "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object" --dry-run
+```
+
+`objects.uri` joins a catalog's `object_uri`; `objects.commit_id` joins a
+`tether_rev` provenance column; `object_states` is the deduplicated set of
+versions. `import` plans `add` / `update` / `remove` (`--sync`) on the
+manifests from rows with tether's canonical columns -- the mapping is SQL on
+the registry side -- and never records or pins state; `tether commit` does.
+Python: `Repo.export()` returns an `ExportBundle` (`to_sqlite`, `to_dir`,
+`to_arrow`, `to_postgres`); `Repo.import_objects(rows)` and
+`plan_import` / `apply_import` mirror the CLI.
 
 ## Writing a backend
 

@@ -21,6 +21,9 @@ tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
 tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
+tether export PATH [--rev REV]... [--format sqlite|parquet|csv|jsonl] [--listings] [--workspace] [--append]
+tether publish [--to DSN] [--schema NAME] [--rev REV]... [--listings] [--dry-run]
+tether import SOURCE [--table NAME | --query SQL] [--sync] [--dry-run | --plan FILE | --from-plan FILE]
 ```
 
 Commands run from anywhere inside a dataset: the root is found by walking up to
@@ -128,7 +131,7 @@ plan: commit (2 write(s))
 
 Action verbs: `pin`, `record` (commit); `fork`, `track` (new); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
-`vcs-commit`. `track` and `keep-branch` are informational -- they write nothing.
+`add`, `update`, `remove` (import); `upsert` (publish); `vcs-commit`. `track` and `keep-branch` are informational -- they write nothing.
 
 ## `gc` scope
 
@@ -183,6 +186,18 @@ nothing (everything `removed`). Two: `REV_A → REV_B`. `--content` adds each
 changed object's native diff; `--limit` caps entries printed per object
 (counts stay exact).
 
+## `export`, `publish`, `import`
+
+The registry commands are covered in [Registries and SQL](09-registries-and-sql.qmd).
+In short: `export` writes the derived tables to a SQLite file (default) or a
+directory of parquet / csv / jsonl files; `publish` upserts them into a
+Postgres schema (DSN from `--to` or `$TETHER_PUBLISH_DSN`, never
+`tether.toml`) and skips commits already present; `import` reads rows with the
+canonical object columns from a Postgres DSN, SQLite file, `.csv`, or `.jsonl`
+and plans `add` / `update` / `remove` (`--sync`) on the manifests. `import` is
+a planned command like `commit`, `new`, and `gc`; `publish --dry-run` prints
+per-table counts.
+
 ## JSON output
 
 | Command | Shape |
@@ -198,3 +213,6 @@ changed object's native diff; `--limit` caps entries printed per object
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
 | plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |
+| `export` | `{"path", "format", "head", "rows": {table: count}}` |
+| `publish` | `{"schema", "head", "upserted": {table: count}, "skipped_commits"}`; with `--dry-run`: the plan (one `upsert` action per table) |
+| `import` | `{"added": [keys], "updated": [keys], "removed": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan |
