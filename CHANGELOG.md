@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a5] - 2026-09-06
+
 ### Added
 
 - Registries and SQL. `tether export PATH` derives relational tables from the
