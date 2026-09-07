@@ -9,11 +9,13 @@ native handles.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -40,6 +42,7 @@ from tether.errors import (
     UnpinnedStateError,
     VcsError,
 )
+from tether.export import ExportBundle, build_bundle
 from tether.handles import Handle
 from tether.manifest import (
     ObjectManifest,
@@ -67,6 +70,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.plan import Action, Plan
+from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
 
 TETHER_REV_ENV = "TETHER_REV"
@@ -168,6 +172,21 @@ class GcReport:
     """Whether anything was actually released."""
     plan: Plan | None = None
     """The plan that was (or would be) applied."""
+
+
+@dataclass
+class ImportReport:
+    """Result of `Repo.apply_import`."""
+
+    added: list[str] = field(default_factory=list)
+    """Keys registered."""
+    updated: list[str] = field(default_factory=list)
+    """Keys whose locator or policy changed (committed state kept)."""
+    removed: list[str] = field(default_factory=list)
+    """Keys unregistered (`sync=True` only)."""
+    unchanged: list[str] = field(default_factory=list)
+    """Keys the source listed identically."""
+    plan: Plan | None = None
 
 
 @dataclass
@@ -1477,6 +1496,169 @@ class Repo:
                     report.deleted_listings.append(a.target)
             return report
         return self.apply_gc(plan)
+
+    # -- export (manifests -> tables) ------------------------------------ #
+    def export(
+        self,
+        revs: Sequence[str] | None = None,
+        *,
+        listings: bool = False,
+        workspace: bool = False,
+    ) -> ExportBundle:
+        """Derive relational tables from the repository's history.
+
+        The tables (`commits`, `commit_parents`, `refs`, `objects`,
+        `object_states`, optional `listings` / `listing_entries` and
+        `workspace`) are what `tether export` writes and `tether publish`
+        upserts; see `tether.export.TABLES`.
+
+        Args:
+            revs: Revisions to include (jj revsets / git revisions). `None`
+                exports every reachable commit.
+            listings: Include per-file listings from `.tether/listings/`.
+            workspace: Include this checkout's working refs and last snapshot.
+        """
+        return build_bundle(self, revs=revs, listings=listings, workspace=workspace)
+
+    # -- import (registry rows -> manifests) ----------------------------- #
+    def plan_import(
+        self,
+        specs: Sequence[ImportSpec],
+        *,
+        sync: bool = False,
+        notes: Sequence[str] = (),
+    ) -> Plan:
+        """Diff desired objects against the working tree without writing.
+
+        Actions: `add` for new keys, `update` when a registered key's locator
+        or policy differs (its committed state and pin are kept), and, with
+        `sync`, `remove` for registered keys the source no longer lists.
+
+        Raises:
+            ConfigError: A key's `kind` would change; remove and re-add it
+                explicitly instead.
+        """
+        plan = Plan(
+            command="import",
+            context={
+                "manifest_hash": self.current_manifest_hash(),
+                "sync": sync,
+                "rows": len(specs),
+            },
+            notes=list(notes),
+        )
+        wanted = {s.key: s for s in specs}
+        for key in sorted(wanted):
+            spec = wanted[key]
+            current = self.objects.get(key)
+            params = {"locator": dict(spec.locator), "policy": spec.policy.to_dict()}
+            if current is None:
+                plan.actions.append(
+                    Action(
+                        "add",
+                        key,
+                        spec.kind,
+                        target=str(spec.locator.get("uri", "")),
+                        detail="register",
+                        params=params,
+                    )
+                )
+                continue
+            if current.kind != spec.kind:
+                raise ConfigError(
+                    f"{key!r} is registered as {current.kind!r} but the source says "
+                    f"{spec.kind!r}; remove and re-add it to change kinds"
+                )
+            changed = []
+            if dict(current.locator) != dict(spec.locator):
+                changed.append("locator")
+            if current.policy != spec.policy:
+                changed.append("policy")
+            if changed:
+                plan.actions.append(
+                    Action(
+                        "update",
+                        key,
+                        spec.kind,
+                        target=str(spec.locator.get("uri", "")),
+                        detail=f"{' and '.join(changed)} changed; committed state kept",
+                        params=params,
+                    )
+                )
+            else:
+                plan.notes.append(f"{key}: unchanged")
+        if sync:
+            for key in sorted(set(self.objects) - set(wanted)):
+                plan.actions.append(
+                    Action(
+                        "remove",
+                        key,
+                        self.objects[key].kind,
+                        detail="not listed by the source (sync)",
+                    )
+                )
+        return plan
+
+    def apply_import(self, plan: Plan, *, verify: bool = True) -> ImportReport:
+        """Write the manifests a `plan_import` plan describes.
+
+        Touches only `.tether/objects/` and the workspace state; commit the
+        result with `commit` as usual.
+
+        Raises:
+            StalePlanError: The working tree's manifests changed since planning.
+        """
+        if plan.command != "import":
+            raise ConfigError(f"expected an import plan, got {plan.command!r}")
+        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
+            raise StalePlanError(
+                "manifests changed since the plan was made; re-run the plan"
+            )
+        report = ImportReport(plan=plan)
+        for note in plan.notes:
+            key, _, why = note.partition(": ")
+            if why == "unchanged":
+                report.unchanged.append(key)
+        for a in plan.actions:
+            if a.op == "add":
+                self.add(
+                    a.key,
+                    a.kind,
+                    dict(a.params["locator"]),
+                    policy=Policy.from_dict(a.params["policy"]),
+                )
+                report.added.append(a.key)
+            elif a.op == "update":
+                current = self.objects[a.key]
+                updated = dataclasses.replace(
+                    current,
+                    locator=dict(a.params["locator"]),
+                    policy=Policy.from_dict(a.params["policy"]),
+                )
+                write_object(self.root, updated)
+                self.objects[a.key] = updated
+                report.updated.append(a.key)
+            elif a.op == "remove":
+                self.remove(a.key)
+                report.removed.append(a.key)
+        self.workspace.base = self.current_manifest_hash()
+        write_workspace(self.root, self.workspace)
+        return report
+
+    def import_objects(
+        self, rows: Iterable[Mapping[str, Any]], *, sync: bool = False
+    ) -> ImportReport:
+        """Register / update / remove objects from canonical rows in one step.
+
+        Rows carry `key`, `kind`, and any of `uri`, `locator_json`,
+        `policy_write`, `policy_file`, `policy_pin`, `at` (see
+        `tether.registry.CANONICAL_COLUMNS`); missing policy fields take
+        `config.defaults`. Equivalent to `apply_import(plan_import(...))`.
+        """
+        specs, notes = specs_from_rows(rows, self.config.defaults)
+        return self.apply_import(
+            self.plan_import(specs, sync=sync, notes=notes), verify=False
+        )
 
     # -- diff ------------------------------------------------------------ #
     def diff(

@@ -40,6 +40,7 @@ from tether.errors import (
     UnpinnedStateError,
     VcsError,
 )
+from tether.export import ExportBundle, PublishReport
 from tether.manifest import (
     ObjectManifest,
     Pin,
@@ -54,11 +55,13 @@ from tether.manifest import (
     working_ref_workspace,
 )
 from tether.plan import Action, Plan
+from tether.registry import ImportSpec
 from tether.repo import (
     TETHER_REV_ENV,
     CommitResult,
     DiffEntry,
     GcReport,
+    ImportReport,
     ObjectStatus,
     Repo,
     StatusReport,
@@ -72,8 +75,11 @@ __all__ = [
     "CommitResult",
     "ConfigError",
     "DiffEntry",
+    "ExportBundle",
     "GcReport",
     "ImmutableObjectModified",
+    "ImportReport",
+    "ImportSpec",
     "MultiObjectError",
     "ObjectManifest",
     "ObjectStatus",
@@ -81,6 +87,7 @@ __all__ = [
     "PinDriftError",
     "Plan",
     "Policy",
+    "PublishReport",
     "Repo",
     "RepoConfig",
     "StalePlanError",

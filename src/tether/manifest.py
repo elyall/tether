@@ -293,6 +293,8 @@ class RepoConfig:
     defaults: Policy = field(default_factory=Policy)
     vcs: dict[str, Any] = field(default_factory=dict)
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    import_query: str | None = None
+    """`[import] query`: default SQL for `tether import` (holds no credentials)."""
 
     def to_toml(self) -> str:
         doc = tomlkit.document()
@@ -307,6 +309,8 @@ class RepoConfig:
             doc["vcs"] = _drop_nulls(self.vcs)
         if self.backends:
             doc["backends"] = _drop_nulls(self.backends)
+        if self.import_query:
+            doc["import"] = {"query": self.import_query}
         return tomlkit.dumps(doc)
 
     @classmethod
@@ -316,6 +320,8 @@ class RepoConfig:
         snapshot = data.get("snapshot") or {}
         verify = data.get("verify") or {}
         new = data.get("new") or {}
+        import_tbl = data.get("import") or {}
+        query = import_tbl.get("query")
         return cls(
             version=int(tether_tbl.get("version", CONFIG_VERSION)),
             snapshot_auto=bool(snapshot.get("auto", True)),
@@ -324,6 +330,7 @@ class RepoConfig:
             defaults=Policy.from_dict(data.get("defaults")),
             vcs=dict(data.get("vcs") or {}),
             backends=dict(data.get("backends") or {}),
+            import_query=str(query) if query else None,
         )
 
 
