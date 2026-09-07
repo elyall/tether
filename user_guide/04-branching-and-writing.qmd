@@ -213,22 +213,62 @@ Continue writing on the same forks and committing as often as you like; each
 commit pins the latest state and the previous pins stay valid (they are what
 `open -r` and `verify` use).
 
-## Bringing it back to `main`
+## Bringing it back to `main`: `tether promote`
 
-tether does not merge. Promotion is a decision per system, made with the
-system's own tools once you are satisfied:
+Your dataset commit pins the fork's state in every system. To make each
+system's *base branch* point at that state too -- jj's `squash --into main`,
+for data -- run:
 
-- **Icechunk**: `repo.reset_branch("main", snapshot_id)` or re-commit the
-  fork's data onto `main`; then register/commit the dataset from `main`.
-- **Lance / git / lakeFS / Dolt**: merge or fast-forward with the native
-  command.
-- **Neon** cannot merge a child branch back. For production databases use
-  `--write track` (below) so the working ref *is* `main`, and rely on pins
-  (child branches at an LSN) for reproducibility rather than forks for
-  isolation.
+```bash
+tether promote --dry-run
+```
 
-The VCS side is ordinary: land the dataset commit on `main` with `jj` or `git`
-as you would any other change. The pins it references are already durable.
+```
+plan: promote (3 write(s))
+        fast-forward  code          [git] main  main sha=41c0d9e2b7f3… -> sha=f01a9d3c2b7e… (base unchanged since fork)
+        fast-forward  features      [lance] main  ...
+        fast-forward  zarr/imaging  [icechunk] main  main snapshot_id=K3F9M2A1B7C8… -> snapshot_id=DEB4861EB388… (base unchanged since fork)
+              refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; use `--write track` ...
+```
+
+For each Forkable object tether compares the base branch to the **fork point**
+-- the state recorded in `workspace.toml` when the branch was created -- and
+decides:
+
+| Base branch since your fork | Backend has | Outcome |
+| --- | --- | --- |
+| unchanged | `PROMOTE` | **fast-forward**: the base is moved to the fork's head; nothing is rewritten |
+| moved | `MERGE` | **merge**: the system's own three-way merge (lakeFS `merge_into`, Dolt `DOLT_MERGE`, `git merge`); conflicts are reported and nothing is written |
+| moved | `PROMOTE` only | **refuse**, with the system's recipe (Icechunk and Iceberg have no merge) |
+| anything | neither | **refuse** (Neon, Lance) |
+
+`--strategy ff` refuses anything that is not a fast-forward -- the setting for
+CI, where a surprise merge is worse than a failure. `--strategy merge` refuses
+plain fast-forwards when you want a merge commit for the record. `--rev REV`
+promotes what a *dataset commit* pinned instead of this workspace's live
+branches (the ancestry check replaces the fork point). `--dry-run`, `--plan`,
+and `--from-plan` work as everywhere else; apply refuses if a base moved after
+the plan was made.
+
+After a **fast-forward** nothing tether-side changes: the manifests already
+named that state and the pin already held it. Land the dataset commit with
+`jj` and you are done. After a **merge** the base holds a state no commit has
+pinned yet, so `promote` resets your working branch onto the merge result and
+the next `tether commit` pins it -- the output says so.
+
+```bash
+tether promote                      # fast-forward what it can, merge where the system can
+tether commit -m "Merge plate1 relabel into main"   # only after a merge
+jj bookmark set main -r @-          # land the dataset commit
+```
+
+Refusals are the honest part. Icechunk and Iceberg can fast-forward but not
+merge; if `main` moved under you, re-apply the writes on a fresh fork (or, for
+Icechunk, `reset_branch` when discarding `main`'s newer snapshots is what you
+mean). Lance cannot move a branch head at all yet. Neon cannot promote a child
+branch into its parent -- use `--write track` for databases that must receive
+writes, so the working ref *is* `main` and pins (child branches at an LSN)
+provide reproducibility.
 
 ## Starting from an older snapshot
 
@@ -354,6 +394,9 @@ write again; with `[new] fork = "eager"` it re-creates every branch.
   now; `--pin record` objects always fork now).
 - `open` returns writable native handles on those forks; write with the
   system's own library.
+- `promote` moves each system's base branch to the fork: fast-forward when the
+  base is unchanged since the fork point, native merge where the system has
+  one, refusal with the system's recipe otherwise.
 - `commit` pins the forks' states and commits the manifests; `diff --content`
   shows what changed inside each system.
 - Promotion to `main` is per system and deliberate; `--write track` skips

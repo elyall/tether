@@ -50,7 +50,7 @@ __all__ = [
     "sqlite_ddl",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 """Bumped when a table gains, loses, or retypes a column."""
 
 LogicalType = str  # "text" | "int" | "bool" | "json" | "timestamp"
@@ -206,6 +206,7 @@ TABLES: dict[str, TableDef] = {
                 ("key", "text", ""),
                 ("working_ref", "text", "Branch this checkout writes to"),
                 ("base", "text", "Manifest hash the working refs were forked from"),
+                ("fork_point_json", "json", "State the working branch was forked from"),
                 ("last_snapshot_json", "json", "Last fingerprint taken here"),
             ),
             ("workspace_id", "key"),
@@ -758,6 +759,7 @@ def build_bundle(
                     "key": key,
                     "working_ref": ws.working_refs.get(key),
                     "base": ws.base,
+                    "fork_point_json": ws.fork_points.get(key),
                     "last_snapshot_json": ws.last_snapshot.get(key),
                 }
             )

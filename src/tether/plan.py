@@ -78,7 +78,7 @@ class Plan:
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
 
-    NON_WRITES = frozenset({"track", "keep-branch", "defer-fork"})
+    NON_WRITES = frozenset({"track", "keep-branch", "defer-fork", "refuse"})
     """Actions that write nothing to an external system when applied."""
 
     @property

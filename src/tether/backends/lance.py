@@ -235,6 +235,11 @@ class LanceBackend(ObjectBackend):
         branches = self._dataset(locator).branches.list()
         return sorted(b for b in branches if str(b).startswith(WORKING_REF_PREFIX))
 
+    PROMOTE_HINT = (
+        "Lance cannot move a branch head; write the result onto the base branch "
+        "(or keep reading the fork) -- there is no branch merge or fast-forward yet"
+    )
+
     def open(
         self,
         locator: Locator,

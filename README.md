@@ -108,6 +108,7 @@ jj log                              # the dataset's history *is* the repo's hist
 tether new main                     # jj new main / git checkout main; working branches are decided (created on first write)
 tether open db/metrics              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
+tether promote                      # move each system's main to the fork: fast-forward, native merge, or refuse with a recipe
 tether diff main @ --content        # what changed inside each object between two revisions, natively
 tether log zarr/imaging             # an object's *native* history (snapshots); ids feed `add --at`
 tether add old/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --pick   # start from an older snapshot
@@ -158,6 +159,7 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 | `TreeState.snapshot()` | **snapshot**: concurrent fan-out fingerprint -> `workspace.toml` |
 | `commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
 | `new <rev>` | checkout + **fork** decision per object; the branch is created on the first writable `open` (`--eager`: during `new`) |
+| `squash --into main` | **promote**: fast-forward each system's base branch to the fork, or native-merge where the system can (lakeFS, Dolt, git) |
 | stale working copy | manifest hash recorded at fork; differs from HEAD => refuse writes |
 | bookmarks / op log / undo / workspaces / push | delegated to the VCS |
 | `.dvc` files | `.tether/objects/<key>.toml` (committed) |
@@ -212,15 +214,15 @@ the locator's `at` field: `tether add --at <id>` / `--pick`).
 | `file` (local) | Observed | size, mtime_ns (or dir digest) | -- | -- | `CHEAP`; immutable-by-default, drift is an error |
 | `file` (S3 / GCS / Azure object) | Addressable | size, etag, version_id | -- | -- | `CHEAP`; `--file versioned` on a versioning-enabled bucket; one `HEAD` |
 | `file` (S3 / GCS / Azure prefix) | Observed | count, size, etag digest | -- | -- | `CHEAP`; one paged `LIST`, no per-object calls |
-| `icechunk` | Forkable | snapshot_id | tag | branch | `ATOMIC_REF`; tags immutable, excluded from expiry |
-| `neon` | Forkable | lsn, next_xid, branch | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`; no merge/promote, leaf-only gc, quotas |
+| `icechunk` | Forkable | snapshot_id | tag | branch | `ATOMIC_REF`, `PROMOTE` (fast-forward via `reset_branch`; no merge); tags immutable, excluded from expiry |
+| `neon` | Forkable | lsn, next_xid, branch | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE`; no merge/promote, leaf-only gc, quotas |
 | `git` / `jj` | Forkable | sha, change_id, dirty | tag (pushed if `remote`) | branch | `CHEAP`, `ATOMIC_REF`; local path only for now |
-| `iceberg` | Forkable | snapshot_id, metadata_location | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`; `record` for S3 Tables (no native ref) |
+| `iceberg` | Forkable | snapshot_id, metadata_location | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`, `PROMOTE` (no merge); `record` for S3 Tables (no native ref) |
 | `delta` | Addressable | version, table_id | -- | -- | `CHEAP`, `RETENTION_BOUND`; no native tags; `VACUUM`/log retention bound readability |
 | `lance` | Forkable | branch, version | tag on (branch, version) | branch | `ATOMIC_REF`; tagged versions exempt from cleanup; version numbers are branch-scoped |
-| `lakefs` | Forkable | commit_id (+ dirty) | tag | branch | `CHEAP`, `ATOMIC_REF`; repo-wide pins, `prefix` scopes the handle |
+| `lakefs` | Forkable | commit_id (+ dirty) | tag | branch | `CHEAP`, `ATOMIC_REF`, `PROMOTE`, `MERGE`; repo-wide pins, `prefix` scopes the handle |
 | `ducklake` | Addressable | snapshot_id, snapshot_time_us | -- | -- | `CHEAP`, `RETENTION_BOUND`; catalog-wide snapshots; `ducklake_expire_snapshots` bounds readability |
-| `dolt` | Forkable | commit (+ dirty) | tag | branch | `ATOMIC_REF`; over MySQL protocol to `dolt sql-server`; handles are `db/ref` revision URLs |
+| `dolt` | Forkable | commit (+ dirty) | tag | branch | `ATOMIC_REF`, `PROMOTE`, `MERGE` (`DOLT_MERGE`); over MySQL protocol to `dolt sql-server`; handles are `db/ref` revision URLs |
 | `memory` | Forkable | snapshot_id | tag | branch | reference impl for tests |
 
 Command requirements: `status`/`snapshot`/`verify` need `FINGERPRINT`; `commit`
@@ -309,6 +311,12 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
 
 ## Caveats
 
+- **Promotion is per system.** `tether promote` fast-forwards a base branch
+  when it is unchanged since the fork point, uses the native three-way merge
+  where one exists (lakeFS, Dolt, git), and otherwise refuses with the
+  system's recipe: Icechunk and Iceberg cannot merge, Lance cannot move a
+  branch head, Neon cannot promote a child branch. Landing the dataset commit
+  in jj never merges data by itself.
 - **No cross-system atomicity.** A commit records each object's state within a
   capture window; point-consistency requires quiesced writers (the Neon check
   helps; `tether commit` refuses while writers are active unless `--force`).

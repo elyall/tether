@@ -55,6 +55,12 @@ class Capability(Flag):
     BRANCH_IS_STORAGE = auto()
     """Deleting a branch reclaims its data immediately (Neon); `gc` never
     deletes such a working branch without `force_prune`."""
+    PROMOTE = auto()
+    """Can fast-forward the base branch to a working branch's head
+    (`ObjectBackend.promote`)."""
+    MERGE = auto()
+    """Can three-way merge a working branch into the base branch
+    (`ObjectBackend.merge`), raising `MergeConflict` when it cannot."""
 
 
 class Tier(Enum):
@@ -289,6 +295,39 @@ class ObjectBackend(Protocol):
         Default: none. Used by ``gc --prune-workspaces``.
         """
         return []
+
+    PROMOTE_HINT: str = ""
+    """What to tell a user when tether cannot move the base branch (no
+    ``PROMOTE`` / ``MERGE``, or the base diverged and there is no merge)."""
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        """Fast-forward the locator's base branch to ``source``. Requires ``PROMOTE``.
+
+        ``source`` is a working ref name, a :class:`~tether.manifest.Pin`, or a
+        recorded ``State``. Implementations must refuse (``BackendError``) when
+        the base head is not an ancestor of ``source`` -- a fast-forward never
+        discards anything -- and be a no-op when the base is already there.
+        Returns the base branch's new state.
+        """
+        raise CapabilityError(f"{self.kind} backend cannot promote", kind=self.kind)
+
+    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        """Three-way merge working branch ``source_ref`` into the base branch.
+
+        Requires ``MERGE``. Raises :class:`~tether.errors.MergeConflict` (and
+        leaves the base untouched) when the system reports conflicts. Returns
+        the base branch's new state.
+        """
+        raise CapabilityError(f"{self.kind} backend cannot merge", kind=self.kind)
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        """Whether ``ancestor`` is in ``descendant``'s history (``None``: unknown).
+
+        Used by ``promote`` when no fork point was recorded. Default: unknown.
+        """
+        return None
 
     def open(
         self,

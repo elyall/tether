@@ -430,3 +430,45 @@ def test_cli_publish_and_import_postgres(
         "unchanged": ["db"],
     }
     assert "scratch/two" in Repo.find(".").objects
+
+
+def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"a": 1})
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+    r = runner.invoke(app, ["new", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["pending_forks"]["db"].startswith("tether.ws.")
+    assert runner.invoke(app, ["open", "db"]).exit_code == 0  # materializes the fork
+    wref = Repo.find(".").workspace.working_refs["db"]
+    s2 = store.write(system, wref, {"a": 1, "b": 2})
+
+    r = runner.invoke(app, ["promote", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "fast-forward" in r.output and "base unchanged since fork" in r.output
+    assert store.system(system).branches["main"] != s2
+    r = runner.invoke(app, ["promote", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["fast_forwarded"] == {"db": {"snapshot_id": s2}}
+    assert store.system(system).branches["main"] == s2
+
+    # A divergence with the ff strategy is refused (non-zero exit, hint shown).
+    store.write(system, wref, {"a": 1, "b": 2, "c": 3})
+    store.write(system, "main", {"a": 7, "b": 2})
+    r = runner.invoke(app, ["promote", "--strategy", "ff"])
+    assert r.exit_code == 1, r.output
+    assert "refused" in r.output and "strategy=ff" in r.output
+    r = runner.invoke(app, ["promote", "-m", "merge it"])
+    assert r.exit_code == 0, r.output
+    assert "merged" in r.output and "tether commit" in r.output
+    assert store.read(system, "main") == {"a": 7, "b": 2, "c": 3}
+    r = runner.invoke(app, ["promote", "--strategy", "sideways"])
+    assert r.exit_code == 1

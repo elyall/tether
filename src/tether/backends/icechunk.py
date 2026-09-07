@@ -39,6 +39,7 @@ class IcechunkBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -232,6 +233,43 @@ class IcechunkBackend(ObjectBackend):
     def list_working_refs(self, locator: Locator) -> list[str]:
         branches = self._repo(locator).list_branches()
         return sorted(b for b in branches if b.startswith(WORKING_REF_PREFIX))
+
+    PROMOTE_HINT = (
+        "Icechunk has no merge; re-apply the writes on a fresh fork of the base "
+        "branch, or reset the base with repo.reset_branch() if losing its newer "
+        "snapshots is intended"
+    )
+
+    def _source_sid(self, repo: Any, source: str | Pin | State) -> str:
+        if isinstance(source, Pin):
+            return str(repo.lookup_tag(source.ref))
+        if isinstance(source, dict):
+            return self._resolve(repo, str(source["snapshot_id"]))
+        return self._resolve(repo, source)
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        repo = self._repo(locator)
+        target = self._source_sid(repo, descendant)
+        wanted = str(ancestor["snapshot_id"])
+        return any(str(info.id) == wanted for info in repo.ancestry(snapshot_id=target))
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        repo = self._repo(locator)
+        base = self._base_branch(locator)
+        head = str(repo.lookup_branch(base))
+        target = self._source_sid(repo, source)
+        if target == head:
+            return {"snapshot_id": head}
+        if not self.ancestor_of(locator, {"snapshot_id": head}, target):
+            raise BackendError(
+                f"{base} moved to {head}, which is not an ancestor of {target}; "
+                f"{self.PROMOTE_HINT}",
+                kind="icechunk",
+            )
+        repo.reset_branch(base, target)
+        return {"snapshot_id": target}
 
     def open(
         self,

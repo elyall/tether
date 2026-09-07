@@ -44,7 +44,7 @@ cli:
       contents: [status, snapshot, diff, log, verify]
     - title: Record and branch
       desc: Pin state into commits and fork writable branches.
-      contents: [commit, new, open]
+      contents: [commit, new, open, promote]
     - title: Maintenance
       contents: [gc]
     - title: Registries
@@ -70,6 +70,7 @@ reference:
         - ObjectStatus
         - CommitResult
         - GcReport
+        - PromoteReport
         - DiffEntry
         - TETHER_REV_ENV
     - title: Plans
@@ -134,6 +135,7 @@ reference:
         - PinDriftError
         - StaleWorkingCopyError
         - StalePlanError
+        - MergeConflict
         - MultiObjectError
 
 skill:
@@ -146,6 +148,7 @@ skill:
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
     - "Use `--write track` for production branches that must not be forked (e.g. Neon `main`)."
+    - "`tether promote` only fast-forwards a base branch that is unchanged since the fork point; a moved base needs a backend with `MERGE` (lakeFS, Dolt, git) or a manual re-apply -- Icechunk/Iceberg refuse, Lance/Neon cannot promote at all."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on `commit`, `new`, and `gc`; save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."

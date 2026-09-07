@@ -21,7 +21,7 @@ from tether.backends.base import (
     base_at,
     register_backend,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, MergeConflict
 from tether.handles import Handle, MemoryHandle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
@@ -31,6 +31,7 @@ class _System:
     snapshots: dict[str, dict] = field(default_factory=dict)
     branches: dict[str, str] = field(default_factory=dict)
     tags: dict[str, str] = field(default_factory=dict)
+    parents: dict[str, list[str]] = field(default_factory=dict)
     counter: int = 0
 
 
@@ -63,13 +64,38 @@ class MemoryStore:
     def read(self, name: str, ref: str) -> dict:
         return dict(self.system(name).snapshots[self.resolve(name, ref)])
 
-    def write(self, name: str, branch: str, payload: dict) -> str:
+    def write(
+        self,
+        name: str,
+        branch: str,
+        payload: dict,
+        *,
+        extra_parents: list[str] | None = None,
+    ) -> str:
         sys = self.system(name)
         sys.counter += 1
         sid = f"{name}:s{sys.counter}"
         sys.snapshots[sid] = dict(payload)
+        parents = []
+        if branch in sys.branches:
+            parents.append(sys.branches[branch])
+        parents.extend(extra_parents or [])
+        sys.parents[sid] = parents
         sys.branches[branch] = sid
         return sid
+
+    def ancestors(self, name: str, sid: str) -> list[str]:
+        """``sid`` and everything reachable through parent links (nearest first)."""
+        sys = self.system(name)
+        seen: list[str] = []
+        queue = [sid]
+        while queue:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.append(cur)
+            queue.extend(sys.parents.get(cur, []))
+        return seen
 
 
 class MemoryBackend(ObjectBackend):
@@ -83,6 +109,8 @@ class MemoryBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
+        | Capability.MERGE
     )
 
     def __init__(self, store: MemoryStore | None = None) -> None:
@@ -199,6 +227,81 @@ class MemoryBackend(ObjectBackend):
     def list_working_refs(self, locator: Locator) -> list[str]:
         sys = self.store.system(self._system(locator))
         return sorted(b for b in sys.branches if b.startswith(WORKING_REF_PREFIX))
+
+    def _source_sid(self, name: str, source: str | Pin | State) -> str:
+        sys = self.store.system(name)
+        if isinstance(source, Pin):
+            sid = sys.tags.get(source.ref)
+            if sid is None:
+                raise BackendError(f"pin {source.ref} missing", key=name, kind="memory")
+            return sid
+        if isinstance(source, dict):
+            return str(source["snapshot_id"])
+        return self.store.resolve(name, source)
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        name = self._system(locator)
+        target = self._source_sid(name, descendant)
+        return str(ancestor["snapshot_id"]) in self.store.ancestors(name, target)
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        name = self._system(locator)
+        sys = self.store.system(name)
+        base = self._base_branch(locator)
+        head = sys.branches[base]
+        target = self._source_sid(name, source)
+        if target == head:
+            return {"snapshot_id": head}
+        if head not in self.store.ancestors(name, target):
+            raise BackendError(
+                f"{base} moved to {head}, which is not an ancestor of {target}",
+                key=name,
+                kind="memory",
+            )
+        sys.branches[base] = target
+        return {"snapshot_id": target}
+
+    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        name = self._system(locator)
+        sys = self.store.system(name)
+        base = self._base_branch(locator)
+        head = sys.branches[base]
+        src = self.store.resolve(name, source_ref)
+        if src == head or src in self.store.ancestors(name, head):
+            return {"snapshot_id": head}
+        if head in self.store.ancestors(name, src):
+            sys.branches[base] = src  # fast-forward
+            return {"snapshot_id": src}
+        src_line = self.store.ancestors(name, src)
+        common = next(
+            (a for a in self.store.ancestors(name, head) if a in src_line), None
+        )
+        anc = sys.snapshots.get(common, {}) if common else {}
+        ours, theirs = sys.snapshots[head], sys.snapshots[src]
+        merged = dict(ours)
+        conflicts: list[str] = []
+        for k in sorted(set(ours) | set(theirs) | set(anc)):
+            o, t, a = ours.get(k), theirs.get(k), anc.get(k)
+            if o == t:
+                continue
+            if o == a:  # only they changed it
+                if k in theirs:
+                    merged[k] = t
+                else:
+                    merged.pop(k, None)
+            elif t != a:  # both changed it differently
+                conflicts.append(k)
+        if conflicts:
+            raise MergeConflict(
+                f"{len(conflicts)} key(s) changed on both {base} and {source_ref}",
+                conflicts=conflicts,
+                key=name,
+                kind="memory",
+            )
+        sid = self.store.write(name, base, merged, extra_parents=[src])
+        return {"snapshot_id": sid}
 
     def open(
         self,

@@ -36,7 +36,7 @@ from tether.handles import (
 )
 from tether.manifest import Policy
 from tether.plan import Action, Plan
-from tether.repo import CommitResult, GcReport, Repo, StatusReport
+from tether.repo import CommitResult, GcReport, PromoteReport, Repo, StatusReport
 
 app = typer.Typer(
     name="tether",
@@ -534,6 +534,7 @@ def new(
             {
                 "working_refs": repo.workspace.working_refs,
                 "pending_forks": repo.workspace.pending_forks,
+                "fork_points": repo.workspace.fork_points,
             },
             as_json=True,
         )
@@ -781,6 +782,91 @@ def gc(
         typer.echo(f"forgot {forgotten} working ref(s) of removed object(s)")
     if report.deleted_listings:
         typer.echo(f"deleted {len(report.deleted_listings)} orphan listing(s)")
+
+
+@app.command()
+def promote(
+    keys: list[str] = typer.Argument(None, help="Objects to promote (default: all)."),
+    rev: str | None = typer.Option(
+        None,
+        "--rev",
+        "-r",
+        help="Promote the states pinned at this dataset commit instead of this "
+        "workspace's working branches.",
+    ),
+    strategy: str = typer.Option(
+        "auto",
+        "--strategy",
+        help="auto: fast-forward when the base is unchanged, else merge; "
+        "ff: refuse anything but a fast-forward; merge: refuse anything but a merge.",
+    ),
+    message: str | None = typer.Option(
+        None, "-m", "--message", help="Merge message for systems that record one."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show per-object outcomes; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None, "--from-plan", help="Apply a plan saved with --plan."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Move each system's base branch to what this workspace's fork holds.
+
+    The dataset commit already pins the fork's state, so nothing needs
+    re-committing after a fast-forward; `promote` makes `main` in each system
+    point at it too. Base unchanged since the fork -> fast-forward. Base moved
+    -> native 3-way merge where the system has one (lakeFS, Dolt, git),
+    otherwise refused with the system's own recipe. Then land the dataset
+    commit with jj/git.
+    """
+    repo = _repo()
+    try:
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "promote")
+            report: PromoteReport = repo.apply_promote(plan)
+        else:
+            plan = repo.plan_promote(
+                keys or None, rev=rev, strategy=strategy, message=message
+            )
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+            report = repo.apply_promote(plan, verify=False)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "fast_forwarded": report.fast_forwarded,
+                "merged": report.merged,
+                "skipped": report.skipped,
+                "refused": report.refused,
+                "conflicts": report.conflicts,
+            },
+            as_json=True,
+        )
+        if report.refused:
+            raise typer.Exit(1)
+        return
+    for key, state in report.fast_forwarded.items():
+        typer.echo(f"  fast-forwarded {key} -> {state}")
+    for key, state in report.merged.items():
+        typer.echo(f"  merged         {key} -> {state}")
+    for key in report.skipped:
+        typer.echo(f"  skipped        {key}")
+    for key, why in report.refused.items():
+        typer.secho(f"  refused        {key}: {why}", fg=typer.colors.YELLOW)
+        for unit in report.conflicts.get(key, []):
+            typer.echo(f"                   conflict: {unit}")
+    if report.merged:
+        typer.echo("run `tether commit` to pin the merge result(s)")
+    if report.refused:
+        raise typer.Exit(1)
 
 
 # --------------------------------------------------------------------------- #

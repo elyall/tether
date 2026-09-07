@@ -39,7 +39,7 @@ from tether.backends.base import (
     iso_utc,
     register_backend,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, MergeConflict
 from tether.handles import DoltHandle, Handle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
@@ -81,6 +81,16 @@ class DoltClient(Protocol):
 
     def log(self, ref: str, limit: int) -> list[dict[str, Any]]:
         """Rows of ``DOLT_LOG(ref)``: commit_hash, committer, date, message."""
+
+    def merge(
+        self, base: str, source: str, message: str, *, ff_only: bool
+    ) -> dict[str, Any]:
+        """Merge ``source`` into ``base`` (checked out for the call).
+
+        Returns the ``DOLT_MERGE`` row as a dict: ``hash``, ``fast_forward``,
+        ``conflicts``. On conflicts the merge is aborted before returning and
+        ``conflict_tables`` lists the tables involved.
+        """
 
 
 class SqlDoltClient:
@@ -180,6 +190,29 @@ class SqlDoltClient:
             (ref, int(limit)),
         )
 
+    def merge(
+        self, base: str, source: str, message: str, *, ff_only: bool
+    ) -> dict[str, Any]:
+        with self._connect(**self._kwargs) as conn:
+            cur = conn.cursor()
+            cur.execute("CALL DOLT_CHECKOUT(%s)", (base,))
+            if ff_only:
+                cur.execute("CALL DOLT_MERGE('--ff-only', %s)", (source,))
+            else:
+                cur.execute("CALL DOLT_MERGE(%s, '-m', %s)", (source, message))
+            row = cur.fetchone()
+            names = [d[0] for d in cur.description or ()]
+            result: dict[str, Any] = dict(zip(names, row or (), strict=False))
+            conflicts = int(result.get("conflicts") or 0)
+            tables: list[str] = []
+            if conflicts:
+                cur.execute("SELECT `table` FROM dolt_conflicts")
+                tables = [str(r[0]) for r in cur.fetchall()]
+                cur.execute("CALL DOLT_MERGE('--abort')")
+            conn.commit()
+            result["conflict_tables"] = tables
+            return result
+
 
 class DoltBackend(ObjectBackend):
     kind = "dolt"
@@ -191,6 +224,8 @@ class DoltBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
+        | Capability.MERGE
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -388,6 +423,63 @@ class DoltBackend(ObjectBackend):
             for b in self._client(locator).list_branches()
             if b.startswith(WORKING_REF_PREFIX)
         )
+
+    # -- promote / merge ------------------------------------------------- #
+    def _source_ref(self, source: str | Pin | State) -> str:
+        if isinstance(source, Pin):
+            return source.ref
+        if isinstance(source, dict):
+            return str(source["commit"])
+        return source
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        client = self._client(locator)
+        wanted = str(ancestor["commit"])
+        rows = client.log(self._source_ref(descendant), 100_000)
+        return any(str(r.get("commit_hash")) == wanted for r in rows)
+
+    def _merged_state(
+        self, locator: Locator, result: dict[str, Any], src: str
+    ) -> State:
+        base = self._base_branch(locator)
+        if int(result.get("conflicts") or 0):
+            tables = list(result.get("conflict_tables") or [])
+            raise MergeConflict(
+                f"merging {src} into {base} conflicts in {len(tables)} table(s)",
+                conflicts=tables,
+                kind="dolt",
+            )
+        return self.fingerprint(locator, base)
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        client = self._client(locator)
+        base = self._base_branch(locator)
+        src = self._source_ref(source)
+        head = self.fingerprint(locator, base)
+        target = client.resolve(src)
+        if target is None:
+            raise BackendError(f"{src!r} does not resolve", kind="dolt")
+        if target == head["commit"]:
+            return head
+        if not self.ancestor_of(locator, head, src):
+            raise BackendError(
+                f"{base} moved to {head['commit'][:12]}, which is not an ancestor of "
+                f"{target[:12]}; merge instead",
+                kind="dolt",
+            )
+        result = client.merge(
+            base, src, f"tether promote: {src} -> {base}", ff_only=True
+        )
+        return self._merged_state(locator, result, src)
+
+    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        client = self._client(locator)
+        result = client.merge(
+            self._base_branch(locator), source_ref, message, ff_only=False
+        )
+        return self._merged_state(locator, result, source_ref)
 
     def open(
         self,

@@ -352,14 +352,17 @@ class WorkspaceState:
     stale-working-copy detection. ``working_refs`` maps object key -> native
     working ref that exists. ``pending_forks`` maps object key -> the branch
     name ``new`` decided on but has not created yet (lazy forking: it is
-    created on the first writable ``open``). ``last_snapshot`` caches the most
-    recent fan-out fingerprints.
+    created on the first writable ``open``). ``fork_points`` maps object key ->
+    the state its working branch was created from; ``promote`` compares the
+    base branch against it to tell a fast-forward from a divergence.
+    ``last_snapshot`` caches the most recent fan-out fingerprints.
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     base: str | None = None
     working_refs: dict[str, str] = field(default_factory=dict)
     pending_forks: dict[str, str] = field(default_factory=dict)
+    fork_points: dict[str, State] = field(default_factory=dict)
     last_snapshot: dict[str, State] = field(default_factory=dict)
     last_snapshot_at: str | None = None
 
@@ -374,6 +377,10 @@ class WorkspaceState:
             doc["working_refs"] = dict(self.working_refs)
         if self.pending_forks:
             doc["pending_forks"] = dict(self.pending_forks)
+        if self.fork_points:
+            doc["fork_points"] = {
+                k: _drop_nulls(v) for k, v in self.fork_points.items()
+            }
         if self.last_snapshot:
             doc["last_snapshot"] = {
                 k: _drop_nulls(v) for k, v in self.last_snapshot.items()
@@ -388,6 +395,9 @@ class WorkspaceState:
             base=str(data["base"]) if "base" in data else None,
             working_refs=dict(data.get("working_refs") or {}),
             pending_forks=dict(data.get("pending_forks") or {}),
+            fork_points={
+                str(k): dict(v) for k, v in (data.get("fork_points") or {}).items()
+            },
             last_snapshot={
                 str(k): dict(v) for k, v in (data.get("last_snapshot") or {}).items()
             },

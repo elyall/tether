@@ -39,6 +39,25 @@ class BackendError(TetherError):
         super().__init__(f"{prefix}{message}")
 
 
+class MergeConflict(BackendError):
+    """A native merge stopped on conflicts; nothing was written.
+
+    ``conflicts`` names the conflicting units (paths, tables, arrays) the
+    system reported, so the caller can resolve them with the system's tools.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        conflicts: list[str] | None = None,
+        key: str | None = None,
+        kind: str | None = None,
+    ) -> None:
+        super().__init__(message, key=key, kind=kind)
+        self.conflicts = list(conflicts or [])
+
+
 class CapabilityError(BackendError):
     """An operation was requested that the backend does not support.
 

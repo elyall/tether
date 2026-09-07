@@ -39,6 +39,7 @@ class IcebergBackend(ObjectBackend):
         | Capability.RETENTION_BOUND
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -236,6 +237,65 @@ class IcebergBackend(ObjectBackend):
             if name.startswith(WORKING_REF_PREFIX)
             and ref.snapshot_ref_type == SnapshotRefType.BRANCH
         )
+
+    # -- promote --------------------------------------------------------- #
+    PROMOTE_HINT = (
+        "pyiceberg has no branch merge; use your engine's fast_forward / "
+        "cherrypick_snapshot procedure, or re-apply the writes on a fresh fork"
+    )
+
+    def _source_sid(self, table: Any, source: str | Pin | State) -> int:
+        if isinstance(source, Pin):
+            ref = self._refs(table).get(source.ref)
+            if ref is None:
+                raise BackendError(f"pin {source.ref} missing", kind="iceberg")
+            return int(ref.snapshot_id)
+        if isinstance(source, dict):
+            return int(source["snapshot_id"])
+        return self._resolve(table, source)
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        table = self._table(locator)
+        wanted = int(ancestor["snapshot_id"])
+        sid: int | None = self._source_sid(table, descendant)
+        seen: set[int] = set()
+        while sid is not None and sid not in seen:
+            if sid == wanted:
+                return True
+            seen.add(sid)
+            snap = table.snapshot_by_id(sid)
+            sid = (
+                int(snap.parent_snapshot_id)
+                if snap and snap.parent_snapshot_id
+                else None
+            )
+        return False
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        table = self._table(locator)
+        base = self._base_branch(locator)
+        head = self._resolve(table, base)
+        target = self._source_sid(table, source)
+        if target == head:
+            return self.fingerprint(locator, base)
+        if not self.ancestor_of(
+            locator, {"snapshot_id": head}, {"snapshot_id": target}
+        ):
+            raise BackendError(
+                f"{base} moved to snapshot {head}, which is not an ancestor of "
+                f"{target}; {self.PROMOTE_HINT}",
+                kind="iceberg",
+            )
+        with table.manage_snapshots() as ms:
+            if base == "main":
+                ms.set_current_snapshot(snapshot_id=target)
+            else:
+                ms.create_branch(
+                    snapshot_id=target, branch_name=base
+                )  # set-snapshot-ref
+        return self.fingerprint(locator, base)
 
     def open(
         self,

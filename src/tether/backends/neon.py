@@ -300,6 +300,11 @@ class NeonBackend(ObjectBackend):
             if str(br.get("name", "")).startswith(WORKING_REF_PREFIX)
         )
 
+    PROMOTE_HINT = (
+        "Neon cannot promote a child branch into its parent; use `--write track` "
+        "for branches that must receive writes, or copy the data with pg_dump/psql"
+    )
+
     def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> None:
         for ep in self._endpoints_for(project_id, branch_id):
             if ep.get("type") == ep_type:

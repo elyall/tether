@@ -109,6 +109,53 @@ class FakeDoltDb:
     def list_branches(self) -> list[str]:
         return sorted(self.branches)
 
+    def merge(self, base: str, source: str, message: str, *, ff_only: bool) -> dict:
+        head, src = self.branches[base], self._lookup(source)
+        line = lambda c: [r["commit_hash"] for r in self.log(c, 10_000)]  # noqa: E731
+        if src in line(head):
+            return {
+                "hash": head,
+                "fast_forward": 0,
+                "conflicts": 0,
+                "conflict_tables": [],
+            }
+        if head in line(src):
+            self.branches[base] = src
+            return {
+                "hash": src,
+                "fast_forward": 1,
+                "conflicts": 0,
+                "conflict_tables": [],
+            }
+        if ff_only:
+            raise RuntimeError("cannot fast-forward")
+        common = next((c for c in line(head) if c in line(src)), None)
+        anc = self.commits.get(common, {}) if common else {}
+        ours, theirs = self.commits[head], self.commits[src]
+        merged = dict(ours)
+        conflicts = []
+        for table in set(ours) | set(theirs) | set(anc):
+            o, t, a = ours.get(table), theirs.get(table), anc.get(table)
+            if o == t:
+                continue
+            if o == a:
+                if t is None:
+                    merged.pop(table, None)
+                else:
+                    merged[table] = t
+            elif t != a:
+                conflicts.append(table)
+        if conflicts:
+            return {
+                "hash": head,
+                "fast_forward": 0,
+                "conflicts": len(conflicts),
+                "conflict_tables": sorted(conflicts),
+            }
+        cid = self.new_commit(f"{head}+{src}", merged, parent=head, message=message)
+        self.branches[base] = cid
+        return {"hash": cid, "fast_forward": 0, "conflicts": 0, "conflict_tables": []}
+
     def diff_summary(self, from_ref: str, to_ref: str) -> list[dict]:
         ta, tb = (
             self.commits[self._lookup(from_ref)],

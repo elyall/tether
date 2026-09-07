@@ -35,6 +35,7 @@ from tether.errors import (
     CapabilityError,
     ConfigError,
     ImmutableObjectModified,
+    MergeConflict,
     MultiObjectError,
     StalePlanError,
     StaleWorkingCopyError,
@@ -190,6 +191,23 @@ class ImportReport:
 
 
 @dataclass
+class PromoteReport:
+    """Result of `Repo.apply_promote`."""
+
+    fast_forwarded: dict[str, State] = field(default_factory=dict)
+    """Key -> the base branch's new state after a fast-forward."""
+    merged: dict[str, State] = field(default_factory=dict)
+    """Key -> the base branch's new state after a native merge."""
+    skipped: list[str] = field(default_factory=list)
+    """Keys whose base already matched the target, or that had nothing to promote."""
+    refused: dict[str, str] = field(default_factory=dict)
+    """Key -> why tether would not move the base (with the system's own recipe)."""
+    conflicts: dict[str, list[str]] = field(default_factory=dict)
+    """Key -> conflicting units reported by a merge that was rolled back."""
+    plan: Plan | None = None
+
+
+@dataclass
 class DiffEntry:
     """One object's row in `Repo.diff`."""
 
@@ -205,6 +223,15 @@ class DiffEntry:
     """Native content diff (only with `content=True` and a `DIFF` backend)."""
     detail_error: str | None = None
     """Backend failure while computing `detail`, if any."""
+
+
+def _source_object(source: Mapping[str, Any]) -> str | Pin | State:
+    """Rebuild a promote source (`{"ref"} | {"pin"} | {"state"}`) from plan params."""
+    if "ref" in source:
+        return str(source["ref"])
+    if "pin" in source:
+        return Pin.from_dict(dict(source["pin"]))
+    return dict(source["state"])
 
 
 def _short_state(state: State | None) -> str:
@@ -467,6 +494,7 @@ class Repo:
         # its previous incarnation is found by `gc --prune-workspaces`.
         self.workspace.working_refs.pop(key, None)
         self.workspace.pending_forks.pop(key, None)
+        self.workspace.fork_points.pop(key, None)
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
         return manifest
@@ -486,6 +514,7 @@ class Repo:
         del self.objects[key]
         self.workspace.last_snapshot.pop(key, None)
         self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
+        self.workspace.fork_points.pop(key, None)
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
 
@@ -963,6 +992,15 @@ class Repo:
         }
         self.workspace.working_refs = {**leftovers, **working_refs}
         self.workspace.pending_forks = pending
+        # Fork points: what each branch was created from (promote's baseline).
+        fork_points = {
+            k: v for k, v in self.workspace.fork_points.items() if k in leftovers
+        }
+        for key in forks:
+            state = self.objects[key].state
+            if state is not None:
+                fork_points[key] = dict(state)
+        self.workspace.fork_points = fork_points
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
 
@@ -1006,6 +1044,8 @@ class Repo:
         ref = self._fork_from_manifest(m, name)
         self.workspace.working_refs[key] = ref
         self.workspace.pending_forks.pop(key, None)
+        if m.state is not None:
+            self.workspace.fork_points[key] = dict(m.state)
         write_workspace(self.root, self.workspace)
         return ref
 
@@ -1583,6 +1623,286 @@ class Repo:
                     report.deleted_listings.append(a.target)
             return report
         return self.apply_gc(plan)
+
+    # -- promote (fork -> base branch) ----------------------------------- #
+    def plan_promote(
+        self,
+        keys: Sequence[str] | None = None,
+        *,
+        rev: str | None = None,
+        strategy: str = "auto",
+        message: str | None = None,
+    ) -> Plan:
+        """Compute how each object's base branch could be moved to its fork.
+
+        Promotion moves the *system's* base branch (the locator's `branch`) to
+        the state a fork holds; the dataset commit already pins that state, so
+        nothing tether-side needs re-committing after a fast-forward. Per
+        Forkable object, the target is this workspace's working branch head
+        (or, with `rev`, the state pinned at that dataset commit) and the base
+        is compared to the **fork point** recorded when the branch was created
+        (falling back to the backend's ancestry check):
+
+        - base unchanged and `PROMOTE`: `fast-forward`
+        - base moved (or unknown) and `MERGE`: `merge` (native 3-way merge)
+        - otherwise: `refuse`, with the system's own recipe in the detail
+
+        Args:
+            keys: Objects to consider (default: all Forkable ones).
+            rev: Promote the states pinned at this dataset commit instead of the
+                working branches.
+            strategy: `auto` (table above), `ff` (refuse anything that is not a
+                fast-forward), or `merge` (refuse anything that is not a merge).
+            message: Merge commit message for backends that record one.
+
+        Raises:
+            ConfigError: Unknown key or strategy.
+        """
+        if strategy not in ("auto", "ff", "merge"):
+            raise ConfigError(
+                f"unknown promote strategy {strategy!r} (auto, ff, merge)"
+            )
+        objects = self._objects_at(self.vcs.resolve(rev)) if rev else self.objects
+        selected = list(keys) if keys else sorted(objects)
+        for key in selected:
+            if key not in objects:
+                raise ConfigError(f"no such object: {key}")
+        message = message or f"tether promote {rev or self.workspace.workspace_id[:8]}"
+        plan = Plan(
+            command="promote",
+            context={
+                "rev": rev,
+                "strategy": strategy,
+                "message": message,
+                "manifest_hash": manifest_hash(objects),
+                "workspace_id": self.workspace.workspace_id,
+            },
+        )
+        for key in selected:
+            m = objects[key]
+            backend = self.backend_for(m.kind)
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            if Capability.FORK not in eff:
+                plan.notes.append(f"{key}: not forkable; nothing to promote")
+                continue
+            if m.policy.write == "track":
+                plan.notes.append(f"{key}: write=track; already on the base branch")
+                continue
+
+            base_locator = {k: v for k, v in m.locator.items() if k != "at"}
+            base_state = backend.fingerprint(base_locator, None)
+
+            # What to promote, and what the base looked like when it was forked.
+            source: dict[str, Any]
+            fork_point: State | None
+            if rev:
+                if m.state is None:
+                    plan.notes.append(f"{key}: nothing committed at {rev}")
+                    continue
+                target_state = m.state
+                if m.pin is not None:
+                    source = {"pin": m.pin.to_dict()}
+                elif Capability.ADDRESSABLE in eff:
+                    source = {"state": m.state}
+                else:
+                    plan.notes.append(
+                        f"{key}: not recoverable at {rev}; cannot promote"
+                    )
+                    continue
+                fork_point = None
+            else:
+                working_ref = self._working_ref(key)
+                if working_ref is None:
+                    plan.notes.append(
+                        f"{key}: no working branch yet; nothing to promote"
+                    )
+                    continue
+                target_state = backend.fingerprint(m.locator, working_ref)
+                source = {"ref": working_ref}
+                fork_point = self.workspace.fork_points.get(key)
+
+            if target_state == base_state:
+                plan.notes.append(f"{key}: base already at the target")
+                continue
+
+            unchanged: bool | None
+            if fork_point is not None:
+                unchanged = fork_point == base_state
+            else:
+                unchanged = backend.ancestor_of(
+                    m.locator, base_state, _source_object(source)
+                )
+
+            can_ff = Capability.PROMOTE in eff
+            can_merge = Capability.MERGE in eff and "state" not in source
+            params = {
+                "locator": dict(m.locator),
+                "source": source,
+                "base_state": base_state,
+                "target_state": target_state,
+                "fork_point": fork_point,
+            }
+            base_txt = f"{m.locator.get('branch', 'main')}"
+            hint = f"; {backend.PROMOTE_HINT}" if backend.PROMOTE_HINT else ""
+
+            if unchanged is True and strategy != "merge" and can_ff:
+                plan.actions.append(
+                    Action(
+                        "fast-forward",
+                        key,
+                        m.kind,
+                        target=base_txt,
+                        detail=f"{base_txt} {_short_state(base_state)} -> "
+                        f"{_short_state(target_state)} (base unchanged since fork)",
+                        params=params,
+                    )
+                )
+            elif (
+                can_merge
+                and strategy != "ff"
+                and (unchanged is not True or not can_ff or strategy == "merge")
+            ):
+                why = (
+                    "base unchanged since fork"
+                    if unchanged is True
+                    else "base moved since fork"
+                    if unchanged is False
+                    else "no fork point recorded; ancestry unknown"
+                )
+                src_name = source.get("ref") or source.get("pin", {}).get("ref")
+                plan.actions.append(
+                    Action(
+                        "merge",
+                        key,
+                        m.kind,
+                        target=base_txt,
+                        detail=f"merge {src_name} into {base_txt} ({why})",
+                        params=params,
+                    )
+                )
+            else:
+                if unchanged is True:
+                    reason = (
+                        f"strategy={strategy} but the backend cannot merge"
+                        if strategy == "merge"
+                        else f"the {m.kind} backend cannot move a branch"
+                    )
+                elif unchanged is False:
+                    reason = (
+                        f"{base_txt} moved since the fork "
+                        f"({_short_state(fork_point)} -> {_short_state(base_state)})"
+                        + (
+                            f" and strategy={strategy}"
+                            if strategy == "ff" and Capability.MERGE in eff
+                            else " and the backend cannot merge"
+                        )
+                    )
+                else:
+                    reason = (
+                        "cannot tell whether the base moved (no fork point recorded)"
+                    )
+                plan.actions.append(
+                    Action(
+                        "refuse",
+                        key,
+                        m.kind,
+                        target=base_txt,
+                        detail=f"{reason}{hint}",
+                        params=params,
+                    )
+                )
+        return plan
+
+    def apply_promote(self, plan: Plan, *, verify: bool = True) -> PromoteReport:
+        """Execute a plan from `plan_promote`.
+
+        Fast-forwards and merges run concurrently. A merge that conflicts is
+        rolled back by the backend and reported under `conflicts`. After a
+        merge the working branch is reset to the merge result and the fork
+        point updated, so the next `commit` pins what the base now holds.
+
+        Raises:
+            StalePlanError: A base branch moved since the plan was made.
+            MultiObjectError: A backend failed for reasons other than conflicts.
+        """
+        if plan.command != "promote":
+            raise ConfigError(f"expected a promote plan, got {plan.command!r}")
+        report = PromoteReport(plan=plan)
+        writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
+        for a in plan.actions:
+            if a.op == "refuse":
+                report.refused[a.key] = a.detail
+        for note in plan.notes:
+            key, _, why = note.partition(": ")
+            if "already at the target" in why or "nothing to promote" in why:
+                report.skipped.append(key)
+        if verify:
+            for a in writes:
+                m = self.objects.get(a.key)
+                locator = dict(a.params["locator"])
+                backend = self.backend_for(a.kind)
+                base_locator = {k: v for k, v in locator.items() if k != "at"}
+                current = backend.fingerprint(base_locator, None)
+                if current != a.params["base_state"] and m is not None:
+                    raise StalePlanError(
+                        f"{a.key!r}: base branch moved since the plan was made "
+                        f"({_short_state(a.params['base_state'])} -> "
+                        f"{_short_state(current)}); re-run the plan"
+                    )
+
+        message = str(plan.context.get("message") or "tether promote")
+        by_key = {a.key: a for a in writes}
+
+        def run_one(key: str) -> tuple[str, State]:
+            a = by_key[key]
+            backend = self.backend_for(a.kind)
+            locator = dict(a.params["locator"])
+            source = _source_object(a.params["source"])
+            if a.op == "fast-forward":
+                return "ff", backend.promote(locator, source)
+            ref = source.ref if isinstance(source, Pin) else str(source)
+            return "merge", backend.merge(locator, ref, message)
+
+        results, errors = self._fanout_collect(run_one, list(by_key))
+        for key, exc in list(errors.items()):
+            if isinstance(exc, MergeConflict):
+                report.conflicts[key] = list(exc.conflicts)
+                report.refused[key] = str(exc)
+                errors.pop(key)
+
+        touched = False
+        for key, (how, new_state) in results.items():
+            (report.fast_forwarded if how == "ff" else report.merged)[key] = new_state
+            m = self.objects.get(key)
+            working_ref = self.workspace.working_refs.get(key)
+            if how == "merge" and m is not None and working_ref is not None:
+                # The fork now lags the base; reset it onto the merge result so
+                # the next commit pins what the base holds.
+                self.backend_for(m.kind).fork(m.locator, new_state, working_ref)
+            if key in self.workspace.working_refs or key in self.workspace.fork_points:
+                self.workspace.fork_points[key] = dict(new_state)
+                self.workspace.last_snapshot[key] = dict(new_state)
+                touched = True
+        if touched:
+            write_workspace(self.root, self.workspace)
+        if errors:
+            raise MultiObjectError("promote failed for some objects", errors)
+        return report
+
+    def promote(
+        self,
+        keys: Sequence[str] | None = None,
+        *,
+        rev: str | None = None,
+        strategy: str = "auto",
+        message: str | None = None,
+    ) -> PromoteReport:
+        """Move base branches to this workspace's forks.
+
+        Equivalent to `apply_promote(plan_promote(...))`.
+        """
+        plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
+        return self.apply_promote(plan, verify=False)
 
     # -- export (manifests -> tables) ------------------------------------ #
     def export(

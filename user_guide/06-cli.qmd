@@ -17,6 +17,7 @@ tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
 tether new [REV] [--keep] [--eager | --lazy] [--dry-run | --plan FILE | --from-plan FILE]
 tether open KEY [-r REV] [--read-only | --writable]
+tether promote [KEY]... [-r REV] [--strategy auto|ff|merge] [-m MESSAGE] [--dry-run | --plan FILE | --from-plan FILE]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
@@ -140,10 +141,11 @@ plan: commit (2 write(s))
                       db/metrics: unchanged
 ```
 
-Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new); `unpin`,
+Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new);
+`fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
 `add`, `update`, `remove` (import); `upsert` (publish); `vcs-commit`. `track`,
-`defer-fork`, and `keep-branch` are informational -- they write nothing.
+`defer-fork`, `refuse`, and `keep-branch` are informational -- they write nothing.
 
 ## `gc` scope
 
@@ -162,6 +164,17 @@ equals the base branch's head; a branch with unpinned writes, a pin-less
 (Neon, `BRANCH_IS_STORAGE`) is `keep-branch`. `--force-prune` turns every
 `keep-branch` into a `delete-branch` marked `FORCED`; the data on those
 branches is lost.
+
+## What `promote` does
+
+Per Forkable object, compares the base branch to the fork point recorded when
+the working branch was created (or, with `--rev`, to the target's ancestry):
+unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` -> `merge`;
+otherwise `refuse` with the backend's recipe. `--strategy ff` turns merges into
+refusals, `--strategy merge` turns fast-forwards into refusals. After a merge
+the working branch is reset onto the merge result so the next `commit` pins
+it. Exit status is `1` when anything was refused (conflicts included) so CI
+notices. See [Branching and writing](04-branching-and-writing.qmd#bringing-it-back-to-main-tether-promote).
 
 ## What `open` prints
 
@@ -220,7 +233,8 @@ per-table counts.
 | `status` | `{"manifest_hash", "stale", "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
 | `snapshot` | `{key: state}` |
 | `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan (below) |
-| `new` | `{"working_refs": {key: ref}, "pending_forks": {key: ref}}`; with `--dry-run`: the plan |
+| `new` | `{"working_refs": {key: ref}, "pending_forks": {key: ref}, "fork_points": {key: state}}`; with `--dry-run`: the plan |
+| `promote` | `{"fast_forwarded": {key: state}, "merged": {key: state}, "skipped": [keys], "refused": {key: reason}, "conflicts": {key: [units]}}`; with `--dry-run`: the plan |
 | `open` | `{"key", "read_only", "address", "type"}` |
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |

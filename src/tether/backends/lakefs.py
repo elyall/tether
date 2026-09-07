@@ -33,7 +33,7 @@ from tether.backends.base import (
     iso_utc,
     register_backend,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, MergeConflict
 from tether.handles import Handle, LakeFSHandle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
@@ -51,6 +51,8 @@ class LakeFSBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
+        | Capability.MERGE
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -258,6 +260,64 @@ class LakeFSBackend(ObjectBackend):
             for b in repo.branches(prefix=WORKING_REF_PREFIX)
             if str(b.id).startswith(WORKING_REF_PREFIX)
         )
+
+    # -- promote / merge ------------------------------------------------- #
+    def _source_ref(self, repo: Any, source: str | Pin | State) -> str:
+        if isinstance(source, Pin):
+            return source.ref
+        if isinstance(source, dict):
+            return str(source["commit_id"])
+        return source
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        repo = self._repo(locator)
+        wanted = str(ancestor["commit_id"])
+        try:
+            for commit in repo.ref(self._source_ref(repo, descendant)).log():
+                if str(commit.id) == wanted:
+                    return True
+        except self._errors() as exc:
+            raise BackendError(f"cannot read lakefs log: {exc}", kind="lakefs") from exc
+        return False
+
+    def _merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        repo = self._repo(locator)
+        base = self._base_branch(locator)
+        try:
+            repo.ref(source_ref).merge_into(base, message=message)
+        except self._errors() as exc:
+            name = type(exc).__name__
+            if "Conflict" in name:
+                raise MergeConflict(
+                    f"lakefs refused to merge {source_ref} into {base}: {exc}",
+                    kind="lakefs",
+                ) from exc
+            raise BackendError(
+                f"cannot merge {source_ref} into {base}: {exc}", kind="lakefs"
+            ) from exc
+        return self.fingerprint(locator, base)
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        # lakeFS merges are the promotion primitive (fast-forward when possible).
+        repo = self._repo(locator)
+        base = self._base_branch(locator)
+        head = self.fingerprint(locator, base)
+        ref = self._source_ref(repo, source)
+        target = str(repo.ref(ref).get_commit().id)
+        if target == head["commit_id"]:
+            return head
+        if not self.ancestor_of(locator, head, ref):
+            raise BackendError(
+                f"{base} moved to {head['commit_id'][:12]}, which is not an ancestor "
+                f"of {target[:12]}; merge instead",
+                kind="lakefs",
+            )
+        return self._merge(locator, ref, f"tether promote: {ref} -> {base}")
+
+    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        return self._merge(locator, source_ref, message)
 
     def _uri(self, locator: Locator, ref: str) -> str:
         prefix = self._prefix(locator)

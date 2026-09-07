@@ -53,6 +53,10 @@ Method by method:
 | `fork(locator, source, name)` | Create writable branch `name` and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). `source` is a `Pin` (branch from the native ref) or a recorded `State` (branch straight from the snapshot / version / commit -- used by `pin = "record"` objects; raise `BackendError` if the state is no longer reachable). Reset semantics if it already exists. |
 | `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. Ignore "already gone". |
 | `list_working_refs(locator)` | Native branches named `tether.ws.*` (`WORKING_REF_PREFIX`) in this system. `gc --prune-workspaces` fingerprints each stray one and deletes it only if its head is pinned or equals the base head (`--force-prune` overrides). Default: none. |
+| `promote(locator, source)` | `PROMOTE`: fast-forward the locator's base branch to `source` (a working ref, `Pin`, or `State`). Refuse with `BackendError` unless the base head is an ancestor of the source; no-op when already there. Return the base's new state. |
+| `merge(locator, source_ref, message)` | `MERGE`: three-way merge the working branch into the base; raise `MergeConflict(conflicts=[...])` and leave the base untouched when the system reports conflicts. Return the base's new state. |
+| `ancestor_of(locator, ancestor, descendant)` | Whether `ancestor` (a state) is in `descendant`'s history; `None` when unknown. `promote` falls back to it when no fork point was recorded. |
+| `PROMOTE_HINT` (class attribute) | The sentence `promote` shows when it refuses: what the user should do with the system's own tools. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
 
 Optional members:
@@ -93,6 +97,8 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `DIFF` | call `diff` for `diff --content`, `listing` at commit |
 | `HISTORY` | call `history` for `tether log` and `add --pick` |
 | `BRANCH_IS_STORAGE` | never delete a stray working branch in `gc --prune-workspaces` without `--force-prune` (deleting reclaims the data, as in Neon) |
+| `PROMOTE` | call `promote` in `tether promote` when the base is unchanged since the fork point |
+| `MERGE` | call `merge` in `tether promote` when the base moved (or `--strategy merge`) |
 
 ## Content diffs and listings
 

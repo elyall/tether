@@ -81,6 +81,40 @@ class FakeRef:
             n += 1
             cursor = commit.parents[0] if commit.parents else None
 
+    def merge_into(self, destination_branch: str, message: str = "", **_) -> str:
+        """Overlay this ref's tree onto the destination (a conflict when both
+        changed the same path differently since their common ancestor)."""
+        s = self._s
+        src = self.get_commit()
+        dest_head = s.branches[destination_branch]
+        src_line = [c.id for c in self.log()]
+        dest_line = [c.id for c in FakeRef(s, destination_branch).log()]
+        if src.id in dest_line:
+            return dest_head
+        common = next((c for c in dest_line if c in src_line), None)
+        anc = s.commits.get(common, {}) if common else {}
+        ours, theirs = s.commits[dest_head], s.commits[src.id]
+        merged = dict(ours)
+        for path in set(ours) | set(theirs) | set(anc):
+            if path.startswith("__"):
+                continue  # bookkeeping keys (commit message), not data
+            o, t, a = ours.get(path), theirs.get(path), anc.get(path)
+            if o == t:
+                continue
+            if o == a:
+                if t is None:
+                    merged.pop(path, None)
+                else:
+                    merged[path] = t
+            elif t != a:
+                raise ConflictException(status=409, reason=f"conflict on {path}")
+        cid = s.new_commit(
+            merged, parent=dest_head, message=message or f"merge {self.id}"
+        )
+        s.meta[cid].parents.append(src.id)
+        s.branches[destination_branch] = cid
+        return cid
+
     def diff(
         self,
         other_ref: str,

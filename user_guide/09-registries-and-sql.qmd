@@ -31,7 +31,7 @@ a Postgres schema have the same columns. JSON columns are `TEXT` in SQLite and
 | `objects` | `commit_id, key` | one manifest at one commit: `kind`, `uri`, `locator_json`, `identity_json`, `identity_hash`, `policy_*`, `state_json`, `state_hash`, `pin_id`, `pin_ref`, `recoverable`, `captured_at` |
 | `object_states` | `kind, identity_hash, state_hash` | one distinct (system, state): the *versions* a registry keys on, with `first_commit_id` |
 | `listings`, `listing_entries` | `listing_name` (`, path`) | per-file listings for directory / prefix objects (`--listings`) |
-| `workspace` | `workspace_id, key` | this checkout's working refs and last snapshot (`--workspace`) |
+| `workspace` | `workspace_id, key` | this checkout's working refs, fork points, and last snapshot (`--workspace`) |
 | `tether_meta` | `key` | `schema_version`, `exported_at`, `head`, `vcs`, `tether_version` |
 
 Two views come along: `objects_head` (the objects at the exported head) and

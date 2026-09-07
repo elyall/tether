@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `tether promote [KEY]... [--rev REV] [--strategy auto|ff|merge] [-m MSG]`
+  (`Repo.plan_promote` / `apply_promote` / `promote`, `PromoteReport`): move
+  each system's base branch to what this workspace's fork holds. The base is
+  compared to the **fork point** recorded when the branch was created
+  (`WorkspaceState.fork_points`, also in the export `workspace` table as
+  `fork_point_json`; export schema_version 2): unchanged -> fast-forward
+  (`Capability.PROMOTE`: icechunk `reset_branch`, iceberg `set-snapshot-ref`,
+  git `merge --ff-only`, lakeFS / Dolt merges), moved -> native three-way merge
+  (`Capability.MERGE`: git, lakeFS `merge_into`, `DOLT_MERGE`; conflicts are
+  reported as `MergeConflict` and nothing is written), otherwise `refuse` with
+  the backend's `PROMOTE_HINT` (Icechunk/Iceberg have no merge; Lance cannot
+  move a branch head; Neon cannot promote a child branch). After a merge the
+  working branch is reset onto the merge result so the next `commit` pins it.
+  `--dry-run` / `--plan` / `--from-plan` as for the other planned commands;
+  exit status 1 when anything was refused. New protocol members `promote`,
+  `merge`, `ancestor_of`, `PROMOTE_HINT`.
+
 ### Changed
 
 - Working branches are forked lazily by default. `tether new` decides each

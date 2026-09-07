@@ -24,7 +24,7 @@ from tether.backends.base import (
     base_at,
     register_backend,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, MergeConflict
 from tether.handles import GitHandle, Handle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
@@ -40,6 +40,8 @@ class GitBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.PROMOTE
+        | Capability.MERGE
     )
 
     def __init__(self, config: dict | None = None) -> None:
@@ -214,6 +216,126 @@ class GitBackend(ObjectBackend):
             f"refs/heads/{WORKING_REF_PREFIX}*",
         )
         return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+    # -- promote / merge ------------------------------------------------- #
+    def _checked_out(self, locator: Locator) -> str | None:
+        out = self._run(locator, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+        return out or None
+
+    def _base_branch(self, locator: Locator) -> str:
+        """The branch `promote`/`merge` move: `ref`, or the checked-out branch."""
+        ref = str(locator.get("ref", "HEAD"))
+        if ref == "HEAD":
+            branch = self._checked_out(locator)
+            if branch is None:
+                raise BackendError(
+                    "HEAD is detached; set the locator's `ref` to a branch to promote",
+                    kind="git",
+                )
+            return branch
+        if not self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{ref}",
+            check=False,
+        ):
+            raise BackendError(f"{ref!r} is not a local branch", kind="git")
+        return ref
+
+    @staticmethod
+    def _source_ref(source: str | Pin | State) -> str:
+        if isinstance(source, Pin):
+            return source.ref
+        if isinstance(source, dict):
+            return str(source["sha"])
+        return source
+
+    def ancestor_of(
+        self, locator: Locator, ancestor: State, descendant: str | Pin | State
+    ) -> bool | None:
+        proc = subprocess.run(
+            [
+                self._git,
+                "-C",
+                str(self._path(locator)),
+                "merge-base",
+                "--is-ancestor",
+                str(ancestor["sha"]),
+                self._source_ref(descendant),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode in (0, 1):
+            return proc.returncode == 0
+        raise BackendError(f"git merge-base failed: {proc.stderr.strip()}", kind="git")
+
+    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+        base = self._base_branch(locator)
+        target = self._run(
+            locator, "rev-parse", "--verify", f"{self._source_ref(source)}^{{commit}}"
+        )
+        head = self._run(locator, "rev-parse", "--verify", f"refs/heads/{base}")
+        if target == head:
+            return self.fingerprint(locator, base)
+        if not self.ancestor_of(locator, {"sha": head}, target):
+            raise BackendError(
+                f"{base} moved to {head[:12]}, which is not an ancestor of "
+                f"{target[:12]}; merge instead",
+                kind="git",
+            )
+        if self._checked_out(locator) == base:
+            if self._run(locator, "status", "--porcelain"):
+                raise BackendError(
+                    f"{base} is checked out with uncommitted changes; commit or stash "
+                    "them first",
+                    kind="git",
+                )
+            self._run(locator, "merge", "--ff-only", target)
+        else:
+            self._run(locator, "update-ref", f"refs/heads/{base}", target, head)
+        return self.fingerprint(locator, base)
+
+    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+        base = self._base_branch(locator)
+        if self._checked_out(locator) != base:
+            raise BackendError(
+                f"git merges into the checked-out branch; check out {base} first",
+                kind="git",
+            )
+        if self._run(locator, "status", "--porcelain"):
+            raise BackendError(
+                f"{base} has uncommitted changes; commit or stash them first",
+                kind="git",
+            )
+        proc = subprocess.run(
+            [
+                self._git,
+                "-C",
+                str(self._path(locator)),
+                "merge",
+                "--no-ff",
+                "-m",
+                message,
+                source_ref,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            conflicts = self._run(
+                locator, "diff", "--name-only", "--diff-filter=U", check=False
+            ).splitlines()
+            self._run(locator, "merge", "--abort", check=False)
+            raise MergeConflict(
+                f"merging {source_ref} into {base} conflicts in "
+                f"{len(conflicts)} file(s)",
+                conflicts=[c.strip() for c in conflicts if c.strip()],
+                kind="git",
+            )
+        return self.fingerprint(locator, base)
 
     def open(
         self,

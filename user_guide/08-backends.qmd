@@ -36,16 +36,23 @@ Common conventions:
 | Kind | Extra | Tier | Flags |
 | --- | --- | --- | --- |
 | `file` | -- (local) / `objectstore` | Observed; Addressable for a versioned object | `CHEAP_FINGERPRINT`, `DIFF` |
-| `icechunk` | `icechunk` | Forkable | `ATOMIC_REF`, `DIFF` |
+| `icechunk` | `icechunk` | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE` |
 | `neon` | `neon` | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
-| `git` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` |
-| `iceberg` | `iceberg` | Forkable | `RETENTION_BOUND`, `DIFF` |
+| `git` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
+| `iceberg` | `iceberg` | Forkable | `RETENTION_BOUND`, `DIFF`, `PROMOTE` |
 | `delta` | `delta` | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
 | `lance` | `lance` | Forkable | `ATOMIC_REF`, `DIFF` |
-| `lakefs` | `lakefs` | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` |
+| `lakefs` | `lakefs` | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
 | `ducklake` | `ducklake` | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
-| `dolt` | `dolt` | Forkable | `ATOMIC_REF`, `DIFF` |
-| `memory` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF` (tests only) |
+| `dolt` | `dolt` | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
+| `memory` | -- | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` (tests only) |
+
+`PROMOTE` means `tether promote` can fast-forward the base branch to a fork
+(Icechunk `reset_branch`, Iceberg `set-snapshot-ref`, git `merge --ff-only`,
+lakeFS / Dolt merges); `MERGE` means it can three-way merge a diverged fork
+(git `merge`, lakeFS `merge_into`, `DOLT_MERGE`). Lance cannot move a branch
+head yet and Neon cannot promote a child branch, so both are refused with
+instructions.
 
 `--pin record` removes `PIN` from any of these: the state is recorded without a
 native ref and `new` forks from it directly (Icechunk snapshot id, Lance
