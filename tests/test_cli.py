@@ -10,6 +10,7 @@ typer_testing = pytest.importorskip("typer.testing")
 
 from tether.backends.memory import default_store  # noqa: E402
 from tether.cli import app  # noqa: E402
+from tether.repo import Repo  # noqa: E402
 
 runner = typer_testing.CliRunner()
 
@@ -262,3 +263,102 @@ def test_cli_plans_dry_run_and_from_plan(
     assert r.exit_code == 0, r.output
     assert "tether.ws.0badf00d.db" not in branches
     assert wref in branches
+
+
+def test_cli_export_publish_import(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csv
+    import sqlite3
+
+    monkeypatch.chdir(vcs_root)
+    monkeypatch.delenv("TETHER_PUBLISH_DSN", raising=False)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"v": 1})
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+
+    # export: sqlite (default) and a jsonl directory.
+    r = runner.invoke(app, ["export", "out.sqlite", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["format"] == "sqlite" and payload["rows"]["objects"] >= 1
+    con = sqlite3.connect(vcs_root / "out.sqlite")
+    assert con.execute("SELECT COUNT(*) FROM objects_head").fetchone()[0] == 1
+    con.close()
+    r = runner.invoke(app, ["export", "dump", "--format", "jsonl"])
+    assert r.exit_code == 0, r.output
+    assert (vcs_root / "dump" / "objects.jsonl").exists()
+    assert runner.invoke(app, ["export", "x", "--format", "xlsx"]).exit_code == 1
+
+    # publish: refuses without a DSN (never read from tether.toml).
+    r = runner.invoke(app, ["publish", "--dry-run"])
+    assert r.exit_code == 1 and "DSN is required" in r.output
+
+    # import: from a CSV registry, dry run first, then apply, then sync.
+    reg = vcs_root / "registry.csv"
+    with reg.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["key", "kind", "locator_json", "policy_pin"])
+        w.writeheader()
+        w.writerow(
+            {
+                "key": "db",
+                "kind": "memory",
+                "locator_json": json.dumps({"system": system}),
+                "policy_pin": "native",
+            }
+        )
+        other = f"sys-{uuid.uuid4().hex[:8]}"
+        store.system(other)
+        w.writerow(
+            {
+                "key": "scratch/other",
+                "kind": "memory",
+                "locator_json": json.dumps({"system": other}),
+                "policy_pin": "record",
+            }
+        )
+    r = runner.invoke(app, ["import", str(reg), "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert (
+        "add" in r.output
+        and "scratch/other" in r.output
+        and "db: unchanged" in r.output
+    )
+    assert "scratch/other" not in json.dumps(list(Repo.find(".").objects))
+    r = runner.invoke(app, ["import", str(reg), "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output) == {
+        "added": ["scratch/other"],
+        "updated": [],
+        "removed": [],
+        "unchanged": ["db"],
+    }
+    assert Repo.find(".").objects["scratch/other"].policy.pin == "record"
+
+    # A SQL source with the query saved in tether.toml; --sync removes the rest.
+    db = vcs_root / "reg.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE data_object (name TEXT, sys TEXT)")
+    con.execute("INSERT INTO data_object VALUES ('db', ?)", (system,))
+    con.commit()
+    con.close()
+    cfg = vcs_root / "tether.toml"
+    cfg.write_text(
+        cfg.read_text() + "\n[import]\nquery = \"SELECT name AS key, 'memory' AS kind, "
+        "json_object('system', sys) AS locator_json FROM data_object\"\n"
+    )
+    r = runner.invoke(app, ["import", str(db), "--sync", "--plan", "imp.json"])
+    assert r.exit_code == 0, r.output
+    assert "remove" in r.output and "scratch/other" in r.output
+    assert "scratch/other" in Repo.find(".").objects  # plan only
+    r = runner.invoke(app, ["import", str(db), "--from-plan", "imp.json", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["removed"] == ["scratch/other"]
+    assert "scratch/other" not in Repo.find(".").objects
