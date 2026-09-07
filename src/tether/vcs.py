@@ -18,6 +18,7 @@ plumbing works there), which is ~50x cheaper per read.
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -27,10 +28,50 @@ from typing import Protocol, runtime_checkable
 
 from tether.errors import VcsError
 
-__all__ = ["GitAdapter", "GitObjectReader", "JjAdapter", "VcsAdapter", "detect_vcs"]
+__all__ = [
+    "CommitInfo",
+    "GitAdapter",
+    "GitObjectReader",
+    "JjAdapter",
+    "RefInfo",
+    "VcsAdapter",
+    "detect_vcs",
+]
 
 _TREE_MODE = "40000"
 _BLOB_MODES = frozenset({"100644", "100755"})
+_US = "\x1f"  # field separator for batched `git log` output
+_RS = "\x1e"  # record separator
+
+
+@dataclass(frozen=True)
+class CommitInfo:
+    """Metadata of one VCS commit, as exported to registries."""
+
+    commit_id: str
+    """Full commit hash."""
+    parents: tuple[str, ...]
+    """Parent commit ids, first parent first."""
+    author_name: str
+    author_email: str
+    authored_at: str
+    """ISO-8601 author timestamp."""
+    committed_at: str
+    """ISO-8601 committer timestamp."""
+    message: str
+    """Full commit message."""
+    change_id: str | None = None
+    """jj change id (``None`` in plain git repositories)."""
+
+
+@dataclass(frozen=True)
+class RefInfo:
+    """A named pointer into history: a jj bookmark, git branch, tag, or the head."""
+
+    name: str
+    kind: str
+    """``bookmark`` (jj), ``branch`` (git), ``tag``, or ``head`` (the working copy)."""
+    commit_id: str
 
 
 @dataclass
@@ -204,6 +245,76 @@ def _prefixed(reldir: str, files: dict[str, str]) -> dict[str, str]:
     return {f"{reldir}/{path}": text for path, text in files.items()}
 
 
+def _git_commit_info(
+    git_exe: str, cwd: Path, git_dir: Path | None, revs: list[str]
+) -> list[CommitInfo]:
+    """Metadata for many commits through one ``git log --stdin`` call.
+
+    Commit ids are fed on stdin so the batch is not bounded by the argument
+    list; ``--no-walk`` keeps the output to exactly the requested commits.
+    """
+    # jj's virtual root commit (all zeros) has no git object and would abort the batch.
+    revs = [r for r in revs if r.strip("0")]
+    if not revs:
+        return []
+    argv = [git_exe]
+    if git_dir is not None:
+        argv += ["--git-dir", str(git_dir)]
+    argv += [
+        "log",
+        "--no-walk=unsorted",
+        "--stdin",
+        f"--format=%H{_US}%P{_US}%an{_US}%ae{_US}%aI{_US}%cI{_US}%B{_RS}",
+    ]
+    out = _run(argv, cwd=cwd, input_text="\n".join(revs) + "\n")
+    infos: list[CommitInfo] = []
+    for record in out.stdout.split(_RS):
+        if not record.strip():
+            continue
+        fields = record.lstrip("\n").split(_US, 6)
+        if len(fields) != 7:
+            continue
+        sha, parents, an, ae, ai, ci, body = fields
+        infos.append(
+            CommitInfo(
+                commit_id=sha,
+                parents=tuple(p for p in parents.split() if p),
+                author_name=an,
+                author_email=ae,
+                authored_at=ai,
+                committed_at=ci,
+                message=body.rstrip("\n"),
+            )
+        )
+    return infos
+
+
+def _git_refs(git_exe: str, cwd: Path, git_dir: Path | None) -> list[RefInfo]:
+    """Local branches and tags via one ``git for-each-ref`` (tags peeled)."""
+    argv = [git_exe]
+    if git_dir is not None:
+        argv += ["--git-dir", str(git_dir)]
+    argv += [
+        "for-each-ref",
+        # for-each-ref spells control characters as %xx (two hex digits).
+        "--format=%(refname)%1f%(objectname)%1f%(*objectname)",
+        "refs/heads",
+        "refs/tags",
+    ]
+    out = _run(argv, cwd=cwd, check=False)
+    refs: list[RefInfo] = []
+    for line in out.stdout.splitlines():
+        parts = line.split(_US)
+        if len(parts) != 3:
+            continue
+        refname, sha, peeled = parts
+        if refname.startswith("refs/heads/"):
+            refs.append(RefInfo(refname[len("refs/heads/") :], "branch", sha))
+        elif refname.startswith("refs/tags/"):
+            refs.append(RefInfo(refname[len("refs/tags/") :], "tag", peeled or sha))
+    return refs
+
+
 @runtime_checkable
 class VcsAdapter(Protocol):
     """The VCS surface tether relies on. Paths are relative to :attr:`root`."""
@@ -235,6 +346,12 @@ class VcsAdapter(Protocol):
         Implementations stream through one object-reader process rather than
         spawning per commit; callers should consume lazily.
         """
+
+    def commit_info(self, revs: list[str]) -> list[CommitInfo]:
+        """Author, timestamps, message, and parents for many commits in one call."""
+
+    def refs(self) -> list[RefInfo]:
+        """Named pointers (bookmarks / branches, tags) plus the ``head`` entry."""
 
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
@@ -372,6 +489,91 @@ class JjAdapter:
                 # jj's virtual root commit has no git object; it reads as missing.
                 yield rev, _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
 
+    def _change_ids(self) -> dict[str, str]:
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            "all()",
+            "-T",
+            'commit_id ++ " " ++ change_id ++ "\\n"',
+        )
+        pairs = (line.split() for line in out.stdout.splitlines() if line.strip())
+        return {commit: change for commit, change in pairs}
+
+    def commit_info(self, revs: list[str]) -> list[CommitInfo]:
+        store = self._git_store()
+        change_ids = self._change_ids()
+        if store is not None:
+            assert self._git_exe is not None
+            cwd, git_dir = store
+            return [
+                dataclasses.replace(info, change_id=change_ids.get(info.commit_id))
+                for info in _git_commit_info(self._git_exe, cwd, git_dir, revs)
+            ]
+        # No git plumbing: one templated `jj log` for the requested revisions.
+        template = (
+            'commit_id ++ "\\x1f" ++ parents.map(|p| p.commit_id()).join(" ")'
+            ' ++ "\\x1f" ++ author.name() ++ "\\x1f" ++ author.email() ++ "\\x1f"'
+            ' ++ author.timestamp().format("%+") ++ "\\x1f"'
+            ' ++ committer.timestamp().format("%+") ++ "\\x1f"'
+            ' ++ description ++ "\\x1e"'
+        )
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            " | ".join(revs),
+            "-T",
+            template,
+        )
+        infos = []
+        for record in out.stdout.split(_RS):
+            fields = record.lstrip("\n").split(_US, 6)
+            if len(fields) != 7:
+                continue
+            sha, parents, an, ae, ai, ci, body = fields
+            infos.append(
+                CommitInfo(
+                    commit_id=sha,
+                    parents=tuple(parents.split()),
+                    author_name=an,
+                    author_email=ae,
+                    authored_at=ai,
+                    committed_at=ci,
+                    message=body.rstrip("\n"),
+                    change_id=change_ids.get(sha),
+                )
+            )
+        return infos
+
+    def refs(self) -> list[RefInfo]:
+        refs: list[RefInfo] = []
+        out = self._jj(
+            "bookmark",
+            "list",
+            "--ignore-working-copy",
+            "-T",
+            'if(normal_target, if(remote, "", '
+            'name ++ " " ++ normal_target.commit_id() ++ "\\n"))',
+            check=False,
+        )
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                refs.append(RefInfo(parts[0], "bookmark", parts[1]))
+        store = self._git_store()
+        if store is not None:
+            assert self._git_exe is not None
+            cwd, git_dir = store
+            refs.extend(
+                r for r in _git_refs(self._git_exe, cwd, git_dir) if r.kind == "tag"
+            )
+        refs.append(RefInfo("@", "head", self.current_rev()))
+        return refs
+
     def commit(self, relpaths: list[str], message: str) -> str:
         # jj auto-snapshots the working copy; scope the commit to our paths so
         # unrelated working-copy edits stay put. `jj commit` finalizes the
@@ -435,6 +637,16 @@ class GitAdapter:
         with GitObjectReader(self._exe, self.root) as reader:
             for rev in revs:
                 yield rev, _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
+
+    def commit_info(self, revs: list[str]) -> list[CommitInfo]:
+        return _git_commit_info(self._exe, self.root, None, revs)
+
+    def refs(self) -> list[RefInfo]:
+        refs = _git_refs(self._exe, self.root, None)
+        head = self._git("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+        if head.returncode == 0 and head.stdout.strip():
+            refs.append(RefInfo("HEAD", "head", head.stdout.strip()))
+        return refs
 
     def commit(self, relpaths: list[str], message: str) -> str:
         self._git("add", "--", *relpaths)

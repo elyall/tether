@@ -39,6 +39,37 @@ def test_adapter_roundtrip(vcs_root: Path) -> None:
     assert ".tether/objects/b.toml" not in vcs.list_files_at(c1, ".tether/objects")
 
 
+def test_commit_info_and_refs(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "tether.toml", "v=1\n")
+    c1 = vcs.commit(["tether.toml"], "first\n\nbody line")
+    _write(vcs_root, "tether.toml", "v=2\n")
+    c2 = vcs.commit(["tether.toml"], "second")
+
+    infos = {i.commit_id: i for i in vcs.commit_info(vcs.history_revs())}
+    assert {c1, c2} <= set(infos)
+    assert infos[c2].parents == (c1,)
+    assert infos[c1].message == "first\n\nbody line"
+    assert infos[c2].message == "second"
+    assert infos[c2].author_email and infos[c2].author_name
+    assert infos[c2].authored_at[:4].isdigit() and "T" in infos[c2].committed_at
+    if vcs.kind == "jj":
+        assert len(infos[c2].change_id or "") == 32
+    else:
+        assert infos[c2].change_id is None
+    # A subset request returns exactly that subset, in one call.
+    assert [i.commit_id for i in vcs.commit_info([c1])] == [c1]
+    assert vcs.commit_info([]) == []
+
+    refs = vcs.refs()
+    kinds = {r.kind for r in refs}
+    assert "head" in kinds
+    head = next(r for r in refs if r.kind == "head")
+    assert head.commit_id == vcs.current_rev()
+    if vcs.kind == "git":
+        assert any(r.kind == "branch" and r.commit_id == c2 for r in refs)
+
+
 def test_batched_reads_match_per_file_reads(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
