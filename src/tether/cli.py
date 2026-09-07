@@ -486,6 +486,12 @@ def new(
     keep: bool = typer.Option(
         False, "--keep", help="Keep current working refs; only refresh the baseline."
     ),
+    eager: bool | None = typer.Option(
+        None,
+        "--eager/--lazy",
+        help="Create every working branch now (--eager) or on the first writable "
+        "open (--lazy). Default: [new] fork in tether.toml (lazy).",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show which branches would be forked; write nothing."
     ),
@@ -499,13 +505,15 @@ def new(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Fork fresh writable branches off the pinned state at REV.
+    """Start working on top of REV: set up writable branches off its pins.
 
-    Moves the VCS working copy to REV if given, then creates a
-    `tether.ws.<workspace>.<key>` branch per Forkable object from its pin (or
-    from the recorded state for `pin = "record"` objects); track-policy objects
-    stay on their base branch. `--dry-run` / `--plan` preview; `--from-plan`
-    applies a saved plan.
+    Moves the VCS working copy to REV if given, then decides a
+    `tether.ws.<workspace>.<key>` branch per Forkable object. By default the
+    branch is created lazily, on the first writable `open` (workspaces that
+    never write leave nothing behind); `--eager` creates them all now.
+    `pin = "record"` objects always fork now, from their recorded state, so it
+    cannot expire underneath them. Track-policy objects stay on their base
+    branch. `--dry-run` / `--plan` preview; `--from-plan` applies a saved plan.
     """
     repo = _repo()
     try:
@@ -513,7 +521,7 @@ def new(
             plan = _load_plan(from_plan, "new")
             repo.apply_new(plan)
         else:
-            plan = repo.plan_new(rev, keep=keep)
+            plan = repo.plan_new(rev, keep=keep, eager=eager)
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
@@ -522,13 +530,21 @@ def new(
     except TetherError as exc:
         _fail(exc)
     if json_out:
-        _emit({"working_refs": repo.workspace.working_refs}, as_json=True)
+        _emit(
+            {
+                "working_refs": repo.workspace.working_refs,
+                "pending_forks": repo.workspace.pending_forks,
+            },
+            as_json=True,
+        )
         return
     typer.echo(
-        "forked working refs" if not plan.context.get("keep") else "kept working refs"
+        "kept working refs" if plan.context.get("keep") else "working refs set up"
     )
     for key, ref in sorted(repo.workspace.working_refs.items()):
         typer.echo(f"  {key} -> {ref}")
+    for key, ref in sorted(repo.workspace.pending_forks.items()):
+        typer.echo(f"  {key} -> {ref}  (created on first writable open)")
 
 
 @app.command(name="open")

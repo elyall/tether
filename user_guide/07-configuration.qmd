@@ -17,7 +17,8 @@ auto = true          # CLI status/commit fingerprint by default (--no-snapshot w
 on_status = false    # also run a cheap verify of each committed object in status
 
 [new]
-auto_fork = false    # commit re-forks working refs from the pins it just created
+auto_fork = false    # commit re-runs `new` from the pins it just created
+fork = "lazy"        # "lazy": create a working branch on first writable open; "eager": during `new`
 
 [defaults]           # policy for objects added without an explicit one
 write = "fork"       # fork | track
@@ -80,16 +81,21 @@ workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
 base = "3ba1c07e55d2..."             # manifest hash the working refs were forked from
 last_snapshot_at = "2026-09-04T22:10:03.118Z"
 
-[working_refs]
+[working_refs]                       # branches that exist
 "zarr/imaging" = "tether.ws.7c1e0a4d.zarr-imaging"
 "db/metrics" = "tether.ws.7c1e0a4d.db-metrics"
+
+[pending_forks]                      # decided by `new`, created on first writable open
+"features" = "tether.ws.7c1e0a4d.features"
 
 [last_snapshot."zarr/imaging"]
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 ```
 
 `base` drives stale-working-copy detection; `working_refs` are what `open`
-writes to; `last_snapshot` is what `--no-snapshot` reuses.
+writes to; `pending_forks` are the branches `new` decided on but has not
+created (the first writable `open` moves an entry to `working_refs`);
+`last_snapshot` is what `--no-snapshot` reuses.
 
 ## Environment variables
 

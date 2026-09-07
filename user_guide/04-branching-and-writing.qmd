@@ -3,7 +3,7 @@ title: "Branching and Writing"
 ---
 
 Pinning makes the past reproducible. *Branching* makes the present safe to
-change: `tether new` forks a fresh writable branch in every system off the
+change: `tether new` sets up a fresh writable branch in every system off the
 pinned state, you write through native handles, and `commit` pins the results.
 Nothing you do on your branches touches `main` in any system until you decide
 it should.
@@ -30,13 +30,20 @@ tether new main
 ```
 
 ```
-forked working refs
+working refs set up
+  code          -> tether.ws.7c1e0a4d.code          (created on first writable open)
+  db/metrics    -> tether.ws.7c1e0a4d.db-metrics    (created on first writable open)
+  features      -> tether.ws.7c1e0a4d.features      (created on first writable open)
+  zarr/imaging  -> tether.ws.7c1e0a4d.zarr-imaging  (created on first writable open)
 ```
 
-For every Forkable object, `new` verified the pin recorded at `main` (cheaply)
-and created a branch from it, concurrently:
+For every Forkable object, `new` decided a branch name and where it will be
+forked from -- and wrote nothing. Forking is **lazy** by default: the branch is
+created by the first writable `open` of that object, from the pin recorded at
+`main`. A workspace that reads three objects and writes one ends up with one
+branch, not four.
 
-| Object | Pin at `main` | Working ref created |
+| Object | Pin at `main` | Working ref (created on first write) |
 | --- | --- | --- |
 | `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.7c1e0a4d.zarr-imaging` |
 | `db/metrics` | Neon branch | Neon child branch `tether.ws.7c1e0a4d.db-metrics` |
@@ -48,8 +55,38 @@ and created a branch from it, concurrently:
 same commit get disjoint branches everywhere. `raw/plate1` has no working ref:
 files cannot be forked.
 
-`status` now reads every object at its working ref, and all are `clean`: a
-fresh fork is, by construction, the pinned state.
+`status` reads objects that have not been forked yet at their base (the pin),
+and all are `clean`; once a branch exists, `status` reads it instead.
+
+### Lazy or eager
+
+`tether new --eager` (or `[new] fork = "eager"` in `tether.toml`) creates every
+branch during `new`, which is how tether worked before 0.1.0a6. Every fork in
+every backend is a copy-on-write pointer, so the difference is not the cost of
+creating a branch; it is what an idle branch *holds* and *needs*:
+
+| | Lazy (default) | Eager |
+| --- | --- | --- |
+| Branches created | only for objects you actually write | one per Forkable object, every `new` |
+| What a forgotten workspace leaves behind | nothing for untouched objects | a branch per object -- each a GC root that keeps its snapshot alive and a line in every branch list; Neon counts them against the project's branch quota |
+| Credentials needed at `new` | read only | write, for every system |
+| First writable `open` | pays the fork (one metadata write, plus a cheap pin check) | just opens |
+| `--dry-run` | `new --dry-run` shows `defer-fork`; the fork itself happens inside `open`, which has no dry run -- use `new --eager --dry-run` to preview what would be created | `new --dry-run` shows every `fork` |
+| HEAD moves before you write | the workspace is stale; `new` re-decides with nothing to reset | `new` resets the branches |
+| The pin is deleted before you write (`gc` on another machine) | `open` fails with `pin missing` -- the fork never happened | the branch already exists and keeps the data |
+| Pre-creating branches for a job | `Repo.materialize_fork(key)` per object, or `--eager` | automatic |
+
+The last two rows are the same trade-off: a pin is durable, so deferring the
+fork is safe as long as the pin outlives the wait -- which it does unless
+someone drops the commit that references it and runs `gc` in between.
+
+**Pin-less objects are never deferred.** With `--pin record` there is no tag;
+the recorded state is a bare snapshot id / version / commit / LSN that the
+system will eventually expire (Icechunk `expire_snapshots`, Iceberg snapshot
+expiry, Lance `cleanup_old_versions`, Neon's history window). A branch on it is
+the only thing that stops that. So `new` forks those immediately even in lazy
+mode -- the plan says `fork ... forked now so the state cannot expire` -- and
+the trade-off above does not apply to them.
 
 ## Write through native handles
 
@@ -282,9 +319,13 @@ tether open zarr/imaging
 error: working copy is stale (HEAD manifests changed since fork); run `tether new` to refork before writing
 ```
 
-`tether new` reforks from the current pins and clears the flag. Work already on
-the old forks is not lost: the branches still exist in each system, and the
-pins you committed still reference them.
+`tether new` re-decides from the current pins and clears the flag. Everything
+you *committed* is safe: those pins are tags, independent of any branch. Writes
+you did not commit are not: re-forking an existing branch resets it to the new
+pin (Icechunk `reset_branch`, Lance/lakeFS/Dolt delete-and-recreate, git
+`branch -f`; Neon keeps the old branch as-is), so commit before you `new`.
+Branches that were still pending are simply re-decided; there was nothing to
+reset.
 
 ## Workspaces and `auto_fork`
 
@@ -301,13 +342,16 @@ copy, set in `tether.toml`:
 auto_fork = true
 ```
 
-`commit` then reforks working refs from the pins it just created, so the next
-write starts from exactly what was committed.
+`commit` then re-runs `new` after pinning, so the next write starts from
+exactly what was committed. With lazy forking that costs nothing until you
+write again; with `[new] fork = "eager"` it re-creates every branch.
 
 ## Recap
 
-- `tether new [rev]` forks a writable branch per Forkable object off the pins at
-  `rev`; names embed the workspace id so forks never collide.
+- `tether new [rev]` decides a writable branch per Forkable object off the pins
+  at `rev`; names embed the workspace id so forks never collide. By default the
+  branch is created on the first writable `open` (`--eager` creates them all
+  now; `--pin record` objects always fork now).
 - `open` returns writable native handles on those forks; write with the
   system's own library.
 - `commit` pins the forks' states and commits the manifests; `diff --content`

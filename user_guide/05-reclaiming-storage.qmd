@@ -184,9 +184,11 @@ Those are the system's operations, not tether's.
 
 ### Working branches from dead workspaces
 
-Every workspace forks its own `tether.ws.<id>.<key>` branch per Forkable
-object. Workspaces that were forgotten, machines that were wiped, and
-`jj workspace forget` all leave those branches behind -- each one holding
+Every workspace gets its own `tether.ws.<id>.<key>` branch per Forkable
+object it writes to (forks are lazy by default, so objects a workspace only
+read never got one; `--pin record` objects and `--eager` workspaces have a
+branch per object). Workspaces that were forgotten, machines that were wiped,
+and `jj workspace forget` all leave those branches behind -- each one holding
 whatever it wrote. By default `gc` never deletes a branch: it releases tether's
 *refs* (tags) and leaves data reclamation to each system, so a branch you
 forgot about is never the reason data disappears.

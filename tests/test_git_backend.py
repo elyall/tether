@@ -47,7 +47,7 @@ def test_git_backend_lifecycle(vcs_root: Path) -> None:
     # The pin is a real git tag at sha0.
     assert _git(code, "rev-parse", f"{pin.ref}^{{commit}}") == sha0
 
-    repo.new()
+    repo.new(eager=True)
     wref = repo.workspace.working_refs["code"]
     assert wref and wref.startswith("tether.ws.")
     handle = repo.open("code")

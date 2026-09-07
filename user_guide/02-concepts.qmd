@@ -47,8 +47,11 @@ the system must support:
   re-committing an unchanged object is a no-op.
 - **Fork**: a fresh writable branch created off a pin -- or, for objects with
   `pin = "record"`, straight off the recorded state, skipping the native ref
-  entirely. `tether new` forks one per Forkable object, named
-  `tether.ws.<workspace-id>.<key>`, so workspaces never collide.
+  entirely. `tether new` decides one per Forkable object, named
+  `tether.ws.<workspace-id>.<key>`, so workspaces never collide, and by default
+  creates it lazily on the first writable `open` (pins are durable, so the
+  branch can wait; pin-less objects fork immediately because their recorded
+  state cannot wait). `--eager` creates them all during `new`.
 
 ## Plans
 

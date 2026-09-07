@@ -18,7 +18,8 @@ A `tether commit` records each object's state and, for systems that support it,
 creates a durable native reference (an Icechunk tag, a Neon child branch, a git
 tag, an Iceberg tag, a Lance tag, a lakeFS tag, a Dolt tag) so the exact state
 can be recovered and branched from later.
-`tether new` forks fresh writable branches off any committed state. The VCS
+`tether new` sets up fresh writable branches off any committed state (created
+lazily, on first write). The VCS
 supplies history, undo, bookmarks, workspaces, and sharing; `tether` only
 implements what is novel: cross-system fan-out, drift detection, and the
 pin/fork lifecycle.
@@ -104,7 +105,7 @@ states into the manifests, and runs `jj commit` / `git commit` on them. Every
 tether status                       # fan-out: modified / unpinned / drifted per object
 tether commit -m "Baseline imaging + metrics"   # pins, writes manifests, jj/git commit
 jj log                              # the dataset's history *is* the repo's history
-tether new main                     # jj new main / git checkout main, then fork writable branches off its pins
+tether new main                     # jj new main / git checkout main; working branches are decided (created on first write)
 tether open db/metrics              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
 tether diff main @ --content        # what changed inside each object between two revisions, natively
@@ -156,7 +157,7 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 | working copy | the VCS working dir; the committed thing is the manifests |
 | `TreeState.snapshot()` | **snapshot**: concurrent fan-out fingerprint -> `workspace.toml` |
 | `commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
-| `new <rev>` | checkout + **fork** fan-out (fresh writable branch per object) |
+| `new <rev>` | checkout + **fork** decision per object; the branch is created on the first writable `open` (`--eager`: during `new`) |
 | stale working copy | manifest hash recorded at fork; differs from HEAD => refuse writes |
 | bookmarks / op log / undo / workspaces / push | delegated to the VCS |
 | `.dvc` files | `.tether/objects/<key>.toml` (committed) |
@@ -169,14 +170,14 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 ```
 <dataset-root>/
   tether.toml                 # committed: snapshot.auto (CLI snapshots by default), verify.on_status,
-                              #   new.auto_fork (commit re-forks working refs), default policies,
+                              #   new.auto_fork (commit re-runs new), new.fork (lazy|eager), default policies,
                               #   backend options, credential *references*
   .tether/
     .gitignore                # ignores workspace.toml
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
                               #   states (so `diff --content` can compare them); pruned by gc
-    workspace.toml            # untracked: workspace_id, base manifest hash, working refs, last snapshot
+    workspace.toml            # untracked: workspace_id, base manifest hash, working refs, pending forks, last snapshot
 ```
 
 `pin_id = blake2b(kind, locator identity, state)[:12]`; the native ref is
@@ -314,6 +315,13 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
 - **Pin-then-commit ordering.** Pins are created before the VCS commit; if the
   commit never lands, pins leak until `gc` (which scans VCS history + the current
   workspace). Re-run `tether verify` after merging manifests across branches.
+- **Forks are lazy.** `new` records which branch each object *will* get; the
+  first writable `open` creates it from the pin. Workspaces that only read leave
+  nothing behind, but that first `open` is a store write (no dry run; use
+  `new --eager --dry-run` to preview) and needs the pin to still exist. Objects
+  with `--pin record` fork during `new` regardless: with no tag, the branch is
+  the only thing keeping their snapshot/version from expiring. `--eager` or
+  `[new] fork = "eager"` restores up-front branches.
 - **Data history costs storage.** Every pin holds bytes in its system until the
   commit that names it is dropped (`jj abandon`/`squash`, `git rebase -i`) and
   `gc` releases it. `--pin record` skips the native ref on any backend and forks

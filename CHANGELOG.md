@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Working branches are forked lazily by default. `tether new` decides each
+  Forkable object's `tether.ws.<workspace>.<key>` branch (plan action
+  `defer-fork`) and the first writable `open` creates it from the pin;
+  workspaces that never write to an object leave no branch behind. `new
+  --eager` / `[new] fork = "eager"` restores creating every branch during
+  `new`. Objects with `pin = "record"` always fork during `new`: their recorded
+  state has no native ref, so the branch is what keeps it from expiring.
+  `Repo.materialize_fork(key)` creates a deferred branch on demand;
+  `WorkspaceState.pending_forks` records the decisions; `tether new --json`
+  reports them. Existing workspaces are unaffected until their next `new`.
+
 ## [0.1.0a5] - 2026-09-06
 
 ### Added

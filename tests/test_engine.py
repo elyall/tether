@@ -35,13 +35,16 @@ def test_full_lifecycle(vcs_root: Path) -> None:
     assert pin1 is not None
     assert pin1.id in backend.list_pins({"system": system})
 
-    # Fork working refs, then write through a native handle.
+    # `new` only decides the branch name (lazy); the first writable open forks.
     repo.new()
-    wref = repo.workspace.working_refs["db"]
-    assert wref and wref != "main"
+    assert "db" not in repo.workspace.working_refs
+    assert repo.workspace.pending_forks["db"].startswith("tether.ws.")
     handle = repo.open("db")
     assert isinstance(handle, MemoryHandle)
     assert not handle.read_only
+    wref = repo.workspace.working_refs["db"]
+    assert wref == handle.ref and wref != "main"
+    assert "db" not in repo.workspace.pending_forks
     handle.write({"x": 1})
 
     status = repo.status()
@@ -165,6 +168,74 @@ def test_track_mode_uses_base_branch(vcs_root: Path) -> None:
     assert repo.workspace.working_refs["db"] == "main"
 
 
+def test_lazy_forking(vcs_root: Path) -> None:
+    """Lazy default: `new` creates nothing; the first writable open forks."""
+    from tether.manifest import RepoConfig
+
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = _mem_object(repo)
+    recorded = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(recorded)
+    store.write(recorded, "main", {"v": 1})
+    repo.add("scratch", "memory", {"system": recorded}, policy=Policy(pin="record"))
+    repo.commit("baseline")
+
+    plan = repo.plan_new()
+    ops = {a.key: a.op for a in plan.actions}
+    # The pinned object defers; the pin-less one forks now -- nothing else would
+    # stop its recorded snapshot from expiring before the first write.
+    assert ops == {"db": "defer-fork", "scratch": "fork"}
+    assert "cannot expire" in next(a for a in plan.actions if a.key == "scratch").detail
+    repo.apply_new(plan, verify=False)
+    branches = store.system(system).branches
+    assert not any(b.startswith("tether.ws.") for b in branches)
+    assert any(b.startswith("tether.ws.") for b in store.system(recorded).branches)
+    assert repo.workspace.working_refs.keys() == {"scratch"}
+    assert repo.workspace.pending_forks.keys() == {"db"}
+
+    # Read-only opens, status, and commit never trigger the fork.
+    ro = repo.open("db", read_only=True)
+    assert isinstance(ro, MemoryHandle) and ro.read_only and ro.ref == "main"
+    assert not any(b.startswith("tether.ws.") for b in branches)
+    assert next(o for o in repo.status().objects if o.key == "db").changed is False
+    assert repo.commit("nothing").pinned == {}  # unchanged: no branch, no new pin
+    assert "db" in repo.workspace.pending_forks  # auto_fork is off; still pending
+
+    # The first writable open forks from the pin; later opens reuse the branch.
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle)
+    wref = repo.workspace.working_refs["db"]
+    assert handle.ref == wref and wref in branches and wref.startswith("tether.ws.")
+    assert not repo.workspace.pending_forks.get("db")
+    again = repo.open("db")
+    assert isinstance(again, MemoryHandle) and again.ref == wref
+    assert repo.materialize_fork("db") == wref  # idempotent
+
+    # Removing a still-pending object leaves nothing behind to gc.
+    repo.new()
+    assert "db" in repo.workspace.pending_forks  # re-deferred (branch reset later)
+    repo.remove("scratch")
+    assert "scratch" not in repo.workspace.pending_forks
+    assert not [a for a in repo.plan_gc().actions if a.key == "db"]
+
+    # A stale workspace refuses to materialize until `new` runs again.
+    repo.workspace.base = "stale-hash"
+    write_workspace(repo.root, repo.workspace)
+    with pytest.raises(StaleWorkingCopyError):
+        Repo.find(vcs_root).open("db")
+    with pytest.raises(ConfigError):
+        repo.materialize_fork("nope")
+
+    # `[new] fork = "eager"` restores up-front branches.
+    eager = Repo.init(vcs_root / "eager", config=RepoConfig(new_fork="eager"))
+    _mem_object(eager)
+    eager.commit("baseline")
+    eager.new()
+    assert eager.workspace.working_refs["db"].startswith("tether.ws.")
+    assert not eager.workspace.pending_forks
+
+
 def test_open_missing_object_errors(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     with pytest.raises(ConfigError):
@@ -262,14 +333,29 @@ def test_new_auto_fork_reforks_after_commit(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root, config=RepoConfig(new_auto_fork=True))
     system = _mem_object(repo)
     repo.commit("baseline")
-    first = repo.workspace.working_refs["db"]
-    assert first.startswith("tether.ws.")  # forked without an explicit new()
+    # `new` ran without being asked; the fork itself waits for the first write.
+    first = repo.workspace.pending_forks["db"]
+    assert first.startswith("tether.ws.")
+    assert first not in default_store().system(system).branches
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle) and handle.ref == first
     default_store().write(system, first, {"x": 1})
     repo.commit("update")
-    # Re-forked from the new pin: same deterministic name, now at the new state.
+    # Deferred again after the commit; the branch keeps the deterministic name
+    # and is reset to the new pin on the next writable open.
+    assert repo.workspace.pending_forks["db"] == first
+    repo.open("db")
     assert repo.workspace.working_refs["db"] == first
     assert default_store().read(system, first) == {"x": 1}
     assert not repo.is_stale()
+
+    # eager mode creates every branch during new/commit, as before.
+    repo.config.new_fork = "eager"
+    default_store().write(system, first, {"x": 2})
+    repo.commit("eager")
+    assert (
+        repo.workspace.working_refs["db"] == first and not repo.workspace.pending_forks
+    )
 
 
 def test_history_and_detached_base(vcs_root: Path) -> None:
@@ -296,7 +382,7 @@ def test_history_and_detached_base(vcs_root: Path) -> None:
     res = repo.commit("adopt at s1")
     pin = res.pinned["db"]
     assert pin is not None and store.system(system).tags[pin.ref] == s1
-    repo.new()
+    repo.new(eager=True)
     wref = repo.workspace.working_refs["db"]
     assert store.system(system).branches[wref] == s1
     assert store.system(system).branches["main"] == s2  # untouched
@@ -338,7 +424,7 @@ def test_pinless_record_policy_forks_from_state(vcs_root: Path) -> None:
     new_plan = repo.plan_new()
     (fork,) = [a for a in new_plan.actions if a.op == "fork"]
     assert fork.params == {"state": {"snapshot_id": s1}}
-    repo.new()
+    repo.new(eager=True)
     wref = repo.workspace.working_refs["db"]
     assert store.system(system).branches[wref] == s1
 
@@ -415,15 +501,30 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
     res = repo.commit("baseline")
     plan = repo.plan_new()
     ops = {a.key: a.op for a in plan.actions}
-    assert ops == {"db": "fork", "tracked": "track"}
-    assert ops and not plan.is_empty
+    assert ops == {"db": "defer-fork", "tracked": "track"}
+    assert plan.is_empty  # nothing is written by a lazy new
+    assert (
+        "first writable open" in next(a for a in plan.actions if a.key == "db").detail
+    )
+    plan_eager = repo.plan_new(eager=True)
+    assert {a.key: a.op for a in plan_eager.actions} == {
+        "db": "fork",
+        "tracked": "track",
+    }
+    assert not plan_eager.is_empty
     assert not any(
         b.startswith("tether.ws.") for b in default_store().system(system).branches
     )
 
     repo.apply_new(Plan.from_json(plan.to_json()))
     assert repo.workspace.working_refs["tracked"] == "main"
+    assert repo.workspace.pending_forks["db"].startswith("tether.ws.")
+    assert not any(
+        b.startswith("tether.ws.") for b in default_store().system(system).branches
+    )
+    repo.apply_new(Plan.from_json(plan_eager.to_json()))
     assert repo.workspace.working_refs["db"].startswith("tether.ws.")
+    assert not repo.workspace.pending_forks
 
     # Planning against a revision reads the manifests there without moving.
     assert res.vcs_commit is not None
@@ -440,7 +541,7 @@ def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> N
     repo.commit("baseline")  # pins s1
     s2 = store.write(system, "main", {"v": 2})
     repo.commit("update")  # pins s2; main head is s2
-    repo.new()
+    repo.new(eager=True)
     mine = repo.workspace.working_refs["db"]
     branches = store.system(system).branches
     s3 = store.write(system, "main", {"v": 3})  # main moved on; s3 is not pinned
@@ -535,7 +636,7 @@ def test_gc_forgets_removed_objects_refs_without_deleting(vcs_root: Path) -> Non
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
-    repo.new()
+    repo.new(eager=True)
     mine = repo.workspace.working_refs["db"]
 
     repo.remove("db")

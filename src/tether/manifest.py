@@ -290,6 +290,9 @@ class RepoConfig:
     snapshot_auto: bool = True
     verify_on_status: bool = False
     new_auto_fork: bool = False
+    new_fork: str = "lazy"
+    """`[new] fork`: `lazy` (default) creates a working branch on the first
+    writable `open`; `eager` creates every branch during `new`."""
     defaults: Policy = field(default_factory=Policy)
     vcs: dict[str, Any] = field(default_factory=dict)
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -303,7 +306,7 @@ class RepoConfig:
         doc["tether"] = tether_tbl
         doc["snapshot"] = {"auto": self.snapshot_auto}
         doc["verify"] = {"on_status": self.verify_on_status}
-        doc["new"] = {"auto_fork": self.new_auto_fork}
+        doc["new"] = {"auto_fork": self.new_auto_fork, "fork": self.new_fork}
         doc["defaults"] = self.defaults.to_dict()
         if self.vcs:
             doc["vcs"] = _drop_nulls(self.vcs)
@@ -322,11 +325,15 @@ class RepoConfig:
         new = data.get("new") or {}
         import_tbl = data.get("import") or {}
         query = import_tbl.get("query")
+        fork = str(new.get("fork", "lazy"))
+        if fork not in ("lazy", "eager"):
+            raise ConfigError(f"invalid [new] fork: {fork!r} (lazy or eager)")
         return cls(
             version=int(tether_tbl.get("version", CONFIG_VERSION)),
             snapshot_auto=bool(snapshot.get("auto", True)),
             verify_on_status=bool(verify.get("on_status", False)),
             new_auto_fork=bool(new.get("auto_fork", False)),
+            new_fork=fork,
             defaults=Policy.from_dict(data.get("defaults")),
             vcs=dict(data.get("vcs") or {}),
             backends=dict(data.get("backends") or {}),
@@ -343,12 +350,16 @@ class WorkspaceState:
 
     ``base`` is the manifest hash the working refs were forked from; it drives
     stale-working-copy detection. ``working_refs`` maps object key -> native
-    working ref. ``last_snapshot`` caches the most recent fan-out fingerprints.
+    working ref that exists. ``pending_forks`` maps object key -> the branch
+    name ``new`` decided on but has not created yet (lazy forking: it is
+    created on the first writable ``open``). ``last_snapshot`` caches the most
+    recent fan-out fingerprints.
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     base: str | None = None
     working_refs: dict[str, str] = field(default_factory=dict)
+    pending_forks: dict[str, str] = field(default_factory=dict)
     last_snapshot: dict[str, State] = field(default_factory=dict)
     last_snapshot_at: str | None = None
 
@@ -361,6 +372,8 @@ class WorkspaceState:
             doc["last_snapshot_at"] = self.last_snapshot_at
         if self.working_refs:
             doc["working_refs"] = dict(self.working_refs)
+        if self.pending_forks:
+            doc["pending_forks"] = dict(self.pending_forks)
         if self.last_snapshot:
             doc["last_snapshot"] = {
                 k: _drop_nulls(v) for k, v in self.last_snapshot.items()
@@ -374,6 +387,7 @@ class WorkspaceState:
             workspace_id=str(data.get("workspace_id", uuid.uuid4().hex)),
             base=str(data["base"]) if "base" in data else None,
             working_refs=dict(data.get("working_refs") or {}),
+            pending_forks=dict(data.get("pending_forks") or {}),
             last_snapshot={
                 str(k): dict(v) for k, v in (data.get("last_snapshot") or {}).items()
             },

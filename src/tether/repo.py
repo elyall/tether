@@ -466,6 +466,7 @@ class Repo:
         # A re-registered key starts without a working ref; any branch left by
         # its previous incarnation is found by `gc --prune-workspaces`.
         self.workspace.working_refs.pop(key, None)
+        self.workspace.pending_forks.pop(key, None)
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
         return manifest
@@ -484,6 +485,7 @@ class Repo:
         remove_object(self.root, key)
         del self.objects[key]
         self.workspace.last_snapshot.pop(key, None)
+        self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
 
@@ -822,21 +824,41 @@ class Repo:
                 self.backend_for(m.kind).unpin(m.locator, pin)
 
     # -- new (fork working refs) ---------------------------------------- #
-    def plan_new(self, rev: str | None = None, *, keep: bool = False) -> Plan:
+    def plan_new(
+        self,
+        rev: str | None = None,
+        *,
+        keep: bool = False,
+        eager: bool | None = None,
+    ) -> Plan:
         """Compute what `new` would do without writing anywhere.
 
         Reads the manifests at `rev` (or the working tree) and decides per
-        `FORK`-capable object: `track` (use the base branch), `fork` from its
-        pin, `fork` from its recorded state (`pin = "record"`), or skip (no
-        committed state yet). `apply_new` moves the VCS working copy to `rev`
-        first when one is given.
+        `FORK`-capable object: `track` (use the base branch), `fork` now, or
+        `defer-fork` (create the branch on the first writable `open`), or skip
+        (no committed state yet). `apply_new` moves the VCS working copy to
+        `rev` first when one is given.
+
+        Forks are deferred by default (`config.new_fork == "lazy"`) when the
+        source is a native pin: a pin is durable, so the branch can be created
+        whenever a write actually happens, and workspaces that never write
+        leave nothing behind. A `pin = "record"` object forks immediately even
+        in lazy mode: its recorded state has no native ref, so the branch
+        itself is what keeps the snapshot/version from expiring.
+
+        Args:
+            rev: Revision whose manifests to fork from (`None`: working tree).
+            keep: Only refresh the baseline; keep working refs.
+            eager: Fork every object during `new`; default from `config.new_fork`.
         """
         objects = self._objects_at(self.vcs.resolve(rev)) if rev else self.objects
+        eager = (self.config.new_fork == "eager") if eager is None else eager
         plan = Plan(
             command="new",
             context={
                 "rev": rev,
                 "keep": keep,
+                "eager": eager,
                 "manifest_hash": manifest_hash(objects),
                 "workspace_id": self.workspace.workspace_id,
             },
@@ -865,15 +887,32 @@ class Repo:
             if m.pin is not None:
                 source = {"pin": m.pin.to_dict()}
                 detail = f"from pin {m.pin.ref}"
+                durable = True
             elif Capability.ADDRESSABLE in eff:
                 source = {"state": m.state}
                 detail = f"from recorded state {_short_state(m.state)} (no pin)"
+                durable = False
             else:
                 plan.notes.append(f"{key}: no pin and not addressable; cannot fork")
                 continue
-            plan.actions.append(
-                Action("fork", key, m.kind, target=name, detail=detail, params=source)
-            )
+            if eager or not durable:
+                if not durable and not eager:
+                    detail += "; forked now so the state cannot expire"
+                plan.actions.append(
+                    Action(
+                        "fork", key, m.kind, target=name, detail=detail, params=source
+                    )
+                )
+            else:
+                plan.actions.append(
+                    Action(
+                        "defer-fork",
+                        key,
+                        m.kind,
+                        target=name,
+                        detail=f"{detail}; created on first writable open",
+                    )
+                )
         return plan
 
     def apply_new(self, plan: Plan, *, verify: bool = True) -> None:
@@ -899,27 +938,17 @@ class Repo:
             return
 
         working_refs: dict[str, str] = {}
+        pending: dict[str, str] = {}
         forks = {a.key: a for a in plan.actions if a.op == "fork"}
         for a in plan.actions:
             if a.op == "track":
                 working_refs[a.key] = a.target
+            elif a.op == "defer-fork":
+                pending[a.key] = a.target
 
         def fork_one(key: str) -> str:
-            a = forks[key]
             m = self.objects[key]
-            backend = self.backend_for(m.kind)
-            assert m.state is not None
-            if "pin" in a.params:
-                pin = Pin.from_dict(a.params["pin"])
-                report = backend.verify(m.locator, m.state, pin, deep=False)
-                if report.status is VerifyStatus.MISSING:
-                    raise TetherError(f"pin missing: {report.message}")
-                return backend.fork(m.locator, pin, a.target)
-            state = dict(a.params["state"])
-            report = backend.verify(m.locator, state, None, deep=True)
-            if report.status is VerifyStatus.MISSING:
-                raise TetherError(f"recorded state is gone: {report.message}")
-            return backend.fork(m.locator, state, a.target)
+            return self._fork_from_manifest(m, forks[key].target)
 
         try:
             working_refs.update(self._fanout(fork_one, list(forks)))
@@ -933,27 +962,80 @@ class Repo:
             if k not in self.objects
         }
         self.workspace.working_refs = {**leftovers, **working_refs}
+        self.workspace.pending_forks = pending
         self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
 
-    def new(self, rev: str | None = None, *, keep: bool = False) -> None:
-        """Start working on top of `rev`: fork fresh writable refs off its pins.
+    def _fork_from_manifest(self, m: ObjectManifest, name: str) -> str:
+        """Create working branch `name` from a manifest's pin (or recorded state)."""
+        backend = self.backend_for(m.kind)
+        assert m.state is not None
+        if m.pin is not None:
+            report = backend.verify(m.locator, m.state, m.pin, deep=False)
+            if report.status is VerifyStatus.MISSING:
+                raise TetherError(f"pin missing: {report.message}")
+            return backend.fork(m.locator, m.pin, name)
+        report = backend.verify(m.locator, m.state, None, deep=True)
+        if report.status is VerifyStatus.MISSING:
+            raise TetherError(f"recorded state is gone: {report.message}")
+        return backend.fork(m.locator, m.state, name)
+
+    def materialize_fork(self, key: str) -> str:
+        """Create the deferred working branch for `key` now and return it.
+
+        Called by `open` on the first writable handle; also useful to
+        pre-create branches for a job. No-op when the branch already exists.
+
+        Raises:
+            ConfigError: Unknown key, or no fork is pending for it.
+            StaleWorkingCopyError: The workspace is stale; run `new` first.
+            TetherError: The pin (or recorded state) to fork from is gone.
+        """
+        existing = self.workspace.working_refs.get(key)
+        if existing is not None:
+            return existing
+        name = self.workspace.pending_forks.get(key)
+        if name is None:
+            raise ConfigError(f"no working branch pending for {key!r}; run `new`")
+        if self.is_stale():
+            raise StaleWorkingCopyError(
+                "working copy is stale (HEAD manifests changed since `new`); "
+                "run `tether new` before writing"
+            )
+        m = self.objects[key]
+        ref = self._fork_from_manifest(m, name)
+        self.workspace.working_refs[key] = ref
+        self.workspace.pending_forks.pop(key, None)
+        write_workspace(self.root, self.workspace)
+        return ref
+
+    def new(
+        self,
+        rev: str | None = None,
+        *,
+        keep: bool = False,
+        eager: bool | None = None,
+    ) -> None:
+        """Start working on top of `rev`: set up writable refs off its pins.
 
         Equivalent to `apply_new(plan_new(...))`. For every `FORK`-capable
         object, `track` policy uses the locator's branch; otherwise a branch
-        named `working_ref_name(workspace_id, key)` is forked from the pin (or,
-        for `pin = "record"` objects, straight from the recorded state).
-        Objects with no committed state yet are skipped. Forks run concurrently.
+        named `working_ref_name(workspace_id, key)` is forked from the pin --
+        by default *lazily*, on the first writable `open` (see `plan_new`), or
+        during `new` with `eager`. `pin = "record"` objects always fork now,
+        from their recorded state. Objects with no committed state yet are
+        skipped. Forks run concurrently.
 
         Args:
             rev: Move the VCS working copy here first (`jj new` / `git checkout`)
                 and reload the manifests; `None` keeps the current commit.
             keep: Only refresh the stale-detection baseline; keep working refs.
+            eager: Create every branch now; default `config.new_fork == "eager"`.
 
         Raises:
             MultiObjectError: A pin is missing or a fork failed.
         """
-        self.apply_new(self.plan_new(rev, keep=keep), verify=False)
+        self.apply_new(self.plan_new(rev, keep=keep, eager=eager), verify=False)
 
     # -- open ------------------------------------------------------------ #
     def open(
@@ -971,6 +1053,9 @@ class Repo:
                 open read-only. Defaults to `$TETHER_REV` when set.
             read_only: Force read-only or writable. Defaults to writable for
                 Forkable objects (at their working ref) and read-only otherwise.
+                A writable open creates the working branch first when `new`
+                deferred it (lazy forking) -- the one store write outside
+                `commit`, `new`, and `gc`.
 
         Returns:
             A backend-specific `tether.handles.Handle`.
@@ -1010,6 +1095,8 @@ class Repo:
                     "run `tether new` to refork before writing"
                 )
             working_ref = self._working_ref(key)
+            if working_ref is None and key in self.workspace.pending_forks:
+                working_ref = self.materialize_fork(key)  # lazy fork: first write
             if working_ref is None:
                 raise StaleWorkingCopyError(
                     f"no working ref for {key!r}; run `tether new` first"
