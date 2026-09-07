@@ -36,8 +36,8 @@ a Postgres schema have the same columns. JSON columns are `TEXT` in SQLite and
 
 Two views come along: `objects_head` (the objects at the exported head) and
 `object_pins` (each pin and how many commits reference it). `uri` is the
-locator's `uri` when it has one -- the natural join key to a catalog's
-`object_uri` column. `identity_hash` and `state_hash` are blake2b digests of
+locator's `uri` when it has one -- the natural join key to a catalog's URI
+column. `identity_hash` and `state_hash` are blake2b digests of
 the same canonical JSON that produces `pin_id`, so the same state on the same
 system hashes the same everywhere.
 
@@ -83,17 +83,17 @@ bundle.to_sqlite("tether.sqlite")   # or .to_dir("dump", "parquet")
 
 ### Joining a registry
 
-Suppose a catalog has `data_object(object_uri, plate_name, ...)` and analysis
-results carry `tether_rev` (the VCS commit that produced them, e.g. from
-`TETHER_REV`). Which Icechunk snapshot did each result read?
+Suppose a catalog has `catalog(uri, name, ...)` and a `runs` table records
+the VCS commit each job read as `tether_rev` (e.g. from `TETHER_REV`). Which
+Icechunk snapshot did each run read?
 
 ```sql
-SELECT m.metric_id, d.plate_name,
+SELECT r.run_id, c.name,
        json_extract_string(o.state_json, '$.snapshot_id') AS snapshot_id,
        o.pin_ref
-FROM metric m
-JOIN t.objects o ON o.commit_id = m.tether_rev AND o.kind = 'icechunk'
-JOIN data_object d ON d.object_uri = o.uri;
+FROM runs r
+JOIN t.objects o ON o.commit_id = r.tether_rev AND o.kind = 'icechunk'
+JOIN catalog c ON c.uri = o.uri;
 ```
 
 No tether process is involved; the export is a plain table.
@@ -101,10 +101,10 @@ No tether process is involved; the export is a plain table.
 ## Publish
 
 `publish` writes the same tables into Postgres and is meant to run after every
-`tether commit`, from CI or a Dagster step:
+`tether commit`, from CI or an orchestrator step:
 
 ```bash
-export TETHER_PUBLISH_DSN=postgresql://tether@db.internal/rb   # or --to
+export TETHER_PUBLISH_DSN=postgresql://tether@db.example.org/catalog   # or --to
 tether publish --dry-run          # per-table row counts, nothing written
 tether publish                    # schema `tether`; --schema to change it
 ```
@@ -156,20 +156,20 @@ registry's columns is SQL on your side, which keeps tether free of
 per-registry options:
 
 ```bash
-tether import postgresql://reader@db.internal/rb --query "
-  SELECT 'zarr/' || plate_name AS key,
-         'icechunk'            AS kind,
-         object_uri            AS uri
-  FROM data_object
-  WHERE type = 'IcechunkStore'
+tether import postgresql://reader@db.example.org/catalog --query "
+  SELECT 'zarr/' || name AS key,
+         'icechunk'      AS kind,
+         uri
+  FROM catalog
+  WHERE format = 'icechunk'
 " --dry-run
 ```
 
 ```
 plan: import (2 write(s))
-                 add  zarr/plate1  [icechunk] s3://lab-data/plate1.icechunk  register
-              update  zarr/plate2  [icechunk] s3://lab-data/plate2.icechunk  locator changed; committed state kept
-                      zarr/plate3: unchanged
+                 add  zarr/run-041  [icechunk] s3://bucket/run-041.icechunk  register
+              update  zarr/run-042  [icechunk] s3://bucket/run-042.icechunk  locator changed; committed state kept
+                      zarr/run-043: unchanged
 ```
 
 Sources: a Postgres DSN, a SQLite file (`--table` or `--query`), a `.csv`, or a
@@ -178,7 +178,7 @@ credentials):
 
 ```toml
 [import]
-query = "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object WHERE type = 'IcechunkStore'"
+query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'"
 ```
 
 Then `tether import postgresql://...` is enough. The plan has three verbs:

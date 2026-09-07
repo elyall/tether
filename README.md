@@ -85,7 +85,7 @@ Then register objects. Nothing is contacted yet; each `add` writes one
 
 ```bash
 tether add zarr/imaging --kind icechunk s3://bucket/imaging.zarr.icechunk --write fork
-tether add db/rosebud   --kind neon --project-id prj-123 --database neondb --role runner
+tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
 tether add raw/plate1   --kind file s3://bucket/raw/plate1/     # Observed unless versioned
 tether add raw/manifest --kind file gs://bucket/manifest.csv --file versioned   # Addressable
 tether add features     --kind lance s3://bucket/features.lance
@@ -105,7 +105,7 @@ tether status                       # fan-out: modified / unpinned / drifted per
 tether commit -m "Baseline imaging + metrics"   # pins, writes manifests, jj/git commit
 jj log                              # the dataset's history *is* the repo's history
 tether new main                     # jj new main / git checkout main, then fork writable branches off its pins
-tether open db/rosebud              # -> postgresql://...tether.ws.ab12cd34...
+tether open db/metrics              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
 tether diff main @ --content        # what changed inside each object between two revisions, natively
 tether log zarr/imaging             # an object's *native* history (snapshots); ids feed `add --at`
@@ -264,12 +264,12 @@ working copy; see the [guide](https://evanlyall.com/tether/user-guide/registries
 
 ```bash
 tether export tether.sqlite                 # commits, objects, object_states, refs, ... (also parquet/csv/jsonl)
-tether publish --to postgresql://.../rb     # same tables upserted into a Postgres schema; incremental by commit
-tether import postgresql://.../rb --query "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object" --dry-run
+tether publish --to postgresql://.../catalog   # same tables upserted into a Postgres schema; incremental by commit
+tether import postgresql://.../catalog --query "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'" --dry-run
 ```
 
-`objects.uri` joins a catalog's `object_uri`; `objects.commit_id` joins a
-`tether_rev` provenance column; `object_states` is the deduplicated set of
+`objects.uri` joins a catalog's URI column; `objects.commit_id` joins a
+provenance column holding the VCS commit a job read; `object_states` is the deduplicated set of
 versions. `import` plans `add` / `update` / `remove` (`--sync`) on the
 manifests from rows with tether's canonical columns -- the mapping is SQL on
 the registry side -- and never records or pins state; `tether commit` does.

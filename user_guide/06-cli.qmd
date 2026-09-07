@@ -84,7 +84,7 @@ from it while the system retains it -- see
 dataset 3f9c2a1b7d0e (STALE)
        new  raw/plate1  [file/observed] unrecoverable
   modified  zarr/imaging  [icechunk/forkable]
-     clean  db/rosebud  [neon/forkable] verify=ok
+     clean  db/metrics  [neon/forkable] verify=ok
 ```
 
 - `new` never committed; `modified` current state differs from the committed

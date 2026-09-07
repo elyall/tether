@@ -149,4 +149,4 @@ skill:
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on `commit`, `new`, and `gc`; save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."
-    - "For registries, run `tether publish` after each `tether commit` (or `tether export` for a file); join `objects.uri` to the catalog's `object_uri` and `objects.commit_id` to a `tether_rev` column. `tether import` only changes what is tracked; commit afterwards."
+    - "For registries, run `tether publish` after each `tether commit` (or `tether export` for a file); join `objects.uri` to the catalog's URI column and `objects.commit_id` to whatever column records the VCS commit a job read. `tether import` only changes what is tracked; commit afterwards."

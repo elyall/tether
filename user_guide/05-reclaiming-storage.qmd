@@ -61,8 +61,8 @@ split point next year -- the tag at the split point is pure cost. Register the
 object with `--pin record`:
 
 ```bash
-tether add features s3://lab-data/features.lance --kind lance --pin record
-tether add zarr/imaging s3://lab-data/imaging --kind icechunk --pin record
+tether add features s3://bucket/features.lance --kind lance --pin record
+tether add zarr/imaging s3://bucket/imaging --kind icechunk --pin record
 ```
 
 With `pin = "record"` on any backend:

@@ -15,7 +15,7 @@ four different systems.
 ## Register a few more objects
 
 ```bash
-tether add features --kind lance s3://lab-data/features.lance
+tether add features --kind lance s3://bucket/features.lance
 tether add code     --kind git --set path=. --remote origin
 tether commit -m "Add feature store and code"
 ```
@@ -116,7 +116,7 @@ From the shell, `tether open <key>` prints the same addresses:
 tether open db/metrics
 postgresql://runner@ep-brisk-forest-x9y8z7.us-west-2.aws.neon.tech/metrics?...
 tether open features
-s3://lab-data/features.lance#tether.ws.7c1e0a4d.features@v4
+s3://bucket/features.lance#tether.ws.7c1e0a4d.features@v4
 ```
 
 ## See what changed
@@ -204,7 +204,7 @@ timestamps, and messages, and marks branches, tags, and tether pins:
 
 ```bash
 tether log zarr/imaging                         # a registered object
-tether log s3://lab-data/imaging.icechunk --kind icechunk   # before registering
+tether log s3://bucket/imaging.icechunk --kind icechunk   # before registering
 ```
 
 ```
@@ -215,7 +215,7 @@ tether log s3://lab-data/imaging.icechunk --kind icechunk   # before registering
 ```
 
 ```bash
-tether add zarr/imaging --kind icechunk s3://lab-data/imaging.icechunk --at TYZ25DJEHXERGBR7H3P0
+tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --at TYZ25DJEHXERGBR7H3P0
 tether commit -m "Adopt imaging at the pre-relabel snapshot"
 tether new
 ```
@@ -224,7 +224,7 @@ tether new
 which entry to use:
 
 ```bash
-tether add zarr/imaging --kind icechunk s3://lab-data/imaging.icechunk --pick
+tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --pick
 ```
 
 ```

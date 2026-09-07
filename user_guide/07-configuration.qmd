@@ -60,7 +60,7 @@ See [Registries and SQL](09-registries-and-sql.qmd).
 
 ```toml
 [import]
-query = "SELECT 'zarr/' || plate_name AS key, 'icechunk' AS kind, object_uri AS uri FROM data_object WHERE type = 'IcechunkStore'"
+query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'"
 ```
 
 ## Backend options
