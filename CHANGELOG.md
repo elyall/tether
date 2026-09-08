@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a6] - 2026-09-07
+
 ### Added
 
 - `tether promote [KEY]... [--rev REV] [--strategy auto|ff|merge] [-m MSG]`
