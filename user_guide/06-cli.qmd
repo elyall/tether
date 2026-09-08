@@ -155,9 +155,10 @@ references, forget the working refs of objects removed with `tether remove`
 `.tether/listings/` files. No branch is ever deleted by a plain `gc`.
 
 `--prune-workspaces` additionally lists each system's `tether.ws.*` branches
-and evaluates those belonging to other workspaces (pass live ids with
-`--keep-workspace`, repeatable; this workspace's live refs are always kept)
-plus this workspace's branches that no current object uses. A branch is
+and evaluates those belonging to workspaces that no longer exist -- every live
+jj workspace / git worktree of the repository is discovered and kept
+automatically; `--keep-workspace` (repeatable) adds ids that are live
+elsewhere -- plus this workspace's branches that no current object uses. A branch is
 `delete-branch` only if its head state is natively pinned by some commit or
 equals the base branch's head; a branch with unpinned writes, a pin-less
 (`--pin record`) state, or on a backend whose branches are the storage itself

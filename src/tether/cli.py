@@ -697,8 +697,9 @@ def gc(
     keep_workspace: list[str] = typer.Option(
         [],
         "--keep-workspace",
-        help="Workspace id (or 8-char prefix) whose branches --prune-workspaces "
-        "must keep; repeatable. This workspace is always kept.",
+        help="Extra workspace id (or 8-char prefix) whose branches --prune-workspaces "
+        "must keep, e.g. a checkout on another machine; repeatable. Every live jj "
+        "workspace / git worktree of this repository is kept automatically.",
     ),
     force_prune: bool = typer.Option(
         False,
@@ -719,10 +720,11 @@ def gc(
 
     Also forgets this workspace's refs for removed objects and deletes
     unreferenced listings. `--prune-workspaces` evaluates stray
-    `tether.ws.*` branches (other workspaces' and this one's unused): a branch
-    is deleted only if its head is pinned or equals the base head, otherwise
-    kept -- `--force-prune` deletes those too. Dry-run by default: pass
-    `--no-dry-run` (or `--from-plan`) to release.
+    `tether.ws.*` branches -- those of workspaces that no longer exist (live jj
+    workspaces / git worktrees are found and kept automatically) and this
+    one's unused: a branch is deleted only if its head is pinned or equals the
+    base head, otherwise kept -- `--force-prune` deletes those too. Dry-run by
+    default: pass `--no-dry-run` (or `--from-plan`) to release.
     """
     if force_prune and not prune_workspaces:
         _fail(TetherError("--force-prune requires --prune-workspaces"))

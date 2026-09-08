@@ -125,7 +125,7 @@ pins only that commit named become unreferenced; `gc` releases them:
 jj squash --from <first-try>::<last-try> --into <result>   # drop intermediate dataset commits
 tether gc                           # dry run: pins no commit references, orphaned listings (never branches)
 tether gc --no-dry-run
-tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned; --force-prune for the rest
+tether gc --prune-workspaces --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned (live jj workspaces / git worktrees are kept); --force-prune for the rest
 ```
 
 Multiple people (or agents) work in jj workspaces / git worktrees of the same

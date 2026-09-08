@@ -144,7 +144,7 @@ skill:
     - "A `file` object is Observed unless registered with `--file versioned` on a versioning-enabled bucket; its committed state cannot be re-read later."
     - "Neon pins are child branches: a working branch cannot be deleted while its pins exist, and `commit` refuses while writers are active (`--force` overrides)."
     - "A DuckDB-file DuckLake catalog can be attached once per process; close `DuckLakeHandle`s before `status`."
-    - "`tether gc` never deletes branches on its own; `--prune-workspaces` deletes stray `tether.ws.*` branches only when their head is pinned or untouched, and `--force-prune` deletes the rest along with any unpinned data on them."
+    - "`tether gc` never deletes branches on its own; `--prune-workspaces` keeps every live jj workspace / git worktree automatically, deletes stray `tether.ws.*` branches only when their head is pinned or untouched, and `--force-prune` deletes the rest along with any unpinned data on them."
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
     - "Use `--write track` for production branches that must not be forked (e.g. Neon `main`)."

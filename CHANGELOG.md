@@ -45,6 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `gc --prune-workspaces` finds every live checkout of the repository (jj
+  workspaces via `jj workspace root --name`, git worktrees) and keeps their
+  working branches automatically; `--keep-workspace` is now only for ids that
+  are live elsewhere. `Repo.live_workspace_ids()` and
+  `VcsAdapter.workspace_roots()` are new.
 - `export`, `publish`, `import` and the lakeFS, Dolt, and DuckLake backends are
   labelled experimental in the CLI help, README, and guide.
 - `StatusReport.stale_keys` and `Repo.stale_keys()` list the stale objects.

@@ -194,9 +194,11 @@ whatever it wrote. By default `gc` never deletes a branch: it releases tether's
 forgot about is never the reason data disappears.
 
 `--prune-workspaces` opts in. It lists the `tether.ws.*` branches in each
-system, skips this workspace's live ones and any on the keep list, and for
-each remaining branch reads its head and asks whether deleting it would lose
-anything:
+system, skips the branches of every *live* checkout -- tether finds the jj
+workspaces (`jj workspace list` / `jj workspace root --name`) or git worktrees
+of the repository and reads their `.tether/workspace.toml` -- plus any id on
+the keep list, and for each remaining branch reads its head and asks whether
+deleting it would lose anything:
 
 | Head state | Decision |
 | --- | --- |
@@ -207,15 +209,16 @@ anything:
 | on a backend whose branches *are* the storage (Neon) | `keep-branch` |
 
 ```bash
-jj workspace list                 # the ids of workspaces still alive
-tether gc --prune-workspaces --keep-workspace 3f9c2a1b --keep-workspace 7e21d0ab
+tether gc --prune-workspaces                        # live checkouts here are kept automatically
+tether gc --prune-workspaces --keep-workspace 7e21d0ab   # plus a checkout on another machine
 ```
 
 ```
 plan: gc (1 write(s))
-       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging  workspace c0ffee42 (not kept); head is pinned
-         keep-branch  features      [lance] tether.ws.c0ffee42.features  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
-         keep-branch  db/metrics    [neon] tether.ws.c0ffee42.db-metrics  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
+       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging-3fa1c0  workspace c0ffee42 (not kept); head is pinned
+         keep-branch  features      [lance] tether.ws.c0ffee42.features-9b2e4f  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
+         keep-branch  db/metrics    [neon] tether.ws.c0ffee42.db-metrics-77e21d  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
+                      keeping live workspaces: 7c1e0a4d
 ```
 
 Add `--no-dry-run` to apply. The kept branches are the decision that is yours
@@ -225,7 +228,7 @@ branch regardless -- the plan marks those `FORCED although it has unpinned
 writes` so the loss is explicit before it happens:
 
 ```bash
-tether gc --prune-workspaces --keep-workspace 3f9c2a1b --force-prune --no-dry-run
+tether gc --prune-workspaces --force-prune --no-dry-run
 ```
 
 `tether remove` never deletes anything either: it leaves the object's working

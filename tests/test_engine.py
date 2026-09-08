@@ -737,3 +737,54 @@ def test_verify_all_history_covers_recorded_states(vcs_root: Path) -> None:
     assert "db" in labels  # recorded, pin-less state is a promise worth checking
     assert "f" not in labels  # Observed records are not recoverable; nothing to verify
     assert all(r.ok for r in reports.values())
+
+
+def test_prune_keeps_live_workspaces_automatically(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    import subprocess
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(eager=True)
+    mine = repo.workspace.working_refs["db"]
+
+    # A second live checkout of the same repository, with its own tether workspace.
+    other_root = tmp_path / "other-checkout"
+    if repo.vcs.kind == "jj":
+        subprocess.run(
+            ["jj", "workspace", "add", str(other_root)],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(other_root)],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    other = Repo.find(other_root)
+    other.new(eager=True)
+    theirs = other.workspace.working_refs["db"]
+    assert theirs != mine
+    assert repo.live_workspace_ids() == {
+        repo.workspace.workspace_id,
+        other.workspace.workspace_id,
+    }
+
+    # A branch from a workspace that no longer exists, at the base head (safe).
+    store.system(system).branches["tether.ws.deadbeef.db-000000"] = store.system(
+        system
+    ).branches["main"]
+    plan = repo.plan_gc(prune_workspaces=True)
+    ops = {a.target: a.op for a in plan.actions if a.op.endswith("-branch")}
+    assert ops == {"tether.ws.deadbeef.db-000000": "delete-branch"}
+    assert theirs not in ops and mine not in ops  # both live, no --keep-workspace
+    assert plan.context["live_workspaces"] == sorted(
+        w[:8] for w in (repo.workspace.workspace_id, other.workspace.workspace_id)
+    )
+    assert any("keeping live workspaces" in n for n in plan.notes)

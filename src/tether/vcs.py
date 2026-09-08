@@ -353,6 +353,14 @@ class VcsAdapter(Protocol):
     def refs(self) -> list[RefInfo]:
         """Named pointers (bookmarks / branches, tags) plus the ``head`` entry."""
 
+    def workspace_roots(self) -> list[Path]:
+        """Root directories of every live checkout of this repository.
+
+        jj workspaces (``jj workspace list`` + ``jj workspace root --name``) or
+        git worktrees (``git worktree list``). Used by ``gc --prune-workspaces``
+        to keep the working branches of workspaces that still exist.
+        """
+
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
 
@@ -574,6 +582,31 @@ class JjAdapter:
         refs.append(RefInfo("@", "head", self.current_rev()))
         return refs
 
+    def workspace_roots(self) -> list[Path]:
+        out = self._jj(
+            "workspace",
+            "list",
+            "--ignore-working-copy",
+            "-T",
+            'name ++ "\n"',
+            check=False,
+        )
+        roots: list[Path] = []
+        for name in (n.strip() for n in out.stdout.splitlines()):
+            if not name:
+                continue
+            root = self._jj(
+                "workspace",
+                "root",
+                "--ignore-working-copy",
+                "--name",
+                name,
+                check=False,
+            )
+            if root.returncode == 0 and root.stdout.strip():
+                roots.append(Path(root.stdout.strip()))
+        return roots or [self.root]
+
     def commit(self, relpaths: list[str], message: str) -> str:
         # jj auto-snapshots the working copy; scope the commit to our paths so
         # unrelated working-copy edits stay put. `jj commit` finalizes the
@@ -647,6 +680,15 @@ class GitAdapter:
         if head.returncode == 0 and head.stdout.strip():
             refs.append(RefInfo("HEAD", "head", head.stdout.strip()))
         return refs
+
+    def workspace_roots(self) -> list[Path]:
+        out = self._git("worktree", "list", "--porcelain", check=False)
+        roots = [
+            Path(line[len("worktree ") :].strip())
+            for line in out.stdout.splitlines()
+            if line.startswith("worktree ")
+        ]
+        return roots or [self.root]
 
     def commit(self, relpaths: list[str], message: str) -> str:
         self._git("add", "--", *relpaths)

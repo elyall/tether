@@ -66,6 +66,7 @@ from tether.manifest import (
     remove_object,
     working_ref_name,
     working_ref_workspace,
+    workspace_path,
     write_config,
     write_listing,
     write_object,
@@ -378,6 +379,23 @@ class Repo:
             return self.root.relative_to(self.vcs.root)
         except ValueError:  # pragma: no cover - dataset outside vcs root
             return Path(".")
+
+    def live_workspace_ids(self) -> set[str]:
+        """Workspace ids of every live checkout of this dataset (this one included).
+
+        Walks the VCS's workspaces / worktrees (`VcsAdapter.workspace_roots`)
+        and reads each one's `.tether/workspace.toml` at the dataset's path.
+        Checkouts that never ran tether have no id and contribute nothing.
+        """
+        ids = {self.workspace.workspace_id}
+        rel = self._dataset_rel()
+        for root in self.vcs.workspace_roots():
+            path = workspace_path(root / rel)
+            if not path.is_file():
+                continue
+            with contextlib.suppress(Exception):
+                ids.add(read_workspace(root / rel).workspace_id)
+        return ids
 
     def _vcs_paths(self) -> list[str]:
         # Never include the untracked workspace file; commit the committed
@@ -1397,9 +1415,11 @@ class Repo:
         `.tether/listings/` files no manifest names.
 
         With `prune_workspaces`, every `tether.ws.*` branch in each system is
-        considered: branches of other workspaces (except `keep_workspaces` --
-        pass the ids of live workspaces, e.g. from `jj workspace list`) and this
-        workspace's branches no current object uses. A branch is planned for
+        considered: branches of workspaces that no longer exist (every live jj
+        workspace / git worktree of this repository is kept automatically via
+        `live_workspace_ids`; `keep_workspaces` adds ids that are live elsewhere,
+        e.g. on another machine) and this workspace's branches no current
+        object uses. A branch is planned for
         `delete-branch` only when nothing on it would be lost: its head state is
         natively pinned by some manifest in history, or equals the base
         branch's head. Otherwise it gets a `keep-branch` note (unpinned writes,
@@ -1481,11 +1501,17 @@ class Repo:
             )
 
         if prune_workspaces:
+            live = self.live_workspace_ids()
+            keep = set(keep_workspaces or ()) | live
+            plan.context["live_workspaces"] = sorted(w[:8] for w in live)
+            others = sorted(w[:8] for w in live if w != self.workspace.workspace_id)
+            if others:
+                plan.notes.append(f"keeping live workspaces: {', '.join(others)}")
             self._plan_prune_workspaces(
                 plan,
                 [*all_manifests, *self.objects.values()],
                 key_for,
-                keep_workspaces or set(),
+                keep,
                 force_prune,
             )
 
@@ -1694,7 +1720,8 @@ class Repo:
         Args:
             dry_run: Only report what would be released (the report carries the plan).
             prune_workspaces: Also evaluate stray working branches.
-            keep_workspaces: Workspace ids (or 8-char prefixes) to leave alone.
+            keep_workspaces: Extra workspace ids (or 8-char prefixes) to leave
+                alone, beyond the live checkouts found automatically.
             force_prune: Delete stray branches even if they hold unpinned data
                 (or belong to a `BRANCH_IS_STORAGE` backend).
         """
