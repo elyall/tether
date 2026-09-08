@@ -44,12 +44,13 @@ the system must support:
 - **Pin**: a durable, GC-proof native reference to a state, named
   `tether.<pin_id>` -- an Icechunk tag, a protected Neon child branch, a git
   tag, a Lance tag, a Dolt tag. `pin_id = blake2b(kind, locator identity,
-  state)[:12]`, so identical state on the same object yields the same pin and
+  content state)[:16]`, so identical state on the same object yields the same pin and
   re-committing an unchanged object is a no-op.
 - **Fork**: a fresh writable branch created off a pin -- or, for objects with
   `pin = "record"`, straight off the recorded state, skipping the native ref
   entirely. `tether new` decides one per Forkable object, named
-  `tether.ws.<workspace-id>.<key>`, so workspaces never collide, and by default
+  `tether.ws.<workspace-id>.<key-slug>-<key-hash>`, so neither workspaces nor
+  look-alike keys collide, and by default
   creates it lazily on the first writable `open` (pins are durable, so the
   branch can wait; pin-less objects fork immediately because their recorded
   state cannot wait). `--eager` creates them all during `new`.

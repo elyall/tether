@@ -75,16 +75,18 @@ def _blake(*parts: bytes, size: int = 32) -> str:
 def compute_pin_id(kind: str, identity: Locator, state: State) -> str:
     """Content-address a pin from ``(kind, locator identity, state)``.
 
-    The 12-hex-char result is stable across processes and machines: identical
-    state on the same object produces the same pin id, so re-committing an
-    unchanged object is a no-op and identical states dedupe to one pin.
+    The 16-hex-char (64-bit) result is stable across processes and machines:
+    identical state on the same object produces the same pin id, so
+    re-committing an unchanged object is a no-op and identical states dedupe to
+    one pin. Callers pass the *content* state (see
+    :func:`tether.backends.base.content_state`).
     """
     return _blake(
         canonical_bytes(kind),
         canonical_bytes(identity),
         canonical_bytes(state),
         size=16,
-    )[:12]
+    )[:16]
 
 
 def ref_for_pin(pin_id: str) -> str:
@@ -118,8 +120,13 @@ WORKING_REF_PREFIX = f"{REF_PREFIX}ws."
 
 
 def working_ref_name(workspace_id: str, key: str) -> str:
-    """Per-workspace working-branch name so workspaces never collide."""
-    return f"{WORKING_REF_PREFIX}{workspace_id[:8]}.{slugify_key(key)}"
+    """Per-workspace working-branch name so workspaces -- and keys -- never collide.
+
+    ``tether.ws.<workspace8>.<slug>-<key6>``: the slug keeps the name readable,
+    the 6-hex key digest keeps ``zarr/imaging`` and ``zarr-imaging`` apart.
+    """
+    digest = _blake(canonical_bytes(key), size=8)[:6]
+    return f"{WORKING_REF_PREFIX}{workspace_id[:8]}.{slugify_key(key)}-{digest}"
 
 
 def working_ref_workspace(ref: str) -> str | None:

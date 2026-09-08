@@ -113,7 +113,7 @@ suspended); `[snapshot] auto = false` makes that the default.
 ## What `new` does
 
 Reads the manifests at `REV` and, per Forkable object, records a working ref:
-the base branch for `write = "track"`, otherwise `tether.ws.<workspace>.<key>`.
+the base branch for `write = "track"`, otherwise `tether.ws.<workspace>.<key-slug>-<key-hash>`.
 By default (`[new] fork = "lazy"`) that branch is *not created yet* -- the plan
 shows `defer-fork` and the first writable `open` creates it from the pin.
 `--eager` creates them all during `new`. Objects with `pin = "record"` fork

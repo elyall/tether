@@ -184,7 +184,7 @@ Those are the system's operations, not tether's.
 
 ### Working branches from dead workspaces
 
-Every workspace gets its own `tether.ws.<id>.<key>` branch per Forkable
+Every workspace gets its own `tether.ws.<id>.<key>-<hash>` branch per Forkable
 object it writes to (forks are lazy by default, so objects a workspace only
 read never got one; `--pin record` objects and `--eager` workspaces have a
 branch per object). Workspaces that were forgotten, machines that were wiped,

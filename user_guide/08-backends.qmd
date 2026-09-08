@@ -12,9 +12,9 @@ pins and forks map onto the system, the handle `open` returns, and what
 Common conventions:
 
 - `branch` in a locator is the *base* ref (default `main`). With
-  `--write fork`, `tether new` creates `tether.ws.<ws8>.<key-slug>` from the pin;
+  `--write fork`, `tether new` creates `tether.ws.<ws8>.<key-slug>-<key6>` from the pin;
   with `--write track`, the working ref is the base branch itself.
-- Pins are named `tether.<pin_id>` in the target system (12 hex chars,
+- Pins are named `tether.<pin_id>` in the target system (16 hex chars,
   content-addressed from kind + identity + state).
 - `identity` is the subset of the locator that names the system; two objects
   with the same identity and state share one pin.

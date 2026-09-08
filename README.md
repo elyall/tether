@@ -129,7 +129,7 @@ tether gc --prune-workspaces --keep-workspace <id> --no-dry-run   # dead workspa
 ```
 
 Multiple people (or agents) work in jj workspaces / git worktrees of the same
-repository; each gets its own `tether.ws.<workspace-id>.*` branches in every
+repository; each gets its own `tether.ws.<workspace-id>.<key>-<hash>` branches in every
 system, and pushing the repository publishes the dataset history. The
 `tether.toml` and `.tether/` paths are the only things tether adds to the
 repo; `.tether/workspace.toml` is per-checkout and ignored.
@@ -182,7 +182,7 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
     workspace.toml            # untracked: workspace_id, base manifest hash, working refs, pending forks, last snapshot
 ```
 
-`pin_id = blake2b(kind, locator identity, state)[:12]`; the native ref is
+`pin_id = blake2b(kind, locator identity, content state)[:16]`; the native ref is
 `tether.<pin_id>`. Identical state yields the same pin, so re-committing an
 unchanged object is a no-op and identical states dedupe to one pin.
 
