@@ -69,8 +69,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are live elsewhere. `Repo.live_workspace_ids()` and
   `VcsAdapter.workspace_roots()` are new.
 - `export`, `publish`, `import` and the lakeFS, Dolt, and DuckLake backends are
-  labelled experimental in the CLI help, README, and guide.
+  labelled experimental in the CLI help (`add --kind`), the README (its own
+  section; the compatibility matrix), and the guide.
 - `StatusReport.stale_keys` and `Repo.stale_keys()` list the stale objects.
+- `tether import` updates that change an object's locator now drop the
+  workspace's working branch, pending fork, base state, and fork point for it;
+  writes no longer go to the branch in the old system until the next `new`
+  (the branch itself is left for `gc`).
+- `promote`'s merge path records the working ref that `fork()` returns when
+  it resets the fork onto the merge result (Neon may return a sibling name).
+- The conformance suite computes pin ids from the content state, as the
+  engine does; before, a backend with volatile keys would have minted
+  different ids under the suite.
 
 ## [0.1.0a6] - 2026-09-07
 

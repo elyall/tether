@@ -154,20 +154,25 @@ def test_new_never_leaves_git_detached(vcs_root: Path) -> None:
             text=True,
         ).stdout.strip()
         assert head == f"tether/{c1[:12]}"  # attached, not detached
-        # Re-running new on the same commit reuses the branch when it is still
-        # there; a moved-on branch gets a sibling instead of being reset.
+
+        def current_branch() -> str:
+            return subprocess.run(
+                ["git", "-C", str(vcs_root), "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        # tether/<c1> has moved on to c3, so new(c1) must not reset it (that
+        # would orphan c3): HEAD lands on c1 via a numbered sibling.
         vcs.new(c1)
-        assert vcs.resolve("HEAD") == c1 or vcs.resolve("HEAD") == c3
-        branches = subprocess.run(
-            ["git", "-C", str(vcs_root), "branch", "--list", f"tether/{c1[:12]}*"],
-            capture_output=True,
-            text=True,
-        ).stdout
-        assert f"tether/{c1[:12]}" in branches
-        # A branch name switches to that branch.
-        default = subprocess.run(
-            ["git", "-C", str(vcs_root), "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        assert default
+        assert vcs.resolve("HEAD") == c1
+        assert current_branch() == f"tether/{c1[:12]}-2"
+        assert vcs.resolve(f"tether/{c1[:12]}") == c3
+        assert c3 in vcs.history_revs()
+        # A branch that still sits at the commit is reused, not duplicated.
+        vcs.new(c1)
+        assert current_branch() == f"tether/{c1[:12]}-2"
+        # A branch name switches to that branch rather than parking a new one.
+        vcs.new(f"tether/{c1[:12]}")
+        assert current_branch() == f"tether/{c1[:12]}"
+        assert vcs.resolve("HEAD") == c3

@@ -306,3 +306,54 @@ def test_export_import_round_trip(vcs_root: Path, tmp_path: Path) -> None:
     plan = repo.plan_import(specs, sync=True)
     assert plan.is_empty, plan.render()
     assert set(CANONICAL_COLUMNS) >= set(rows[0])
+
+
+def test_import_locator_change_drops_the_working_branch(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    s1, s2 = _system(), _system()
+    repo.add("db", "memory", {"system": s1, "branch": "main"})
+    repo.commit("baseline")
+    repo.new(eager=True)
+    old_ref = repo.workspace.working_refs["db"]
+    assert "db" in repo.workspace.base_states and "db" in repo.workspace.fork_points
+
+    # Point the registry at another system: the branch in s1 is not where
+    # writes for the new locator belong.
+    specs, _ = specs_from_rows(
+        [
+            {
+                "key": "db",
+                "kind": "memory",
+                "locator_json": {"system": s2, "branch": "main"},
+            }
+        ],
+        repo.config.defaults,
+    )
+    plan = repo.plan_import(specs)
+    assert [(a.op, a.key) for a in plan.actions] == [("update", "db")]
+    repo.apply_import(plan)
+    ws = Repo.find(vcs_root).workspace
+    for field in ("working_refs", "pending_forks", "base_states", "fork_points"):
+        assert "db" not in getattr(ws, field), field
+    assert old_ref in default_store().system(s1).branches  # left for gc
+    with pytest.raises(Exception, match="no working ref"):
+        repo.open("db", read_only=False)
+
+    # A policy-only update keeps the workspace's hold on the object.
+    repo.commit("moved")
+    repo.new(eager=True)
+    ref2 = repo.workspace.working_refs["db"]
+    assert ref2 in default_store().system(s2).branches
+    specs, _ = specs_from_rows(
+        [
+            {
+                "key": "db",
+                "kind": "memory",
+                "locator_json": {"system": s2, "branch": "main"},
+                "policy_pin": "record",
+            }
+        ],
+        repo.config.defaults,
+    )
+    repo.apply_import(repo.plan_import(specs))
+    assert repo.workspace.working_refs["db"] == ref2

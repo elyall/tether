@@ -93,14 +93,20 @@ def _identity_checks(h: BackendHarness, loc: Locator, state: dict) -> None:
     b = h.backend
     ident = b.identity(loc)
     assert isinstance(ident, dict) and ident, "identity must be a non-empty dict"
-    pid1 = compute_pin_id(b.kind, ident, state)
-    pid2 = compute_pin_id(b.kind, b.identity(loc), state)
+    content = content_state(b, state)
+    assert content is not None
+    pid1 = compute_pin_id(b.kind, ident, content)
+    pid2 = compute_pin_id(b.kind, b.identity(loc), content)
     assert pid1 == pid2, "pin id must be deterministic"
 
 
 def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
     b = h.backend
-    pid = compute_pin_id(b.kind, b.identity(loc), state)
+    # Pin ids hash the content state (what the engine does); pin() gets the
+    # full state, volatile address keys included.
+    content = content_state(b, state)
+    assert content is not None
+    pid = compute_pin_id(b.kind, b.identity(loc), content)
     pin = b.pin(loc, state, pid)
     assert pin.ref.startswith(ref_for_pin("")), "pin ref must carry the prefix"
     assert pid in b.list_pins(loc), "list_pins must include a fresh pin"

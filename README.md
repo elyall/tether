@@ -220,10 +220,13 @@ the locator's `at` field: `tether add --at <id>` / `--pick`).
 | `iceberg` | Forkable | snapshot_id | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`, `PROMOTE` (no merge); `record` for S3 Tables (no native ref) |
 | `delta` | Addressable | version, table_id | -- | -- | `CHEAP`, `RETENTION_BOUND`; no native tags; `VACUUM`/log retention bound readability |
 | `lance` | Forkable | branch, version | tag on (branch, version) | branch | `ATOMIC_REF`; tagged versions exempt from cleanup; version numbers are branch-scoped |
-| `lakefs` | Forkable | commit_id (+ dirty) | tag | branch | `CHEAP`, `ATOMIC_REF`, `PROMOTE`, `MERGE`; repo-wide pins, `prefix` scopes the handle |
-| `ducklake` | Addressable | snapshot_id, snapshot_time_us | -- | -- | `CHEAP`, `RETENTION_BOUND`; catalog-wide snapshots; `ducklake_expire_snapshots` bounds readability |
-| `dolt` | Forkable | commit (+ dirty) | tag | branch | `ATOMIC_REF`, `PROMOTE`, `MERGE` (`DOLT_MERGE`); over MySQL protocol to `dolt sql-server`; handles are `db/ref` revision URLs |
+| `lakefs` (experimental) | Forkable | commit_id (+ dirty) | tag | branch | `CHEAP`, `ATOMIC_REF`, `PROMOTE`, `MERGE`; repo-wide pins, `prefix` scopes the handle |
+| `ducklake` (experimental) | Addressable | snapshot_id, snapshot_time_us | -- | -- | `CHEAP`, `RETENTION_BOUND`; catalog-wide snapshots; `ducklake_expire_snapshots` bounds readability |
+| `dolt` (experimental) | Forkable | commit (+ dirty) | tag | branch | `ATOMIC_REF`, `PROMOTE`, `MERGE` (`DOLT_MERGE`); over MySQL protocol to `dolt sql-server`; handles are `db/ref` revision URLs |
 | `memory` | Forkable | snapshot_id | tag | branch | reference impl for tests |
+
+Experimental backends are tested against a fake (lakeFS, Dolt) or a local
+catalog (DuckLake), not a live deployment.
 
 Command requirements: `status`/`snapshot`/`verify` need `FINGERPRINT`; `commit`
 pins `PIN` objects (records `ADDRESSABLE`, records + warns for Observed, or fails

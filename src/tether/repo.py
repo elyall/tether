@@ -1104,7 +1104,8 @@ class Repo:
         if errors:
             raise MultiObjectError(
                 f"could not fork working refs for {', '.join(sorted(errors))} "
-                f"({len(forked)} of {len(forks)} forked and recorded; run `new` again)",
+                f"({len(forked)} of {len(forks)} forked and recorded; run `new` again "
+                "-- it resets those branches too, so do not write to them first)",
                 errors,
             )
 
@@ -1121,6 +1122,11 @@ class Repo:
         if report.status is VerifyStatus.MISSING:
             raise TetherError(f"recorded state is gone: {report.message}")
         return backend.fork(m.locator, m.state, name)
+
+    def _forget_working_state(self, key: str) -> None:
+        """Drop everything this workspace knows about `key`'s working branch."""
+        for table in ("working_refs", "pending_forks", "base_states", "fork_points"):
+            getattr(self.workspace, table).pop(key, None)
 
     def materialize_fork(self, key: str) -> str:
         """Create the deferred working branch for `key` now and return it.
@@ -2013,7 +2019,9 @@ class Repo:
             if how == "merge" and m is not None and working_ref is not None:
                 # The fork now lags the base; reset it onto the merge result so
                 # the next commit pins what the base holds.
-                self.backend_for(m.kind).fork(m.locator, new_state, working_ref)
+                self.workspace.working_refs[key] = self.backend_for(m.kind).fork(
+                    m.locator, new_state, working_ref
+                )
             if key in self.workspace.working_refs or key in self.workspace.fork_points:
                 self.workspace.fork_points[key] = dict(new_state)
                 self.workspace.last_snapshot[key] = dict(new_state)
@@ -2179,6 +2187,11 @@ class Repo:
                 )
                 write_object(self.root, updated)
                 self.objects[a.key] = updated
+                if dict(current.locator) != dict(updated.locator):
+                    # The working branch lives in the *old* system; keeping it
+                    # would send writes there until the next `new`. Drop the
+                    # workspace's hold (the branch itself is left for `gc`).
+                    self._forget_working_state(a.key)
                 report.updated.append(a.key)
             elif a.op == "remove":
                 self.remove(a.key)

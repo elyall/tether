@@ -142,8 +142,8 @@ def add(
     kind: str = typer.Option(
         ...,
         "--kind",
-        help="Backend kind: file, icechunk, neon, git, iceberg, delta, lance, "
-        "lakefs, ducklake, dolt.",
+        help="Backend kind: file, icechunk, neon, git, iceberg, delta, lance; "
+        "experimental: lakefs, ducklake, dolt.",
     ),
     project_id: str | None = typer.Option(None, "--project-id", help="Neon project."),
     database: str | None = typer.Option(None, "--database", help="Neon/Dolt database."),
