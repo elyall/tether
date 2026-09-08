@@ -290,21 +290,32 @@ class NeonBackend(ObjectBackend):
             # recorded LSN; only possible while it is inside the history window.
             parent = self._require_branch(project_id, str(source["branch"]))
             lsn = str(source["lsn"])
-        existing = self._branch_by_name(project_id, name)
+        branches = self._branches(project_id)
+        existing = next((b for b in branches if b.get("name") == name), None)
         if existing is not None:
-            # Reset semantics: restore the branch onto the source (Neon's
-            # branch restore), discarding whatever was written on it.
-            if existing.get("parent_id") == parent["id"] and (
-                lsn is None or str(existing.get("parent_lsn")) == lsn
-            ):
+            # Reset semantics. A branch's parent_id/parent_lsn say where it was
+            # *created*, not where its head is, so they cannot tell "nothing
+            # written since" from "written and never committed"; always
+            # restore. Neon's branch restore is a metadata call.
+            children = [b for b in branches if b.get("parent_id") == existing["id"]]
+            if not children:
+                body: dict = {"source_branch_id": parent["id"]}
+                if lsn is not None:
+                    body["source_lsn"] = lsn
+                self._api.post(
+                    f"/projects/{project_id}/branches/{existing['id']}/restore", body
+                )
                 return name
-            body: dict = {"source_branch_id": parent["id"]}
-            if lsn is not None:
-                body["source_lsn"] = lsn
-            self._api.post(
-                f"/projects/{project_id}/branches/{existing['id']}/restore", body
-            )
-            return name
+            # Pins taken on this branch are its children. Neon will only restore
+            # a branch with children if the old state is preserved under a new
+            # name -- which re-parents every pin onto that backup and breaks
+            # their parent checks. Leave the branch (and its pins) alone and
+            # start a sibling; the engine records the name fork returns.
+            taken = {str(b.get("name", "")) for b in branches}
+            n = 2
+            while f"{name}.{n}" in taken:
+                n += 1
+            name = f"{name}.{n}"
         branch: dict = {"name": name, "parent_id": parent["id"]}
         if lsn is not None:
             branch["parent_lsn"] = lsn
@@ -357,6 +368,7 @@ class NeonBackend(ObjectBackend):
         if isinstance(target, dict):
             # Time-travel read on the state's branch within the history window.
             br = self._require_branch(project_id, str(target["branch"]))
+            self._ensure_endpoint(project_id, br["id"], "read_only")
             uri = self._connection_uri(project_id, br["id"], locator)
             sep = "&" if "?" in uri else "?"
             uri = f"{uri}{sep}options=neon_lsn:{target['lsn']}"

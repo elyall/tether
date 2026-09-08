@@ -90,6 +90,14 @@ class FakeNeon:
         bid = request.url.path.split("/")[-2]
         body = json.loads(request.content)
         br = self.branches[bid]
+        # Neon refuses to restore a branch that has children unless the old
+        # state is preserved under a new name (children move onto it).
+        children = [b for b in self.branches.values() if b.get("parent_id") == bid]
+        if children and not body.get("preserve_under_name"):
+            return httpx.Response(
+                400,
+                json={"message": "branch has children; preserve_under_name required"},
+            )
         br["parent_id"] = body["source_branch_id"]
         br["parent_lsn"] = body.get("source_lsn")
         br["last_reset_at"] = "2026-09-08T00:00:00Z"
@@ -261,20 +269,45 @@ def test_fork_onto_an_existing_branch_restores_it(backend: NeonBackend) -> None:
         pin1 = backend.pin(LOCATOR, state, "000000000001")
         wref = backend.fork(LOCATOR, pin1, "tether.ws.abcd1234.db")
         work = next(b for b in fake.branches.values() if b["name"] == wref)
+        pin1_br = next(b for b in fake.branches.values() if b["name"] == pin1.ref)
         assert fake.restores == []
-        assert backend.fork(LOCATOR, pin1, wref) == wref  # same source: no-op
-        assert fake.restores == []
+
+        # Same source again: parent_id still says pin1, but the head may have
+        # moved (writes, never committed), so the branch is restored anyway.
+        assert backend.fork(LOCATOR, pin1, wref) == wref
+        assert fake.restores == [(work["id"], {"source_branch_id": pin1_br["id"]})]
 
         # Re-forking from a different pin resets the existing branch onto it.
         pin2 = backend.pin(LOCATOR, {**state, "lsn": "0/2000000"}, "000000000002")
         assert backend.fork(LOCATOR, pin2, wref) == wref
         pin2_br = next(b for b in fake.branches.values() if b["name"] == pin2.ref)
-        assert fake.restores and fake.restores[-1][0] == work["id"]
+        assert len(fake.restores) == 2 and fake.restores[-1][0] == work["id"]
         assert work["parent_id"] == pin2_br["id"]
 
         # Pin-less fork from a state restores at that LSN.
         assert backend.fork(LOCATOR, {**state, "lsn": "0/3000000"}, wref) == wref
         assert work["parent_lsn"] == "0/3000000"
+        assert len(fake.restores) == 3
+
+        # Once a pin hangs off the working branch (a commit made there), Neon
+        # cannot restore it in place. The pin keeps its parent; the fork lands
+        # on a sibling name, which is what the engine records.
+        on_work = {"lsn": "0/4000000", "next_xid": "900", "branch": wref}
+        pin3 = backend.pin(LOCATOR, on_work, "000000000003")
+        pin3_br = next(b for b in fake.branches.values() if b["name"] == pin3.ref)
+        assert pin3_br["parent_id"] == work["id"]
+        sibling = backend.fork(LOCATOR, pin1, wref)
+        assert sibling == f"{wref}.2"
+        assert len(fake.restores) == 3  # untouched
+        sib = next(b for b in fake.branches.values() if b["name"] == sibling)
+        assert sib["parent_id"] == pin1_br["id"]
+        assert pin3_br["parent_id"] == work["id"]  # pin still hangs off its branch
+        assert backend.fork(LOCATOR, pin1, wref) == f"{wref}.3"  # .2 is taken
+        assert set(backend.list_working_refs(LOCATOR)) >= {
+            wref,
+            f"{wref}.2",
+            f"{wref}.3",
+        }
 
         # An existing pin branch that points elsewhere is refused, not reused.
         with pytest.raises(BackendError, match="hangs off"):

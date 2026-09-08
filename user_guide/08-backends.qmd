@@ -100,7 +100,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Identity | `{project_id, branch, database, role}` |
 | State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
-| Fork | a child branch of the pin; re-forking an existing working branch restores it onto the source (Neon branch restore); `open` writable creates a `read_write` endpoint lazily |
+| Fork | a child branch of the pin. Re-forking an existing working branch restores it onto the source (Neon branch restore, always -- a branch's `parent_id` says where it was created, not where its head is). Once a pin has been taken on the working branch that pin is its child and Neon will not restore it in place, so the fork lands on a sibling (`<name>.2`, `.3`, ...) and the old branch stays as the pins' parent; the engine records the returned name. `open` writable creates a `read_write` endpoint lazily; time-travel reads (`open` at a recorded state) ensure a `read_only` one |
 | Quiescence | `commit` refuses while `pg_stat_activity` shows active writers (`--force` skips) |
 | Handle | `NeonHandle(url, branch)` -- a Postgres connection URL |
 | Diff | not supported (no native primitive) |

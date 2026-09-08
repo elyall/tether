@@ -215,7 +215,7 @@ the locator's `at` field: `tether add --at <id>` / `--pick`).
 | `file` (S3 / GCS / Azure object) | Addressable | size, etag, version_id | -- | -- | `CHEAP`; `--file versioned` on a versioning-enabled bucket; one `HEAD` |
 | `file` (S3 / GCS / Azure prefix) | Observed | count, size, etag digest | -- | -- | `CHEAP`; one paged `LIST`, no per-object calls |
 | `icechunk` | Forkable | snapshot_id | tag | branch | `ATOMIC_REF`, `PROMOTE` (fast-forward via `reset_branch`; no merge); tags immutable, excluded from expiry |
-| `neon` | Forkable | next_xid, branch (+ lsn, volatile) | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE`; no merge/promote, leaf-only gc, quotas |
+| `neon` | Forkable | next_xid, branch (+ lsn, volatile) | protected child branch of the state's branch @ parent_lsn | child of pin; reset = branch restore, or a sibling once pins hang off it | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE`; no merge/promote, leaf-only gc, quotas |
 | `git` / `jj` | Forkable | sha, change_id, dirty | tag (pushed if `remote`) | branch | `CHEAP`, `ATOMIC_REF`; local path only for now |
 | `iceberg` | Forkable | snapshot_id | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`, `PROMOTE` (no merge); `record` for S3 Tables (no native ref) |
 | `delta` | Addressable | version, table_id | -- | -- | `CHEAP`, `RETENTION_BOUND`; no native tags; `VACUUM`/log retention bound readability |

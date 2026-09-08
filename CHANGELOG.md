@@ -38,6 +38,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recognised -- re-commit and `new`.
 - `apply_new` (`tether new --from-plan`) checks the plan against the target
   before moving the VCS working copy.
+- Neon `fork()` onto an existing working branch always restores it onto the
+  source. It used to return early when the branch's `parent_id` already
+  matched -- but `parent_id` is where a branch was created, not where its
+  head is, so `new` back onto the same pin never discarded uncommitted
+  writes. When pins hang off the working branch (they are its children and
+  Neon will not restore a branch with children in place) the fork lands on a
+  sibling name instead; the engine records the name `fork` returns. Neon
+  time-travel reads (`open` at a recorded state) now ensure a read-only
+  endpoint like pin reads do.
 - A `new` in which some forks fail now records the branches that were created
   (working refs, fork points, base states) before raising, and the error says
   which objects failed and that a second `new` completes the job. Previously
