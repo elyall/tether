@@ -348,9 +348,12 @@ class RepoConfig:
 class WorkspaceState:
     """Untracked per-workspace working state.
 
-    ``base`` is the manifest hash the working refs were forked from; it drives
-    stale-working-copy detection. ``working_refs`` maps object key -> native
-    working ref that exists. ``pending_forks`` maps object key -> the branch
+    ``base_states`` maps object key -> the committed state this workspace's
+    working ref corresponds to (set when the branch is forked and whenever this
+    workspace commits the object); a manifest that says something else was
+    changed by someone else, and the workspace is *stale* for that object.
+    ``working_refs`` maps object key -> native working ref that exists.
+    ``pending_forks`` maps object key -> the branch
     name ``new`` decided on but has not created yet (lazy forking: it is
     created on the first writable ``open``). ``fork_points`` maps object key ->
     the state its working branch was created from; ``promote`` compares the
@@ -359,7 +362,7 @@ class WorkspaceState:
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    base: str | None = None
+    base_states: dict[str, State] = field(default_factory=dict)
     working_refs: dict[str, str] = field(default_factory=dict)
     pending_forks: dict[str, str] = field(default_factory=dict)
     fork_points: dict[str, State] = field(default_factory=dict)
@@ -369,8 +372,6 @@ class WorkspaceState:
     def to_toml(self) -> str:
         doc = tomlkit.document()
         doc["workspace_id"] = self.workspace_id
-        if self.base is not None:
-            doc["base"] = self.base
         if self.last_snapshot_at is not None:
             doc["last_snapshot_at"] = self.last_snapshot_at
         if self.working_refs:
@@ -380,6 +381,10 @@ class WorkspaceState:
         if self.fork_points:
             doc["fork_points"] = {
                 k: _drop_nulls(v) for k, v in self.fork_points.items()
+            }
+        if self.base_states:
+            doc["base_states"] = {
+                k: _drop_nulls(v) for k, v in self.base_states.items()
             }
         if self.last_snapshot:
             doc["last_snapshot"] = {
@@ -392,7 +397,9 @@ class WorkspaceState:
         data = _loads_plain(text)
         return cls(
             workspace_id=str(data.get("workspace_id", uuid.uuid4().hex)),
-            base=str(data["base"]) if "base" in data else None,
+            base_states={
+                str(k): dict(v) for k, v in (data.get("base_states") or {}).items()
+            },
             working_refs=dict(data.get("working_refs") or {}),
             pending_forks=dict(data.get("pending_forks") or {}),
             fork_points={

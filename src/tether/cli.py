@@ -102,6 +102,7 @@ def _status_payload(report: StatusReport) -> dict:
     return {
         "manifest_hash": report.manifest_hash,
         "stale": report.stale,
+        "stale_keys": report.stale_keys,
         "objects": [
             {
                 "key": o.key,
@@ -345,7 +346,7 @@ def status(
     if json_out:
         _emit(_status_payload(report), as_json=True)
         return
-    flag = " (STALE)" if report.stale else ""
+    flag = f" (STALE: {', '.join(report.stale_keys)})" if report.stale else ""
     typer.echo(f"dataset {report.manifest_hash[:12]}{flag}")
     for o in report.objects:
         v = f" verify={o.verify.status.value}" if o.verify else ""

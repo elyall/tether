@@ -12,7 +12,7 @@ from tether.errors import (
     StaleWorkingCopyError,
 )
 from tether.handles import MemoryHandle
-from tether.manifest import Pin, Policy, ref_for_pin, write_workspace
+from tether.manifest import Pin, Policy, ref_for_pin
 from tether.repo import Repo
 
 
@@ -130,19 +130,56 @@ def test_gc_removes_orphan_pin(vcs_root: Path) -> None:
     assert "orphan0badid" not in backend.list_pins(locator)
 
 
+def _someone_else_commits(repo: Repo, key: str, state: dict) -> None:
+    """Rewrite `key`'s committed manifest as another workspace's commit would."""
+    from tether.manifest import write_object
+
+    m = repo.objects[key]
+    write_object(repo.root, m.with_pin(state=state, pin=m.pin, recoverable=True))
+
+
 def test_stale_working_copy_blocks_writes(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
-    _mem_object(repo)
+    system = _mem_object(repo)
     repo.commit("baseline")
     repo.new()
+    assert not repo.is_stale()
 
-    # Simulate someone advancing HEAD manifests underneath us.
-    repo.workspace.base = "stale-hash"
-    write_workspace(repo.root, repo.workspace)
+    # Someone else's commit changes db's committed state underneath us.
+    other = default_store().write(system, "main", {"theirs": 1})
+    _someone_else_commits(repo, "db", {"snapshot_id": other})
     reloaded = Repo.find(vcs_root)
-    assert reloaded.is_stale()
-    with pytest.raises(StaleWorkingCopyError):
+    assert reloaded.stale_keys() == ["db"]
+    assert reloaded.status(do_snapshot=False).stale_keys == ["db"]
+    with pytest.raises(StaleWorkingCopyError, match="committed state of db"):
         reloaded.open("db")
+
+    # Registering or removing an unrelated object does not un-stale it.
+    _mem_object(reloaded, "other")
+    assert reloaded.stale_keys() == ["db"]
+    reloaded.remove("other")
+    assert reloaded.stale_keys() == ["db"]
+    # `new` re-decides from the current manifests and clears it.
+    reloaded.new()
+    assert not reloaded.is_stale()
+
+    # Our own commit never makes us stale, even though the manifest moves.
+    handle = reloaded.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"mine": 1})
+    reloaded.commit("mine")
+    assert not reloaded.is_stale()
+
+    # Track-policy objects write to the base and are never stale.
+    tracked = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(tracked)
+    reloaded.add("t", "memory", {"system": tracked}, policy=Policy(write="track"))
+    reloaded.commit("track")
+    reloaded.new()
+    _someone_else_commits(
+        reloaded, "t", {"snapshot_id": default_store().write(tracked, "main", {"x": 1})}
+    )
+    assert Repo.find(vcs_root).stale_keys() == []
 
 
 def test_immutable_file_drift_is_error(vcs_root: Path) -> None:
@@ -220,8 +257,9 @@ def test_lazy_forking(vcs_root: Path) -> None:
     assert not [a for a in repo.plan_gc().actions if a.key == "db"]
 
     # A stale workspace refuses to materialize until `new` runs again.
-    repo.workspace.base = "stale-hash"
-    write_workspace(repo.root, repo.workspace)
+    _someone_else_commits(
+        repo, "db", {"snapshot_id": store.write(system, "main", {"theirs": 1})}
+    )
     with pytest.raises(StaleWorkingCopyError):
         Repo.find(vcs_root).open("db")
     with pytest.raises(ConfigError):

@@ -53,7 +53,7 @@ def test_repo_config_round_trip() -> None:
 
 def test_workspace_round_trip() -> None:
     ws = WorkspaceState(
-        base="hash",
+        base_states={"zarr/imaging": {"snapshot_id": "abc"}},
         working_refs={"zarr/imaging": "tether.ws.abcd1234.zarr-imaging"},
         last_snapshot={"zarr/imaging": {"snapshot_id": "abc"}},
         last_snapshot_at="2026-09-04T00:00:00+00:00",

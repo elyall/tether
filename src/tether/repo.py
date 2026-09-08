@@ -134,9 +134,11 @@ class StatusReport:
     manifest_hash: str
     """Hash of the committed object set (the dataset's "tree id")."""
     stale: bool
-    """Working refs were forked from a different manifest hash than HEAD's."""
+    """Some forked object's committed manifest changed underneath this workspace."""
     objects: list[ObjectStatus] = field(default_factory=list)
     """Per-object classifications, sorted by key."""
+    stale_keys: list[str] = field(default_factory=list)
+    """The objects that make the workspace stale (see `Repo.stale_keys`)."""
 
 
 @dataclass
@@ -318,7 +320,6 @@ class Repo:
             prefer=str(config.vcs.get("prefer", "jj")),
         )
         repo = cls(root, config, vcs)
-        repo.workspace.base = manifest_hash(repo.objects)
         write_workspace(root, repo.workspace)
         return repo
 
@@ -436,13 +437,44 @@ class Repo:
         """Hash of the committed object set in the working tree."""
         return manifest_hash(self.objects)
 
-    def is_stale(self) -> bool:
-        """Whether HEAD's manifests changed since this workspace forked its refs.
+    def stale_keys(self) -> list[str]:
+        """Forked objects whose committed manifest no longer matches this workspace.
 
-        A stale workspace refuses writable handles until `new` reforks.
+        Each working ref (existing or pending) was forked from, or last
+        committed by this workspace at, `workspace.base_states[key]`. If the
+        manifest in the working tree now records a different state -- someone
+        else committed, or the VCS working copy moved to another commit -- the
+        fork no longer starts where the dataset says it does. `track` objects
+        write to the base branch and are never stale. Registering or removing
+        *other* objects does not make a workspace stale.
         """
-        base = self.workspace.base
-        return base is not None and base != self.current_manifest_hash()
+        stale: list[str] = []
+        keys = set(self.workspace.working_refs) | set(self.workspace.pending_forks)
+        for key in sorted(keys):
+            m = self.objects.get(key)
+            if m is None or m.policy.write == "track" or m.state is None:
+                continue
+            expected = self.workspace.base_states.get(key)
+            if expected is None or not self._same(m.kind, m.state, expected):
+                stale.append(key)
+        return stale
+
+    def is_stale(self) -> bool:
+        """Whether any forked object's manifest changed underneath this workspace.
+
+        A stale workspace refuses writable handles until `new` reforks; see
+        `stale_keys`.
+        """
+        return bool(self.stale_keys())
+
+    def _mark_base_states(self, keys: Iterable[str]) -> None:
+        """Record the committed state each of `keys` corresponds to right now."""
+        for key in keys:
+            m = self.objects.get(key)
+            if m is not None and m.state is not None:
+                self.workspace.base_states[key] = dict(m.state)
+            else:
+                self.workspace.base_states.pop(key, None)
 
     def _fanout_collect(self, fn, keys: list[str]) -> tuple[dict, dict[str, Exception]]:
         """Run ``fn(key)`` per key concurrently; return ``(results, errors)``."""
@@ -511,7 +543,7 @@ class Repo:
         self.workspace.working_refs.pop(key, None)
         self.workspace.pending_forks.pop(key, None)
         self.workspace.fork_points.pop(key, None)
-        self.workspace.base = self.current_manifest_hash()
+        self.workspace.base_states.pop(key, None)
         write_workspace(self.root, self.workspace)
         return manifest
 
@@ -531,7 +563,7 @@ class Repo:
         self.workspace.last_snapshot.pop(key, None)
         self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
         self.workspace.fork_points.pop(key, None)
-        self.workspace.base = self.current_manifest_hash()
+        self.workspace.base_states.pop(key, None)
         write_workspace(self.root, self.workspace)
 
     # -- snapshot / status ---------------------------------------------- #
@@ -620,10 +652,12 @@ class Repo:
                     verify=report,
                 )
             )
+        stale = self.stale_keys()
         return StatusReport(
             manifest_hash=self.current_manifest_hash(),
-            stale=self.is_stale(),
+            stale=bool(stale),
             objects=objects,
+            stale_keys=stale,
         )
 
     # -- commit ---------------------------------------------------------- #
@@ -824,7 +858,12 @@ class Repo:
         if vcs and outcomes:
             result.vcs_commit = self.vcs.commit(self._vcs_paths(), message)
 
-        self.workspace.base = self.current_manifest_hash()
+        # What this workspace just committed is, by definition, not stale.
+        self._mark_base_states(
+            k
+            for k in outcomes
+            if k in self.workspace.working_refs or k in self.workspace.pending_forks
+        )
         write_workspace(self.root, self.workspace)
         if outcomes and self.config.new_auto_fork:
             # jj-style: every commit leaves you on a fresh working copy.
@@ -990,7 +1029,9 @@ class Repo:
                 "manifests at the target differ from the plan; re-run the plan"
             )
         if plan.context.get("keep"):
-            self.workspace.base = self.current_manifest_hash()
+            self._mark_base_states(
+                set(self.workspace.working_refs) | set(self.workspace.pending_forks)
+            )
             write_workspace(self.root, self.workspace)
             return
 
@@ -1029,7 +1070,10 @@ class Repo:
             if state is not None:
                 fork_points[key] = dict(state)
         self.workspace.fork_points = fork_points
-        self.workspace.base = self.current_manifest_hash()
+        self.workspace.base_states = {
+            k: v for k, v in self.workspace.base_states.items() if k in leftovers
+        }
+        self._mark_base_states(set(working_refs) | set(pending))
         write_workspace(self.root, self.workspace)
 
     def _fork_from_manifest(self, m: ObjectManifest, name: str) -> str:
@@ -1063,10 +1107,11 @@ class Repo:
         name = self.workspace.pending_forks.get(key)
         if name is None:
             raise ConfigError(f"no working branch pending for {key!r}; run `new`")
-        if self.is_stale():
+        stale = self.stale_keys()
+        if stale:
             raise StaleWorkingCopyError(
-                "working copy is stale (HEAD manifests changed since `new`); "
-                "run `tether new` before writing"
+                f"working copy is stale: the committed state of {', '.join(stale)} "
+                "changed since `new`; run `tether new` before writing"
             )
         m = self.objects[key]
         ref = self._fork_from_manifest(m, name)
@@ -1074,6 +1119,7 @@ class Repo:
         self.workspace.pending_forks.pop(key, None)
         if m.state is not None:
             self.workspace.fork_points[key] = dict(m.state)
+        self._mark_base_states([key])
         write_workspace(self.root, self.workspace)
         return ref
 
@@ -1157,10 +1203,12 @@ class Repo:
                     key=key,
                     kind=m.kind,
                 )
-            if self.is_stale():
+            stale = self.stale_keys()
+            if stale:
                 raise StaleWorkingCopyError(
-                    "working copy is stale (HEAD manifests changed since fork); "
-                    "run `tether new` to refork before writing"
+                    f"working copy is stale: the committed state of {', '.join(stale)} "
+                    "changed since this workspace forked; run `tether new` to refork "
+                    "before writing"
                 )
             working_ref = self._working_ref(key)
             if working_ref is None and key in self.workspace.pending_forks:
@@ -2089,7 +2137,6 @@ class Repo:
             elif a.op == "remove":
                 self.remove(a.key)
                 report.removed.append(a.key)
-        self.workspace.base = self.current_manifest_hash()
         write_workspace(self.root, self.workspace)
         return report
 
