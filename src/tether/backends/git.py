@@ -31,6 +31,9 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 class GitBackend(ObjectBackend):
     kind = "git"
+    # A change id is derived from the sha (and only present with jj); the same
+    # sha must pin identically with or without jj installed.
+    VOLATILE_KEYS = frozenset({"change_id"})
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -107,7 +110,11 @@ class GitBackend(ObjectBackend):
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         ref = working_ref or self._base_ref(locator)
         sha = self._run(locator, "rev-parse", "--verify", f"{ref}^{{commit}}")
-        dirty = bool(self._run(locator, "status", "--porcelain"))
+        # Uncommitted changes belong to the checked-out ref only; a dirty
+        # worktree says nothing about a branch that is not checked out.
+        checked_out = self._checked_out(locator)
+        on_ref = ref == "HEAD" or (checked_out is not None and ref == checked_out)
+        dirty = on_ref and bool(self._run(locator, "status", "--porcelain"))
         state: State = {"sha": sha, "dirty": dirty}
         change_id = self._change_id(locator, sha)
         if change_id:

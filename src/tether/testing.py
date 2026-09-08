@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from tether.backends.base import Capability, ObjectBackend, ObjectDiff, VerifyStatus
+from tether.backends.base import (
+    Capability,
+    ObjectBackend,
+    ObjectDiff,
+    VerifyStatus,
+    content_state,
+)
 from tether.handles import Handle
 from tether.manifest import (
     Locator,
@@ -33,6 +39,15 @@ class BackendHarness(Protocol):
 
     def mutate(self, locator: Locator, working_ref: str | None) -> None:
         """Cause the state at ``working_ref`` (or the base) to change."""
+
+
+def _content_checks(h: BackendHarness, loc: Locator, s1: dict, s2: dict) -> None:
+    """Volatile keys must never be the only thing that changed."""
+    b = h.backend
+    c1, c2 = content_state(b, s1), content_state(b, s2)
+    assert c1 != c2, "a real change must survive content_state"
+    for key in b.VOLATILE_KEYS:
+        assert key not in (c1 or {}), f"volatile key {key!r} leaked into content"
 
 
 def _fingerprint_checks(h: BackendHarness, loc: Locator) -> tuple[dict, dict]:
@@ -114,6 +129,12 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     h.mutate(loc, wref)
     assert b.fingerprint(loc, wref) != forked, "writes to a fork must register"
     assert b.fingerprint(loc, None) == base_before, "fork must isolate the base"
+    # Reset contract: forking onto an existing name moves it back to the source.
+    again = b.fork(loc, pin, name)
+    assert b.fingerprint(loc, again) == state, (
+        "fork onto an existing name must reset the branch to the source"
+    )
+    wref = again
     listed = b.list_working_refs(loc)
     assert wref in listed, f"list_working_refs must include {wref!r} (got {listed})"
     b.delete_working_ref(loc, wref)
@@ -158,6 +179,7 @@ def run_conformance(harness: BackendHarness) -> None:
 
     loc = harness.new_object()
     before, state = _fingerprint_checks(harness, loc)
+    _content_checks(harness, loc, before, state)
     _identity_checks(harness, loc, state)
 
     if Capability.DIFF in caps:

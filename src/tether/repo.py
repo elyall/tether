@@ -28,6 +28,7 @@ from tether.backends.base import (
     VerifyStatus,
     base_at,
     build_backend,
+    content_state,
     effective_capabilities,
     tier_of,
 )
@@ -358,6 +359,19 @@ class Repo:
     def _working_ref(self, key: str) -> str | None:
         return self.workspace.working_refs.get(key)
 
+    def _content(self, kind: str, state: State | None) -> State | None:
+        """`content_state` for `kind`: what equality and pin ids compare."""
+        return content_state(self.backend_for(kind), state)
+
+    def _content_of(self, kind: str, state: State) -> State:
+        """Like `_content` for a state that is known to exist."""
+        content = content_state(self.backend_for(kind), state)
+        assert content is not None
+        return content
+
+    def _same(self, kind: str, a: State | None, b: State | None) -> bool:
+        return self._content(kind, a) == self._content(kind, b)
+
     def _dataset_rel(self) -> Path:
         try:
             return self.root.relative_to(self.vcs.root)
@@ -386,7 +400,9 @@ class Repo:
         if m.state is None:
             return None
         backend = self.backend_for(m.kind)
-        name = listing_name(m.kind, backend.identity(m.locator), m.state)
+        name = listing_name(
+            m.kind, backend.identity(m.locator), self._content_of(m.kind, m.state)
+        )
         text = read_listing(self.root, name)
         if text is None and rev is not None:
             text = self.vcs.read_file_at(rev, self._listing_relpath(name))
@@ -550,7 +566,7 @@ class Repo:
                 tier_of(eff) is Tier.OBSERVED
                 and m.policy.file == "immutable"
                 and m.state is not None
-                and state != m.state
+                and not self._same(m.kind, state, m.state)
             ):
                 raise ImmutableObjectModified(
                     f"immutable object {key!r} changed since it was committed; "
@@ -580,7 +596,11 @@ class Repo:
             eff = effective_capabilities(backend, m.locator, m.policy)
             current = states.get(key)
             committed = m.state is not None
-            changed = committed and current is not None and current != m.state
+            changed = (
+                committed
+                and current is not None
+                and not self._same(m.kind, current, m.state)
+            )
             report: VerifyReport | None = None
             if self.config.verify_on_status and committed:
                 try:
@@ -665,7 +685,9 @@ class Repo:
                 plan.notes.append(f"{key}: no fingerprint; skipped")
                 continue
             needs_pin = Capability.PIN in eff
-            if m.state == state and (m.pin is not None or not needs_pin):
+            if self._same(m.kind, m.state, state) and (
+                m.pin is not None or not needs_pin
+            ):
                 plan.notes.append(f"{key}: unchanged")
                 continue
             if tier_of(eff) is Tier.OBSERVED:
@@ -685,7 +707,9 @@ class Repo:
                     )
                 )
             elif needs_pin:
-                pin_id = compute_pin_id(m.kind, backend.identity(m.locator), state)
+                pin_id = compute_pin_id(
+                    m.kind, backend.identity(m.locator), self._content_of(m.kind, state)
+                )
                 plan.actions.append(
                     Action(
                         "pin",
@@ -744,7 +768,7 @@ class Repo:
                 )
             current = self.snapshot()
             for a in object_actions:
-                if current.get(a.key) != a.params.get("state"):
+                if not self._same(a.kind, current.get(a.key), a.params.get("state")):
                     raise StalePlanError(
                         f"{a.key!r} changed since the plan was made "
                         f"({_short_state(a.params.get('state'))} -> "
@@ -790,7 +814,11 @@ class Repo:
             if Capability.DIFF in effective_capabilities(backend, m.locator, m.policy):
                 text = backend.listing(m.locator, state)
                 if text is not None:
-                    name = listing_name(m.kind, backend.identity(m.locator), state)
+                    name = listing_name(
+                        m.kind,
+                        backend.identity(m.locator),
+                        self._content_of(m.kind, state),
+                    )
                     write_listing(self.root, name, text)
 
         if vcs and outcomes:
@@ -1408,7 +1436,13 @@ class Repo:
         for m in [*all_manifests, *self.objects.values()]:
             if m.state is not None:
                 backend = self.backend_for(m.kind)
-                wanted.add(listing_name(m.kind, backend.identity(m.locator), m.state))
+                wanted.add(
+                    listing_name(
+                        m.kind,
+                        backend.identity(m.locator),
+                        self._content_of(m.kind, m.state),
+                    )
+                )
         for path in sorted(listings_dir(self.root).glob("*.jsonl")):
             if path.name not in wanted:
                 plan.actions.append(
@@ -1441,15 +1475,16 @@ class Repo:
         }
 
         # States that hold data per system: pinned (safe) vs merely recorded.
-        pinned: dict[str, list[State]] = {}
-        recorded: dict[str, list[State]] = {}
+        pinned: dict[str, list[State | None]] = {}
+        recorded: dict[str, list[State | None]] = {}
         for m in manifests:
             if m.state is None:
                 continue
             sys_key = key_for(self.backend_for(m.kind), m.locator)
             bucket = pinned if m.pin is not None else recorded
-            if m.state not in bucket.setdefault(sys_key, []):
-                bucket[sys_key].append(m.state)
+            content = self._content(m.kind, m.state)
+            if content not in bucket.setdefault(sys_key, []):
+                bucket[sys_key].append(content)
 
         systems_seen: set[str] = set()
         for key in sorted(self.objects):
@@ -1484,9 +1519,13 @@ class Repo:
                     reason = "branch is storage; deleting reclaims its data"
                 else:
                     try:
-                        head = backend.fingerprint(m.locator, ref)
+                        head = self._content(
+                            m.kind, backend.fingerprint(m.locator, ref)
+                        )
                         if base_head is None:
-                            base_head = backend.fingerprint(m.locator, None)
+                            base_head = self._content(
+                                m.kind, backend.fingerprint(m.locator, None)
+                            )
                     except TetherError as exc:
                         head, reason = None, f"cannot read head: {exc}"
                     if head is not None:
@@ -1721,13 +1760,13 @@ class Repo:
                 source = {"ref": working_ref}
                 fork_point = self.workspace.fork_points.get(key)
 
-            if target_state == base_state:
+            if self._same(m.kind, target_state, base_state):
                 plan.notes.append(f"{key}: base already at the target")
                 continue
 
             unchanged: bool | None
             if fork_point is not None:
-                unchanged = fork_point == base_state
+                unchanged = self._same(m.kind, fork_point, base_state)
             else:
                 unchanged = backend.ancestor_of(
                     m.locator, base_state, _source_object(source)
@@ -1843,7 +1882,9 @@ class Repo:
                 backend = self.backend_for(a.kind)
                 base_locator = {k: v for k, v in locator.items() if k != "at"}
                 current = backend.fingerprint(base_locator, None)
-                if current != a.params["base_state"] and m is not None:
+                if m is not None and not self._same(
+                    a.kind, current, a.params["base_state"]
+                ):
                     raise StalePlanError(
                         f"{a.key!r}: base branch moved since the plan was made "
                         f"({_short_state(a.params['base_state'])} -> "

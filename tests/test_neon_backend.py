@@ -33,6 +33,7 @@ class FakeNeon:
             }
         }
         self.endpoints: list[dict] = []
+        self.restores: list[tuple[str, dict]] = []
         self._n = 0
 
     def install(self, router: respx.MockRouter) -> None:
@@ -45,6 +46,9 @@ class FakeNeon:
         router.delete(
             url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+$"
         ).mock(side_effect=self._delete_branch)
+        router.post(
+            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+/restore$"
+        ).mock(side_effect=self._restore_branch)
         router.get(url__regex=rf"{re.escape(BASE)}/projects/{PID}/endpoints$").mock(
             side_effect=self._list_endpoints
         )
@@ -79,6 +83,18 @@ class FakeNeon:
         bid = request.url.path.rsplit("/", 1)[-1]
         self.branches.pop(bid, None)
         return httpx.Response(200, json={})
+
+    def _restore_branch(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        bid = request.url.path.split("/")[-2]
+        body = json.loads(request.content)
+        br = self.branches[bid]
+        br["parent_id"] = body["source_branch_id"]
+        br["parent_lsn"] = body.get("source_lsn")
+        br["last_reset_at"] = "2026-09-08T00:00:00Z"
+        self.restores.append((bid, body))
+        return httpx.Response(200, json={"branch": br})
 
     def _list_endpoints(self, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"endpoints": self.endpoints})
@@ -204,3 +220,62 @@ def test_quiescence_check(
             backend.check_quiescence(LOCATOR, None)
         monkeypatch.setattr(backend, "_active_writers", lambda uri: 0)
         backend.check_quiescence(LOCATOR, None)  # no raise
+
+
+def test_lsn_motion_without_writes_is_not_a_change(
+    backend: NeonBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoints move the LSN; only next_xid says the data changed."""
+    from tether.backends.base import content_state
+    from tether.manifest import compute_pin_id
+
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        before = backend.fingerprint(LOCATOR, None)
+        monkeypatch.setattr(backend, "_probe", lambda uri: ("0/16B4000", "742"))
+        after = backend.fingerprint(LOCATOR, None)
+        assert before != after  # the address moved ...
+        assert content_state(backend, before) == content_state(
+            backend, after
+        )  # ... not the data
+        ident = backend.identity(LOCATOR)
+        c_before, c_after = (
+            content_state(backend, before),
+            content_state(backend, after),
+        )
+        assert c_before is not None and c_after is not None
+        assert compute_pin_id("neon", ident, c_before) == compute_pin_id(
+            "neon", ident, c_after
+        )
+        monkeypatch.setattr(backend, "_probe", lambda uri: ("0/16B5000", "743"))
+        moved = backend.fingerprint(LOCATOR, None)
+        assert content_state(backend, before) != content_state(backend, moved)
+
+
+def test_fork_onto_an_existing_branch_restores_it(backend: NeonBackend) -> None:
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        state = backend.fingerprint(LOCATOR, None)
+        pin1 = backend.pin(LOCATOR, state, "000000000001")
+        wref = backend.fork(LOCATOR, pin1, "tether.ws.abcd1234.db")
+        work = next(b for b in fake.branches.values() if b["name"] == wref)
+        assert fake.restores == []
+        assert backend.fork(LOCATOR, pin1, wref) == wref  # same source: no-op
+        assert fake.restores == []
+
+        # Re-forking from a different pin resets the existing branch onto it.
+        pin2 = backend.pin(LOCATOR, {**state, "lsn": "0/2000000"}, "000000000002")
+        assert backend.fork(LOCATOR, pin2, wref) == wref
+        pin2_br = next(b for b in fake.branches.values() if b["name"] == pin2.ref)
+        assert fake.restores and fake.restores[-1][0] == work["id"]
+        assert work["parent_id"] == pin2_br["id"]
+
+        # Pin-less fork from a state restores at that LSN.
+        assert backend.fork(LOCATOR, {**state, "lsn": "0/3000000"}, wref) == wref
+        assert work["parent_lsn"] == "0/3000000"
+
+        # An existing pin branch that points elsewhere is refused, not reused.
+        with pytest.raises(BackendError, match="hangs off"):
+            backend.pin(LOCATOR, {**state, "lsn": "0/9999999"}, "000000000001")

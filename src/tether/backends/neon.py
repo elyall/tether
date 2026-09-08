@@ -70,6 +70,9 @@ class _NeonApi:
 
 class NeonBackend(ObjectBackend):
     kind = "neon"
+    # The LSN advances on checkpoints and autovacuum with no user write; it is
+    # where a pin branch is cut, not what identifies the data. `next_xid` is.
+    VOLATILE_KEYS = frozenset({"lsn"})
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -201,6 +204,17 @@ class NeonBackend(ObjectBackend):
         project_id = self._project(locator)
         ref = ref_for_pin(pin_id)
         existing = self._branch_by_name(project_id, ref)
+        if existing is not None:
+            parent = self._require_branch(project_id, str(state["branch"]))
+            if existing.get("parent_id") != parent["id"] or str(
+                existing.get("parent_lsn")
+            ) != str(state["lsn"]):
+                raise BackendError(
+                    f"pin {ref} exists but hangs off "
+                    f"{existing.get('parent_id')}@{existing.get('parent_lsn')}, not "
+                    f"{state['branch']}@{state['lsn']}",
+                    kind="neon",
+                )
         if existing is None:
             parent = self._require_branch(project_id, str(state["branch"]))
             self._api.post(
@@ -268,20 +282,32 @@ class NeonBackend(ObjectBackend):
 
     def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         project_id = self._project(locator)
-        if self._branch_by_name(project_id, name) is not None:
-            return name
         if isinstance(source, Pin):
             parent = self._require_branch(project_id, source.ref)
-            branch: dict = {"name": name, "parent_id": parent["id"]}
+            lsn: str | None = None
         else:
             # Recorded state (no pin branch): fork the state's branch at the
             # recorded LSN; only possible while it is inside the history window.
             parent = self._require_branch(project_id, str(source["branch"]))
-            branch = {
-                "name": name,
-                "parent_id": parent["id"],
-                "parent_lsn": str(source["lsn"]),
-            }
+            lsn = str(source["lsn"])
+        existing = self._branch_by_name(project_id, name)
+        if existing is not None:
+            # Reset semantics: restore the branch onto the source (Neon's
+            # branch restore), discarding whatever was written on it.
+            if existing.get("parent_id") == parent["id"] and (
+                lsn is None or str(existing.get("parent_lsn")) == lsn
+            ):
+                return name
+            body: dict = {"source_branch_id": parent["id"]}
+            if lsn is not None:
+                body["source_lsn"] = lsn
+            self._api.post(
+                f"/projects/{project_id}/branches/{existing['id']}/restore", body
+            )
+            return name
+        branch: dict = {"name": name, "parent_id": parent["id"]}
+        if lsn is not None:
+            branch["parent_lsn"] = lsn
         self._api.post(f"/projects/{project_id}/branches", {"branch": branch})
         return name
 

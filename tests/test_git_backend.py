@@ -108,3 +108,21 @@ def test_positional_locator_is_the_path(vcs_root: Path) -> None:
     assert backend.identity({"uri": str(code)}) == backend.identity({"path": str(code)})
     with pytest.raises(BackendError):
         backend.fingerprint({"uri": "https://github.com/o/r.git"}, None)
+
+
+def test_dirty_belongs_to_the_checked_out_ref_only(vcs_root: Path) -> None:
+    from tether.backends.base import content_state
+    from tether.backends.git import GitBackend
+
+    code = vcs_root / "code"
+    sha0 = _init_code_repo(code)
+    b = GitBackend()
+    loc = {"path": str(code)}
+    _git(code, "branch", "tether.ws.x.code", sha0)
+    (code / "main.py").write_text("print('uncommitted')\n", encoding="utf-8")
+    dirty_head = b.fingerprint(loc, None)  # HEAD is checked out and dirty
+    other = b.fingerprint(loc, "tether.ws.x.code")  # not checked out
+    assert dirty_head["dirty"] is True and dirty_head["sha"] == sha0
+    assert other["dirty"] is False and other["sha"] == sha0
+    # change_id is an address, not content: the same sha pins identically.
+    assert "change_id" not in (content_state(b, other) or {})

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tether.backends.base import content_state
 from tether.errors import ConfigError, TetherError
 from tether.manifest import (
     ObjectManifest,
@@ -595,6 +596,15 @@ def _digest(obj: Any) -> str:
     return _blake(canonical_bytes(obj), size=16)
 
 
+def _content_of(repo: Repo, m: ObjectManifest) -> Any:
+    """The manifest's state minus the backend's volatile keys (or the raw state
+    when the backend cannot be built here)."""
+    try:
+        return content_state(repo.backend_for(m.kind), m.state)
+    except TetherError:
+        return m.state
+
+
 def _ancestry_depth(infos: Mapping[str, Any]) -> dict[str, int]:
     """Longest parent chain within the exported set (roots and outsiders = 0)."""
     depth: dict[str, int] = {}
@@ -695,7 +705,8 @@ def build_bundle(
         for key in sorted(objects):
             m = objects[key]
             ident, ident_hash = identity_of(m)
-            state_hash = _digest(m.state) if m.state is not None else None
+            content = _content_of(repo, m)
+            state_hash = _digest(content) if content is not None else None
             tables["objects"].rows.append(
                 {
                     "commit_id": commit,
@@ -793,7 +804,7 @@ def _add_listings(
             ident, ident_hash = identity_of(m)
             if ident is None:
                 continue
-            name = listing_name(m.kind, ident, m.state)
+            name = listing_name(m.kind, ident, _content_of(repo, m))
             if name in seen:
                 continue
             seen.add(name)
@@ -819,7 +830,7 @@ def _add_listings(
                     "listing_name": name,
                     "kind": m.kind,
                     "identity_hash": ident_hash,
-                    "state_hash": _digest(m.state),
+                    "state_hash": _digest(_content_of(repo, m)),
                     "entries": count,
                 }
             )

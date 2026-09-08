@@ -100,10 +100,9 @@ class IcebergBackend(ObjectBackend):
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         table = self._table(locator)
         ref = working_ref or base_at(locator) or self._base_branch(locator)
-        return {
-            "snapshot_id": self._resolve(table, ref),
-            "metadata_location": table.metadata_location,
-        }
+        # Only the snapshot identifies the data. `metadata_location` changes on
+        # every table commit on any branch, so it must not be in the state.
+        return {"snapshot_id": self._resolve(table, ref)}
 
     def history(
         self,
@@ -213,8 +212,11 @@ class IcebergBackend(ObjectBackend):
         else:
             # Recorded state (no tag): the snapshot must not have been expired.
             sid = self._resolve(table, str(source["snapshot_id"]))
-        if name in self._refs(table):
+        existing = self._refs(table).get(name)
+        if existing is not None and int(existing.snapshot_id) == sid:
             return name
+        # create_branch stages a set-snapshot-ref update, which re-points an
+        # existing branch: reset semantics, like every other backend.
         with table.manage_snapshots() as ms:
             ms.create_branch(snapshot_id=sid, branch_name=name)
         return name

@@ -250,6 +250,12 @@ class ObjectBackend(Protocol):
     kind: str
     capabilities: Capability
 
+    VOLATILE_KEYS: frozenset[str] = frozenset()
+    """State keys that *address* the data without identifying it -- a Neon LSN
+    that advances on checkpoints, a change id derived from a sha. They stay in
+    the state (``pin`` and ``open`` need them) but are excluded from equality
+    and from pin ids; see :func:`content_state`."""
+
     def identity(self, locator: Locator) -> Locator:
         """Locator subset that participates in the content-addressed pin id.
 
@@ -284,6 +290,10 @@ class ObjectBackend(Protocol):
         ``source`` is a :class:`~tether.manifest.Pin` (fork from the native ref)
         or a recorded ``State`` (fork directly from an addressable state, used
         by ``policy.pin == "record"`` objects that carry no native ref).
+
+        **Reset contract**: if ``name`` already exists it is moved back onto
+        ``source`` (whatever was written on it is discarded); a branch already
+        at ``source`` is left alone. The conformance suite checks this.
         """
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
@@ -456,6 +466,23 @@ def iso_utc(value: Any) -> str | None:
             seconds /= 1e3
         return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
     return str(value)
+
+
+def content_state(backend: ObjectBackend, state: State | None) -> State | None:
+    """The part of a state that identifies the data: the state minus
+    ``backend.VOLATILE_KEYS``.
+
+    Everything that asks "is this the same thing?" -- drift detection, the
+    unchanged check in ``commit``, pin ids, listing names, export hashes,
+    ``promote``'s fork-point comparison -- goes through this. Everything that
+    asks "where is it?" (``open``, ``pin``, ``verify``) uses the full state.
+    """
+    if state is None:
+        return None
+    volatile = backend.VOLATILE_KEYS
+    if not volatile:
+        return state
+    return {k: v for k, v in state.items() if k not in volatile}
 
 
 def effective_capabilities(

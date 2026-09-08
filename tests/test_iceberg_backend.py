@@ -42,6 +42,7 @@ class _Store:
             )
         }
         self.metadata_location = "s3://wh/ns/t/metadata/0.json"
+        self.version = 0
 
 
 class FakeManage:
@@ -52,7 +53,11 @@ class FakeManage:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        return None
+        # Every table commit -- on any branch -- writes a new metadata.json.
+        self.store.version += 1
+        self.store.metadata_location = (
+            f"s3://wh/ns/t/metadata/{self.store.version}.json"
+        )
 
     def create_tag(self, *, snapshot_id: int, tag_name: str) -> None:
         self.store.refs[tag_name] = SnapshotRef(
@@ -63,9 +68,13 @@ class FakeManage:
         self.store.refs.pop(tag_name, None)
 
     def create_branch(self, *, snapshot_id: int, branch_name: str) -> None:
+        # pyiceberg stages a set-snapshot-ref update: creates or re-points.
         self.store.refs[branch_name] = SnapshotRef(
             snapshot_id=snapshot_id, snapshot_ref_type=SnapshotRefType.BRANCH
         )
+
+    def set_current_snapshot(self, *, snapshot_id: int) -> None:
+        self.create_branch(snapshot_id=snapshot_id, branch_name="main")
 
     def remove_branch(self, branch_name: str) -> None:
         self.store.refs.pop(branch_name, None)
@@ -190,3 +199,29 @@ def test_record_strategy_drops_pin_capability(backend: IcebergBackend) -> None:
     assert Capability.PIN not in record
     # Record strategy still verifies via snapshot retention.
     assert backend.verify(LOCATOR, {"snapshot_id": 1001}, None, deep=False).ok
+
+
+def test_unrelated_table_commits_do_not_change_the_state(
+    backend: IcebergBackend, store: _Store
+) -> None:
+    """metadata.json is rewritten on every commit; the branch's snapshot is not."""
+    before = backend.fingerprint(LOCATOR, None)
+    with FakeTable(store).manage_snapshots() as ms:  # someone else's commit
+        ms.create_tag(snapshot_id=1001, tag_name="release-1")
+    assert store.metadata_location.endswith("/1.json")
+    assert backend.fingerprint(LOCATOR, None) == before
+    assert "metadata_location" not in before
+
+
+def test_fork_onto_an_existing_name_resets_it(
+    backend: IcebergBackend, store: _Store
+) -> None:
+    store.snapshots[1002] = _Snap(1002, 1001)
+    pin = backend.pin(LOCATOR, {"snapshot_id": 1001}, "abc123def456")
+    wref = backend.fork(LOCATOR, pin, "tether.ws.dead.t")
+    store.refs[wref] = SnapshotRef(
+        snapshot_id=1002, snapshot_ref_type=SnapshotRefType.BRANCH
+    )  # writes on the fork
+    assert backend.fingerprint(LOCATOR, wref)["snapshot_id"] == 1002
+    assert backend.fork(LOCATOR, pin, "tether.ws.dead.t") == wref
+    assert backend.fingerprint(LOCATOR, wref)["snapshot_id"] == 1001  # reset
