@@ -164,6 +164,8 @@ jj repositories work through their `.git`.
 
 ## `lakefs` -- lakeFS repositories
 
+*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
+
 | | |
 | --- | --- |
 | Locator | `repository` (required; `--repository`), `branch` (default `main`), `prefix` (scopes the handle URI and the diff; pins are repository-wide) |
@@ -177,6 +179,8 @@ jj repositories work through their `.git`.
 
 ## `ducklake` -- DuckLake catalogs (DuckDB)
 
+*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
+
 | | |
 | --- | --- |
 | Locator | `metadata` (positional `uri` accepted; the `ducklake:` prefix is added if missing, e.g. `ducklake:postgres:dbname=lake`), `data_path`, `table` (scopes the handle only -- snapshots are catalog-wide) |
@@ -189,6 +193,8 @@ jj repositories work through their `.git`.
 | Notes | a DuckDB-file metadata catalog can be attached only once per process: operations attach/detach per call (serialized per catalog), and an open handle or your own writer connection in the same process blocks `status`. Postgres/SQLite/MySQL catalogs have no such limit. |
 
 ## `dolt` -- Dolt databases (MySQL protocol)
+
+*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
 
 | | |
 | --- | --- |

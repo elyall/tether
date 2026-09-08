@@ -913,7 +913,7 @@ def export(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Write tether history as relational tables for registries and SQL tools.
+    """[experimental] Write tether history as relational tables for registries.
 
     Tables: commits, commit_parents, refs, objects, object_states, plus
     listings / listing_entries (--listings) and workspace (--workspace); see
@@ -968,7 +968,7 @@ def publish(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Upsert the export tables into a Postgres schema.
+    """[experimental] Upsert the export tables into a Postgres schema.
 
     Idempotent and incremental: commits already present are skipped, `refs`
     and `tether_meta` are refreshed. Run it after each `tether commit` (or from
@@ -1044,7 +1044,7 @@ def import_(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Register or sync objects from a registry query.
+    """[experimental] Register or sync objects from a registry query.
 
     Rows carry `key`, `kind`, and any of `uri`, `locator_json`, `policy_write`,
     `policy_file`, `policy_pin`, `at`; write the mapping from your registry's

@@ -700,3 +700,40 @@ def test_ref_for_pin_helper_used_in_gc(vcs_root: Path) -> None:
     # Guard against accidental prefix drift between pin() and gc().
     assert ref_for_pin("abc") == "tether.abc"
     _ = Pin("abc", ref_for_pin("abc"))
+
+
+def test_stale_new_plan_does_not_move_the_working_copy(vcs_root: Path) -> None:
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    c1 = repo.commit("baseline").vcs_commit
+    default_store().write(system, "main", {"v": 2})
+    c2 = repo.commit("second").vcs_commit
+    assert c1 and c2
+    plan = repo.plan_new(c1)
+    # The manifests at c1 change (someone rewrote history); the plan is stale.
+    plan.context["manifest_hash"] = "not-what-is-there"
+    here = repo.vcs.current_rev()
+    with pytest.raises(StalePlanError):
+        repo.apply_new(plan)
+    assert repo.vcs.current_rev() == here  # refused before checking out c1
+
+
+def test_verify_all_history_covers_recorded_states(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"v": 1})
+    repo.add("db", "memory", {"system": system}, policy=Policy(pin="record"))
+    (vcs_root / "f.bin").write_bytes(b"x")
+    repo.add("f", "file", {"uri": str(vcs_root / "f.bin")})  # Observed: not recoverable
+    res = repo.commit("baseline")
+    assert res.pinned["db"] is None and "f" in res.unrecoverable
+
+    reports = repo.verify(all_history=True, deep=True)
+    labels = {label.split(":", 1)[1] for label in reports}
+    assert "db" in labels  # recorded, pin-less state is a promise worth checking
+    assert "f" not in labels  # Observed records are not recoverable; nothing to verify
+    assert all(r.ok for r in reports.values())

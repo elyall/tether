@@ -1021,13 +1021,19 @@ class Repo:
         if plan.command != "new":
             raise ConfigError(f"expected a new plan, got {plan.command!r}")
         rev = plan.context.get("rev")
+        if verify:
+            # Check the target *before* touching the VCS working copy, so a
+            # stale plan leaves the checkout where it was.
+            target = (
+                self._objects_at(self.vcs.resolve(str(rev))) if rev else self.objects
+            )
+            if plan.context.get("manifest_hash") != manifest_hash(target):
+                raise StalePlanError(
+                    "manifests at the target differ from the plan; re-run the plan"
+                )
         if rev:
             self.vcs.new(str(rev))
             self.objects = read_objects(self.root)
-        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
-            raise StalePlanError(
-                "manifests at the target differ from the plan; re-run the plan"
-            )
         if plan.context.get("keep"):
             self._mark_base_states(
                 set(self.workspace.working_refs) | set(self.workspace.pending_forks)
@@ -1307,8 +1313,10 @@ class Repo:
             deep: Actually open recorded states instead of the cheap check
                 (turns `UNKNOWN` into `OK` / `MISSING`).
             all_history: Verify every commit in the repository; labels become
-                `"<commit12>:<key>"`. History is streamed through one object
-                reader and each distinct record is verified once.
+                `"<commit12>:<key>"`. Pinned and recorded (pin-less) states are
+                both checked; Observed records are skipped. History is streamed
+                through one object reader and each distinct record is verified
+                once.
 
         Returns:
             A `VerifyReport` per label (object key, or commit-prefixed key).
@@ -1365,7 +1373,9 @@ class Repo:
         targets: dict[str, ObjectManifest] = {}
         for rev, objects in self._iter_history_objects():
             for key, m in objects.items():
-                if m.state is None or m.pin is None:
+                # Pinned states and recorded (Addressable / pin=record) states
+                # are both promises; Observed records are not recoverable.
+                if m.state is None or (m.pin is None and not m.recoverable):
                     continue
                 targets[f"{rev[:12]}:{key}"] = m
         return self._verify_manifests(targets, deep)

@@ -258,7 +258,11 @@ engine a per-file listing at commit time; it is stored content-addressed under
 count/size summary. `gc` removes listings no manifest references. Entries are
 capped at 2000 per object; counts are exact.
 
-## Registries and SQL
+## Registries and SQL (experimental)
+
+The commands in this section are experimental: they are tested and documented,
+but sit outside the core loop (`add -> commit -> new -> open -> verify -> gc`)
+and may change shape or be split into a separate package.
 
 Data registries keep pointers and metadata in SQL; tether keeps its facts as
 TOML in the VCS. Three commands bridge them without moving the source of

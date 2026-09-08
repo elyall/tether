@@ -48,7 +48,7 @@ cli:
     - title: Maintenance
       contents: [gc]
     - title: Registries
-      desc: Derive SQL tables from history, push them to Postgres, or import the object set from a registry.
+      desc: "Experimental: derive SQL tables from history, push them to Postgres, or import the object set from a registry."
       contents: [export, publish, import]
 
 # Releases are not published yet; enable once GitHub Releases exist.

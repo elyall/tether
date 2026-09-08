@@ -16,12 +16,14 @@ four different systems.
 
 ```bash
 tether add features --kind lance s3://bucket/features.lance
-tether add code     --kind git --set path=. --remote origin
+tether add code     --kind git ../analysis-code --remote origin
 tether commit -m "Add feature store and code"
 ```
 
-`code` pins the git repository the dataset lives in (its `HEAD` sha, as a tag),
-so a dataset commit also names the code that produced it.
+`code` pins a *separate* git repository -- the analysis code -- at its `HEAD`
+sha (as a tag), so a dataset commit also names the code that produced it. Do
+not register the repository the dataset itself lives in: every `tether commit`
+would move its sha, so it would re-pin forever.
 
 ## Fork: `tether new`
 
