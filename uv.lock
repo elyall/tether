@@ -3303,7 +3303,7 @@ wheels = [
 
 [[package]]
 name = "tether-vcs"
-version = "0.1.0a6"
+version = "0.1.0a7"
 source = { editable = "." }
 dependencies = [
     { name = "tomlkit" },

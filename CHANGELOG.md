@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a7] - 2026-09-08
+
 ### Fixed
 
 - States now separate *content* from *address*. Backends declare
