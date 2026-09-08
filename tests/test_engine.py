@@ -788,3 +788,43 @@ def test_prune_keeps_live_workspaces_automatically(
         w[:8] for w in (repo.workspace.workspace_id, other.workspace.workspace_id)
     )
     assert any("keeping live workspaces" in n for n in plan.notes)
+
+
+def test_partial_fork_records_what_succeeded(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tether.errors import BackendError, MultiObjectError
+
+    repo = Repo.init(vcs_root)
+    _mem_object(repo, "ok")
+    bad_system = _mem_object(repo, "bad")
+    repo.commit("baseline")
+
+    backend = repo.backend_for("memory")
+    real_fork = backend.fork
+
+    def flaky_fork(locator, source, name):
+        if locator["system"] == bad_system:
+            raise BackendError("quota exceeded", kind="memory")
+        return real_fork(locator, source, name)
+
+    monkeypatch.setattr(backend, "fork", flaky_fork)
+    with pytest.raises(MultiObjectError, match="could not fork working refs for bad"):
+        repo.new(eager=True)
+
+    # The branch that was created is known to the workspace, with its bookkeeping.
+    ws = Repo.find(vcs_root).workspace
+    assert ws.working_refs["ok"].startswith("tether.ws.")
+    assert "ok" in ws.fork_points and "ok" in ws.base_states
+    assert "bad" not in ws.working_refs and "bad" not in ws.pending_forks
+    store = default_store()
+    assert (
+        ws.working_refs["ok"]
+        in store.system(repo.objects["ok"].locator["system"]).branches
+    )
+
+    # Once the cause is gone, a second `new` finishes the job.
+    monkeypatch.setattr(backend, "fork", real_fork)
+    repo.new(eager=True)
+    assert set(repo.workspace.working_refs) == {"ok", "bad"}
+    assert not repo.is_stale()

@@ -38,6 +38,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recognised -- re-commit and `new`.
 - `apply_new` (`tether new --from-plan`) checks the plan against the target
   before moving the VCS working copy.
+- A `new` in which some forks fail now records the branches that were created
+  (working refs, fork points, base states) before raising, and the error says
+  which objects failed and that a second `new` completes the job. Previously
+  the successful branches existed in their systems but not in
+  `workspace.toml`.
 - `tether new REV` in git no longer leaves a detached HEAD: a branch name is
   switched to, any other revision is checked out onto a `tether/<rev12>` branch
   so the dataset commits that follow stay reachable by `gc`; `new` with no

@@ -78,6 +78,11 @@ creating a branch; it is what an idle branch *holds* and *needs*:
 | The pin is deleted before you write (`gc` on another machine) | `open` fails with `pin missing` -- the fork never happened | the branch already exists and keeps the data |
 | Pre-creating branches for a job | `Repo.materialize_fork(key)` per object, or `--eager` | automatic |
 
+If one system refuses to fork (quota, network), `new` still records the
+branches it did create and names the object that failed; run `new` again once
+the cause is gone -- existing branches are reset onto the pin, never
+duplicated.
+
 The last two rows are the same trade-off: a pin is durable, so deferring the
 fork is safe as long as the pin outlives the wait -- which it does unless
 someone drops the commit that references it and runs `gc` in between.

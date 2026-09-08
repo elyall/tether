@@ -1072,10 +1072,12 @@ class Repo:
             m = self.objects[key]
             return self._fork_from_manifest(m, forks[key].target)
 
-        try:
-            working_refs.update(self._fanout(fork_one, list(forks)))
-        except MultiObjectError as exc:
-            raise MultiObjectError("could not fork working refs", exc.errors) from None
+        # Fork concurrently; a failure for one object must not hide the branches
+        # created for the others, so record everything that succeeded before
+        # reporting what did not. A second `new` completes the job (existing
+        # branches are reset onto the pin, not duplicated).
+        forked, errors = self._fanout_collect(fork_one, list(forks))
+        working_refs.update(forked)
 
         # Keep refs of removed objects around until `gc` deletes their branches.
         leftovers = {
@@ -1089,7 +1091,7 @@ class Repo:
         fork_points = {
             k: v for k, v in self.workspace.fork_points.items() if k in leftovers
         }
-        for key in forks:
+        for key in forked:
             state = self.objects[key].state
             if state is not None:
                 fork_points[key] = dict(state)
@@ -1099,6 +1101,12 @@ class Repo:
         }
         self._mark_base_states(set(working_refs) | set(pending))
         write_workspace(self.root, self.workspace)
+        if errors:
+            raise MultiObjectError(
+                f"could not fork working refs for {', '.join(sorted(errors))} "
+                f"({len(forked)} of {len(forks)} forked and recorded; run `new` again)",
+                errors,
+            )
 
     def _fork_from_manifest(self, m: ObjectManifest, name: str) -> str:
         """Create working branch `name` from a manifest's pin (or recorded state)."""
