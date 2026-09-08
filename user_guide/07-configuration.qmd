@@ -78,22 +78,27 @@ listed in [Backends](08-backends.qmd).
 
 ```toml
 workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
-base = "3ba1c07e55d2..."             # manifest hash the working refs were forked from
 last_snapshot_at = "2026-09-04T22:10:03.118Z"
 
 [working_refs]                       # branches that exist
-"zarr/imaging" = "tether.ws.7c1e0a4d.zarr-imaging"
-"db/metrics" = "tether.ws.7c1e0a4d.db-metrics"
+"zarr/imaging" = "tether.ws.7c1e0a4d.zarr-imaging-3fa1c0"
+"db/metrics" = "tether.ws.7c1e0a4d.db-metrics-77e21d"
 
 [pending_forks]                      # decided by `new`, created on first writable open
-"features" = "tether.ws.7c1e0a4d.features"
+"features" = "tether.ws.7c1e0a4d.features-9b2e4f"
+
+[base_states."zarr/imaging"]         # committed state this working ref corresponds to
+snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
+
+[fork_points."zarr/imaging"]         # base state when the branch was forked (for promote)
+snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 
 [last_snapshot."zarr/imaging"]
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 ```
 
-`base` drives stale-working-copy detection; `working_refs` are what `open`
-writes to; `pending_forks` are the branches `new` decided on but has not
+`base_states` drive stale-working-copy detection (per object); `working_refs`
+are what `open` writes to; `pending_forks` are the branches `new` decided on but has not
 created (the first writable `open` moves an entry to `working_refs`);
 `last_snapshot` is what `--no-snapshot` reuses.
 

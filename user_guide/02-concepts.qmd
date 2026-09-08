@@ -98,11 +98,28 @@ aside. You read and write with the system's own library.
 
 ## Stale working copies
 
-`tether new` records the manifest hash it forked from. If HEAD's manifests
-later change (someone committed, you switched revisions), the workspace is
-*stale*: `status` says so and writable `open` refuses with
-`StaleWorkingCopyError` until you `tether new` again. This is jj's
+For every working ref, the workspace remembers the committed state it was
+forked from (or last committed at by this workspace). If that object's
+manifest now records a different state -- a teammate committed, or you `jj
+new`'d to another revision -- the fork no longer starts where the dataset says
+it does: that object is *stale*. `status` names the stale objects and writable
+`open` refuses with `StaleWorkingCopyError` until you `tether new` again. It is
+per object and per workspace: your own commits never make you stale,
+registering or removing *other* objects changes nothing, and `track` objects
+(which write to the base branch) are never stale. This is jj's
 stale-working-copy check applied to external branches.
+
+## Content and address
+
+A state is a small dict, but its keys do two different jobs. *Content* keys
+say what the data is (an Icechunk snapshot id, a Neon `next_xid`, a git sha).
+*Address* keys say where to find or cut it and can move without the data
+changing: Neon's `lsn` advances on checkpoints, git's `change_id` exists only
+when jj is installed. Backends declare the address keys as `VOLATILE_KEYS`;
+drift detection, the unchanged check in `commit`, pin ids, listing names, and
+`promote`'s comparisons use only the content, while `open`, `pin`, and
+`verify` get the whole state. Iceberg's `metadata_location`, which changes on
+every table commit on any branch, is not in the state at all.
 
 ## Drift
 

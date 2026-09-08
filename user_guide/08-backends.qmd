@@ -98,9 +98,9 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Locator | `project_id` (required), `branch` (default `main`), `database`, `role` (used for connection URIs) |
 | Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2) |
 | Identity | `{project_id, branch, database, role}` |
-| State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch; `next_xid` is the real change signal, LSN moves on its own; `branch` names the timeline the LSN belongs to) |
+| State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
-| Fork | a child branch of the pin; `open` writable creates a `read_write` endpoint lazily |
+| Fork | a child branch of the pin; re-forking an existing working branch restores it onto the source (Neon branch restore); `open` writable creates a `read_write` endpoint lazily |
 | Quiescence | `commit` refuses while `pg_stat_activity` shows active writers (`--force` skips) |
 | Handle | `NeonHandle(url, branch)` -- a Postgres connection URL |
 | Diff | not supported (no native primitive) |
@@ -116,7 +116,7 @@ jj repositories work through their `.git`.
 | Locator | `path` (local checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
 | Config | `git_path`, `jj_path` |
 | Identity | `{path}` (resolved absolute) |
-| State | `sha`, `dirty`, and `change_id` when the repo is a jj repo |
+| State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available, volatile so the same sha pins identically with or without jj |
 | Pin | lightweight tag `tether.<id>` at the sha (pushed to `remote` if set) |
 | Fork | branch `name` at the tag's sha (`branch -f` if it exists) |
 | Handle | `GitHandle(path, sha, worktree)` |
@@ -130,9 +130,9 @@ jj repositories work through their `.git`.
 | Locator | `identifier` (`ns.table`; `table` accepted), `branch` (default `main`), `catalog_name` (default `default`), `catalog` (dict of pyiceberg catalog properties, or set once in config) |
 | Config | `catalog = {...}` pyiceberg properties (`type`, `uri`, `warehouse`, ...) |
 | Identity | `{identifier, branch, catalog_name}` |
-| State | `snapshot_id`, `metadata_location` |
+| State | `snapshot_id` (nothing else: `metadata_location` changes on every table commit on any branch) |
 | Pin | `--pin native` (default): tag `tether.<id>`; `--pin record`: no native ref, the snapshot id alone (drops `PIN`; recoverable only within snapshot retention -- for S3 Tables and other catalogs where user refs disable maintenance) |
-| Fork | `create_branch(name, snapshot_id)` |
+| Fork | `create_branch(name, snapshot_id)`; re-forking an existing name re-points it (a `set-snapshot-ref` update) |
 | Handle | `IcebergHandle(table, ref, snapshot_id)` |
 | Diff | `snapshots`: one entry per snapshot on `b`'s ancestry back to `a`, from snapshot summaries (`append: +5 rows, +1 files`); when `a` is not an ancestor, `total-*` counters are compared instead |
 

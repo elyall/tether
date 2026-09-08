@@ -343,23 +343,26 @@ consistent.
 
 ## Stale working copies
 
-If HEAD's manifests change under you -- a teammate committed, or you `jj new`
-to another revision -- the forks were taken from a state that is no longer
-current:
+If an object's committed manifest changes under you -- a teammate committed
+it, or you `jj new` to another revision where it is pinned differently -- your
+fork of it was taken from a state that is no longer the dataset's:
 
 ```bash
 tether status
 ```
 
 ```
-dataset 9d0e5f71ac22 (STALE)
+dataset 9d0e5f71ac22 (STALE: zarr/imaging)
   ...
 ```
 
 ```bash
 tether open zarr/imaging
-error: working copy is stale (HEAD manifests changed since fork); run `tether new` to refork before writing
+error: working copy is stale: the committed state of zarr/imaging changed since this workspace forked; run `tether new` to refork before writing
 ```
+
+Staleness is per object: the other forks stay writable, your own commits never
+make you stale, and adding or removing unrelated objects does not clear it.
 
 `tether new` re-decides from the current pins and clears the flag. Everything
 you *committed* is safe: those pins are tags, independent of any branch. Writes

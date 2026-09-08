@@ -160,7 +160,7 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 | `commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
 | `new <rev>` | checkout + **fork** decision per object; the branch is created on the first writable `open` (`--eager`: during `new`) |
 | `squash --into main` | **promote**: fast-forward each system's base branch to the fork, or native-merge where the system can (lakeFS, Dolt, git) |
-| stale working copy | manifest hash recorded at fork; differs from HEAD => refuse writes |
+| stale working copy | per object: the committed state a fork was taken from is recorded; a manifest that now says otherwise => refuse writes to that object |
 | bookmarks / op log / undo / workspaces / push | delegated to the VCS |
 | `.dvc` files | `.tether/objects/<key>.toml` (committed) |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff (files, tables, arrays, fragments, commits) |
@@ -215,9 +215,9 @@ the locator's `at` field: `tether add --at <id>` / `--pick`).
 | `file` (S3 / GCS / Azure object) | Addressable | size, etag, version_id | -- | -- | `CHEAP`; `--file versioned` on a versioning-enabled bucket; one `HEAD` |
 | `file` (S3 / GCS / Azure prefix) | Observed | count, size, etag digest | -- | -- | `CHEAP`; one paged `LIST`, no per-object calls |
 | `icechunk` | Forkable | snapshot_id | tag | branch | `ATOMIC_REF`, `PROMOTE` (fast-forward via `reset_branch`; no merge); tags immutable, excluded from expiry |
-| `neon` | Forkable | lsn, next_xid, branch | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE`; no merge/promote, leaf-only gc, quotas |
+| `neon` | Forkable | next_xid, branch (+ lsn, volatile) | protected child branch of the state's branch @ parent_lsn | child of pin | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE`; no merge/promote, leaf-only gc, quotas |
 | `git` / `jj` | Forkable | sha, change_id, dirty | tag (pushed if `remote`) | branch | `CHEAP`, `ATOMIC_REF`; local path only for now |
-| `iceberg` | Forkable | snapshot_id, metadata_location | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`, `PROMOTE` (no merge); `record` for S3 Tables (no native ref) |
+| `iceberg` | Forkable | snapshot_id | tag (`native`) or recorded id (`record`) | branch | `RETENTION_BOUND`, `PROMOTE` (no merge); `record` for S3 Tables (no native ref) |
 | `delta` | Addressable | version, table_id | -- | -- | `CHEAP`, `RETENTION_BOUND`; no native tags; `VACUUM`/log retention bound readability |
 | `lance` | Forkable | branch, version | tag on (branch, version) | branch | `ATOMIC_REF`; tagged versions exempt from cleanup; version numbers are branch-scoped |
 | `lakefs` | Forkable | commit_id (+ dirty) | tag | branch | `CHEAP`, `ATOMIC_REF`, `PROMOTE`, `MERGE`; repo-wide pins, `prefix` scopes the handle |
@@ -344,9 +344,9 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
   while its pins exist, `gc` only drops leaf pins, and fork-per-`new` deepens the
   tree. Neon cannot merge/promote a child into `main`; use `--write track` on
   `main` for production. `protected` needs a paid plan; branch quotas vary.
-- **Neon fingerprint noise/cost.** LSN moves without user writes (`next_xid` is
-  the real change signal); snapshot may wake a suspended compute. Use
-  `--no-snapshot` to skip.
+- **Neon fingerprint cost.** The LSN moves without user writes, so it is a
+  volatile (address-only) key: only `next_xid` and the branch count as change.
+  A snapshot may still wake a suspended compute; use `--no-snapshot` to skip.
 - **Files on unversioned storage** are Observed: detectably but not recoverably
   drifted. Bucket/container versioning promotes single objects to Addressable;
   prefixes stay Observed (tether does not record per-object version ids).

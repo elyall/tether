@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- States now separate *content* from *address*. Backends declare
+  `VOLATILE_KEYS` and `tether.backends.base.content_state()` strips them for
+  drift detection, the unchanged check in `commit`, pin ids, listing names,
+  export hashes, and `promote`'s comparisons; `open` / `pin` / `verify` still
+  get the full state. Neon's `lsn` (moves on checkpoints) and git's
+  `change_id` (present only with jj) are volatile; Iceberg's
+  `metadata_location` (rewritten by every table commit on any branch) is no
+  longer part of the state at all. Before this, unrelated Iceberg commits and
+  Neon checkpoints showed as drift and created duplicate pins, and the same
+  git sha pinned differently with and without jj installed.
+- git `dirty` is computed only for the checked-out ref; a dirty worktree no
+  longer marks every other branch of the repository as modified.
+- `fork()` onto an existing branch name now resets it to the source on every
+  backend (Iceberg via a `set-snapshot-ref` update, Neon via branch restore);
+  the conformance suite checks it. Neon `pin()` refuses an existing pin branch
+  that hangs off a different parent or LSN instead of reusing it.
+- Stale-workspace detection is per object. Each working ref records the
+  committed state it was forked from or last committed at
+  (`WorkspaceState.base_states`); an object is stale exactly when its manifest
+  says something else. Registering or removing other objects no longer
+  silently un-stales a workspace, `track` objects are never stale, and
+  `status` / `StaleWorkingCopyError` name the objects. `workspace.base` is
+  gone; export schema_version 3 (`workspace.base_state_json`).
+- Working-ref names end in a 6-hex digest of the key
+  (`tether.ws.<ws8>.<slug>-<key6>`), so keys that slugify alike no longer
+  share a branch. Pin ids are 16 hex chars (were 12). Both change native ref
+  names; existing pins and working branches from earlier alphas are not
+  recognised -- re-commit and `new`.
+- `apply_new` (`tether new --from-plan`) checks the plan against the target
+  before moving the VCS working copy.
+- `verify --all-history` now checks recorded (pin-less) states as well as
+  pins; Observed records are still skipped.
+- The branching guide registered the dataset's own repository as a `git`
+  object, which re-pins on every dataset commit; it now uses a separate repo.
+
+### Changed
+
+- `export`, `publish`, `import` and the lakeFS, Dolt, and DuckLake backends are
+  labelled experimental in the CLI help, README, and guide.
+- `StatusReport.stale_keys` and `Repo.stale_keys()` list the stale objects.
+
 ## [0.1.0a6] - 2026-09-07
 
 ### Added
