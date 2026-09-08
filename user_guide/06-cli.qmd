@@ -43,7 +43,11 @@ one message listing each object.
 
 `REV` arguments are passed to the enclosing VCS untouched: jj revsets (`@`,
 `@-`, `main`, change ids) in a jj repository, git revisions (`HEAD~2`, tags,
-shas) in a git repository.
+shas) in a git repository. `tether new REV` in git switches to `REV` when it
+is a branch and otherwise checks the commit out onto a new `tether/<rev12>`
+branch, so the dataset commits you make there stay reachable (a detached
+HEAD would let `gc` treat them as gone); `tether new` with no revision is a
+no-op in git.
 
 ## Environment
 

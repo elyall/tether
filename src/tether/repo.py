@@ -1165,7 +1165,8 @@ class Repo:
         skipped. Forks run concurrently.
 
         Args:
-            rev: Move the VCS working copy here first (`jj new` / `git checkout`)
+            rev: Move the VCS working copy here first (`jj new`; in git, `switch`
+                to a branch or onto a `tether/<rev12>` branch for a commit)
                 and reload the manifests; `None` keeps the current commit.
             keep: Only refresh the stale-detection baseline; keep working refs.
             eager: Create every branch now; default `config.new_fork == "eager"`.

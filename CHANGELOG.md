@@ -38,6 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recognised -- re-commit and `new`.
 - `apply_new` (`tether new --from-plan`) checks the plan against the target
   before moving the VCS working copy.
+- `tether new REV` in git no longer leaves a detached HEAD: a branch name is
+  switched to, any other revision is checked out onto a `tether/<rev12>` branch
+  so the dataset commits that follow stay reachable by `gc`; `new` with no
+  revision is a documented no-op in git (jj creates a fresh empty change).
 - `verify --all-history` now checks recorded (pin-less) states as well as
   pins; Observed records are still skipped.
 - The branching guide registered the dataset's own repository as a `git`

@@ -126,3 +126,48 @@ def test_detect_prefers_jj_when_colocated(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     assert vcs.kind in ("git", "jj")
     assert Path(vcs.root) == vcs_root
+
+
+def test_new_never_leaves_git_detached(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "tether.toml", "v=1\n")
+    c1 = vcs.commit(["tether.toml"], "first")
+    _write(vcs_root, "tether.toml", "v=2\n")
+    c2 = vcs.commit(["tether.toml"], "second")
+
+    vcs.new(None)  # jj: fresh empty change on top; git: no-op
+    if vcs.kind == "git":
+        assert vcs.resolve("HEAD") == c2
+
+    # Back to the first commit, then commit on top of it.
+    vcs.new(c1)
+    _write(vcs_root, "tether.toml", "v=3\n")
+    c3 = vcs.commit(["tether.toml"], "third, off the first")
+    assert c3 not in (c1, c2)
+    assert {c1, c2, c3} <= set(vcs.history_revs())  # all still reachable
+    if vcs.kind == "git":
+        import subprocess
+
+        head = subprocess.run(
+            ["git", "-C", str(vcs_root), "symbolic-ref", "--short", "-q", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == f"tether/{c1[:12]}"  # attached, not detached
+        # Re-running new on the same commit reuses the branch when it is still
+        # there; a moved-on branch gets a sibling instead of being reset.
+        vcs.new(c1)
+        assert vcs.resolve("HEAD") == c1 or vcs.resolve("HEAD") == c3
+        branches = subprocess.run(
+            ["git", "-C", str(vcs_root), "branch", "--list", f"tether/{c1[:12]}*"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert f"tether/{c1[:12]}" in branches
+        # A branch name switches to that branch.
+        default = subprocess.run(
+            ["git", "-C", str(vcs_root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert default

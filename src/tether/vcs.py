@@ -365,7 +365,15 @@ class VcsAdapter(Protocol):
         """Commit the given paths with ``message``; return the new commit id."""
 
     def new(self, rev: str | None) -> None:
-        """Start a fresh working-copy commit on ``rev`` (or the current tip)."""
+        """Move the working copy so the next ``commit`` lands on top of ``rev``.
+
+        jj: ``jj new REV`` (a fresh empty change; ``None`` means on top of the
+        current one). git has no empty-commit primitive: a branch name is
+        switched to; any other revision is checked out onto a new branch
+        ``tether/<rev12>`` so the commits that follow stay reachable (a
+        detached HEAD would let ``gc`` treat them as gone); ``None`` is a
+        no-op -- the next commit lands on the current branch.
+        """
 
 
 # --------------------------------------------------------------------------- #
@@ -696,8 +704,31 @@ class GitAdapter:
         return self.current_rev()
 
     def new(self, rev: str | None) -> None:
-        if rev is not None:
-            self._git("checkout", rev)
+        if rev is None:
+            return  # git has no empty working-copy commit; stay on the branch
+        is_branch = self._git(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{rev}", check=False
+        )
+        if is_branch.returncode == 0 and is_branch.stdout.strip():
+            self._git("switch", rev)
+            return
+        # A commit, tag, or other commit-ish: never leave HEAD detached, or the
+        # dataset commits made here become unreachable the moment the user
+        # switches away. Park them on a branch named after the base commit.
+        sha = self.resolve(rev)
+        name = f"tether/{sha[:12]}"
+        for n in range(2, 1000):
+            existing = self._git(
+                "rev-parse", "--verify", "--quiet", f"refs/heads/{name}", check=False
+            )
+            if existing.returncode != 0:
+                self._git("switch", "-c", name, sha)
+                return
+            if existing.stdout.strip() == sha:
+                self._git("switch", name)
+                return
+            name = f"tether/{sha[:12]}-{n}"  # taken and moved on; start a sibling
+        raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
 
 
 # --------------------------------------------------------------------------- #

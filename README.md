@@ -105,7 +105,7 @@ states into the manifests, and runs `jj commit` / `git commit` on them. Every
 tether status                       # fan-out: modified / unpinned / drifted per object
 tether commit -m "Baseline imaging + metrics"   # pins, writes manifests, jj/git commit
 jj log                              # the dataset's history *is* the repo's history
-tether new main                     # jj new main / git checkout main; working branches are decided (created on first write)
+tether new main                     # jj new main / git switch main; working branches are decided (created on first write)
 tether open db/metrics              # -> postgresql://...tether.ws.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
 tether promote                      # move each system's main to the fork: fast-forward, native merge, or refuse with a recipe
