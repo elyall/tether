@@ -74,6 +74,7 @@ reference:
         - AbandonReport
         - PromoteReport
         - UndoReport
+        - UndoToReport
         - RepairReport
         - UpgradeReport
         - DiffEntry

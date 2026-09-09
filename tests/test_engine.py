@@ -1302,3 +1302,54 @@ def test_abandon_frees_the_pins_only_those_commits_referenced(vcs_root: Path) ->
     assert p3.id not in backend.list_pins(locator)
     assert repo.objects["db"].pin == p1
     assert p1.id in backend.list_pins(locator)
+
+
+def test_undo_to_walks_back_through_several_operations(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    anchor = repo.ops()[0]  # the state right after this commit is the goal
+    manifest = repo.objects["db"]
+
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 2})
+    repo.commit("work")
+    repo.add("other", "memory", {"system": system, "branch": "main"})
+
+    walk = repo.undo_to(anchor.id)
+    assert walk.complete and [r.op.command for r in walk.reports] == [
+        "add",
+        "commit",
+        "new",
+    ]
+    assert "other" not in repo.objects
+    assert wref not in store.system(system).branches  # new's branch deleted
+    # The "work" commit is uncommitted, not reverted: the VCS is back at the
+    # anchor and the manifest change sits in the working tree with its pin.
+    parent = "@-" if repo.vcs.kind == "jj" else "HEAD"
+    assert repo.vcs.resolve(parent) == anchor.result["vcs_commit"]
+    assert repo.objects["db"].pin != manifest.pin and repo.vcs.dirty(repo._vcs_paths())
+    assert "db" not in repo.workspace.working_refs
+    assert [e.command for e in repo.ops()[:3]] == ["undo", "undo", "undo"]
+    by_id = {e.id: e for e in repo.ops()}
+    assert all(by_id[r.op.id].undone_by == r.undo_id for r in walk.reports)
+    assert by_id[anchor.id].undone_by is None  # the target itself stays
+
+    # A non-undoable op (promote) stops the walk; what came before it in the
+    # walk stays undone and the report says where it stopped.
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 3})
+    repo.commit("more work")
+    repo.promote(["db"])
+    repo.add("third", "memory", {"system": system, "branch": "main"})
+    walk = repo.undo_to(anchor.id)
+    assert not walk.complete
+    assert [r.op.command for r in walk.reports] == ["add"]
+    assert walk.stopped_at is not None and walk.stopped_at.command == "promote"
+    assert "only fast-forwards" in str(walk.reason)
+    assert "third" not in repo.objects
+    with pytest.raises(TetherError, match="no operation"):
+        repo.undo_to("nope00000000")

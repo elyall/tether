@@ -102,8 +102,11 @@ says exactly what it could not reverse:
 | `import` / `add` / `remove` | restores the manifests |
 | `promote` | is refused, with the previous base heads printed for a manual reset; backends only fast-forward |
 
-A branch that gained writes since the operation is never deleted or reset
-silently: `undo` refuses until you commit them or pass `--discard`. The same
+`tether undo --to ID` walks back through every newer operation in turn -- the
+per-operation-delta version of `jj op restore`, which stops where a store
+will not follow. A branch that gained writes since the operation is never
+deleted or reset silently: `undo` refuses until you commit them or pass
+`--discard`. The same
 rule applies to `new` itself -- a working branch holding writes you never
 committed is only reset with `--discard`.
 

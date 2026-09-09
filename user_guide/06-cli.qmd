@@ -24,7 +24,7 @@ tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIN
 tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
 tether abandon REV... [--gc]
 tether ops [-n N]
-tether undo [OP_ID] [--discard]
+tether undo [OP_ID | --to OP_ID] [--discard]
 tether repair [--all-history] [--dry-run | --plan FILE | --from-plan FILE]
 tether upgrade [--ignore-immutable] [--dry-run | --plan FILE | --from-plan FILE]
 tether export PATH [--rev REV]... [--format sqlite|parquet|csv|jsonl] [--listings] [--workspace] [--append]
@@ -232,6 +232,16 @@ cannot come back and are printed as `IRREVERSIBLE` (exit `2`). `import`,
 previous base heads printed. A branch that gained writes since the operation
 is refused until you commit them or pass `--discard`.
 
+`tether undo --to OP_ID` is the closest thing to `jj op restore`: it undoes
+every operation newer than `OP_ID`, newest first, and reports each. jj's log
+stores whole views so a restore is one exact jump; tether's stores per-op
+deltas, so the walk reverses each step and stops -- keeping what it already
+reversed -- at the first operation that cannot be undone (`promote`,
+`upgrade`, `abandon`, or a branch with new writes and no `--discard`). A
+partial undo along the way (a `gc` whose pins are gone) is recorded and the
+walk continues, since older operations are unaffected. Exit code `2` unless
+every step was complete.
+
 `tether repair` rebuilds what the manifests promise: a pin whose native ref is
 missing is recreated from the recorded state (if the store still has it); a
 working branch this workspace expects but the store lost is forked again.
@@ -348,6 +358,7 @@ per-table counts.
 | `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
 | `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by"}]`, newest first |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
+| `undo --to` | `{"to": op id, "undone": [{"op", "command", "undo_id", "restored", "irreversible", "skipped"}], "stopped_at": op id or null, "reason"}` |
 | `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |
 | `upgrade` | `{"from_version", "to_version", "renamed_pins": {old ref: new ref}, "renamed_branches": {old: new}, "rewritten_commits": {old id: new id}, "failed": {target: reason}, "vcs_commit"}`; with `--dry-run`: the plan |
 | plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |

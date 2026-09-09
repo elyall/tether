@@ -53,6 +53,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
   place because pins are branches with children) are new.
+- **`tether undo --to OP_ID`** (`Repo.undo_to`): undo every operation newer
+  than `OP_ID`, newest first -- the per-delta counterpart of `jj op restore`.
+  Stops, keeping what it reversed, at the first operation that cannot be
+  undone or refuses; partial undos are recorded and the walk continues.
 - **`tether abandon REV... [--gc]`** (`Repo.abandon`): drop dataset commits
   from VCS history and show -- or with `--gc` apply -- the `gc` plan for the
   pins only they referenced. Descendants keep their manifests exactly as they

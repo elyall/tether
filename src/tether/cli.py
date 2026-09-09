@@ -733,6 +733,13 @@ def undo(
     op_id: str | None = typer.Argument(
         None, help="Operation id from `tether ops`; default: the newest undoable one."
     ),
+    to: str | None = typer.Option(
+        None,
+        "--to",
+        metavar="OP_ID",
+        help="Undo every operation newer than OP_ID, newest first (like `jj op "
+        "restore`); stops at the first one that cannot be reversed.",
+    ),
     discard: bool = typer.Option(
         False,
         "--discard",
@@ -747,10 +754,58 @@ def undo(
     restore workspace.toml and the VCS working copy. gc: recreate deleted
     branches and listings; deleted pins are irreversible (see `repair`).
     import/add/remove: restore the manifests. promote: refused, with the
-    previous base heads printed. Exit code 2 when part of the operation could
-    not be reversed; the rest was.
+    previous base heads printed. `--to OP_ID` walks back through every newer
+    operation. Exit code 2 when part of the work could not be reversed; the
+    rest was.
     """
     repo = _repo()
+    if to is not None:
+        if op_id is not None:
+            _fail(TetherError("pass either OP_ID or --to, not both"))
+        try:
+            walk = repo.undo_to(to, discard=discard)
+        except TetherError as exc:
+            _fail(exc)
+        if json_out:
+            _emit(
+                {
+                    "to": walk.target.id,
+                    "undone": [
+                        {
+                            "op": r.op.id,
+                            "command": r.op.command,
+                            "undo_id": r.undo_id,
+                            "restored": r.restored,
+                            "irreversible": r.irreversible,
+                            "skipped": r.skipped,
+                        }
+                        for r in walk.reports
+                    ],
+                    "stopped_at": walk.stopped_at.id if walk.stopped_at else None,
+                    "reason": walk.reason,
+                },
+                as_json=True,
+            )
+        else:
+            for r in walk.reports:
+                typer.echo(f"undid {r.op.id} ({r.op.command}: {r.op.summary()})")
+                for line in r.restored:
+                    typer.echo(f"  restored   {line}")
+                for line in r.irreversible:
+                    typer.secho(f"  IRREVERSIBLE {line}", err=True)
+            if walk.stopped_at is not None:
+                typer.secho(
+                    f"stopped at {walk.stopped_at.id} ({walk.stopped_at.command}): "
+                    f"{walk.reason}",
+                    err=True,
+                )
+            elif not walk.reports:
+                typer.echo(f"nothing newer than {walk.target.id} to undo")
+            else:
+                typer.echo(f"back to the state after {walk.target.id}")
+        if not walk.complete:
+            raise typer.Exit(2)
+        return
     try:
         report = repo.undo(op_id, discard=discard)
     except TetherError as exc:

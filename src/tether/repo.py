@@ -274,6 +274,27 @@ class UndoReport:
 
 
 @dataclass
+class UndoToReport:
+    """What `Repo.undo_to` reversed on the way back to an operation.
+
+    Attributes:
+        target: The operation whose *after* state was the goal.
+        reports: One `UndoReport` per operation reversed, newest first.
+        stopped_at: The operation the walk could not get past, if any.
+        reason: Why it stopped there.
+    """
+
+    target: OpEntry
+    reports: list[UndoReport] = field(default_factory=list)
+    stopped_at: OpEntry | None = None
+    reason: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.stopped_at is None and all(r.complete for r in self.reports)
+
+
+@dataclass
 class DiffEntry:
     """One object's row in `Repo.diff`."""
 
@@ -2579,6 +2600,43 @@ class Repo:
         )
         report.undo_id = entry.id
         mark_undone(self.root, target.id, entry.id)
+        return report
+
+    def undo_to(self, op_id: str, *, discard: bool = False) -> UndoToReport:
+        """Undo every operation newer than `op_id`, newest first.
+
+        The closest thing to `jj op restore`: jj's log stores whole views, so
+        a restore is one exact jump; tether's stores per-operation deltas, so
+        getting back to the state after `op_id` means reversing each later
+        operation in turn. Entries that are undos, or already undone, are
+        skipped. The walk stops -- with everything reversed so far kept -- at
+        the first operation that is not undoable (`promote`, `gc` pins,
+        `upgrade`, `abandon`) or refuses (a branch with new writes and no
+        `discard`); a *partial* undo (some parts irreversible) is recorded and
+        the walk continues, since older operations are unaffected by it.
+
+        Raises:
+            TetherError: `op_id` is not in this workspace's log.
+        """
+        entries = self.ops()
+        try:
+            idx = next(i for i, e in enumerate(entries) if e.id == op_id)
+        except StopIteration:
+            raise TetherError(
+                f"no operation {op_id!r} in this workspace's log"
+            ) from None
+        report = UndoToReport(target=entries[idx])
+        for e in entries[:idx]:
+            if e.undoes is not None or e.undone_by is not None:
+                continue
+            if not e.undoable:
+                report.stopped_at, report.reason = e, f"{e.command} cannot be undone"
+                break
+            try:
+                report.reports.append(self.undo(e.id, discard=discard))
+            except TetherError as exc:
+                report.stopped_at, report.reason = e, str(exc)
+                break
         return report
 
     def _reload(self) -> None:

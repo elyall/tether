@@ -643,3 +643,33 @@ def test_cli_abandon(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     r = runner.invoke(app, ["ops"])
     assert "abandon" in r.output.splitlines()[1]
+
+
+def test_cli_undo_to(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+    anchor = json.loads(runner.invoke(app, ["ops", "-n", "1", "--json"]).output)[0][
+        "id"
+    ]
+    assert runner.invoke(app, ["new", "--eager"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "x", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["undo", "--to", anchor])
+    assert r.exit_code == 0, r.output
+    assert (
+        r.output.count("undid") == 2 and f"back to the state after {anchor}" in r.output
+    )
+    assert "x" not in Repo.find(vcs_root).objects
+    r = runner.invoke(app, ["undo", "--to", anchor])
+    assert r.exit_code == 0 and "nothing newer" in r.output
+    r = runner.invoke(app, ["undo", "someid", "--to", anchor])
+    assert r.exit_code == 1 and "not both" in r.output
