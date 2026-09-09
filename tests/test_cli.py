@@ -673,3 +673,30 @@ def test_cli_undo_to(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 0 and "nothing newer" in r.output
     r = runner.invoke(app, ["undo", "someid", "--to", anchor])
     assert r.exit_code == 1 and "not both" in r.output
+
+
+def test_cli_restore(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    s1 = store.system(system).branches["main"]
+    r = runner.invoke(app, ["commit", "-m", "v1", "--json"])
+    c1 = json.loads(r.output)["vcs_commit"]
+    store.write(system, "main", {"v": 2})
+    assert runner.invoke(app, ["commit", "-m", "v2"]).exit_code == 0
+    r = runner.invoke(app, ["new", "--eager", "--json"])
+    wref = json.loads(r.output)["working_refs"]["db"]
+    assert store.resolve(system, wref) != s1
+    r = runner.invoke(app, ["restore", "db", "--from", c1, "--dry-run"])
+    assert r.exit_code == 0 and "fork" in r.output and wref in r.output
+    r = runner.invoke(app, ["restore", "db", "--from", c1])
+    assert r.exit_code == 0, r.output
+    assert f"db -> {wref}" in r.output and store.resolve(system, wref) == s1
+    r = runner.invoke(app, ["status", "--json"])
+    assert json.loads(r.output)["stale"] is False

@@ -155,6 +155,9 @@ class OpEntry:
             if rev:
                 bits.append(f"at {rev}")
             return "; ".join(bits) or "working refs unchanged"
+        if self.command == "restore":
+            keys = sorted({*(r.get("created") or []), *(r.get("reset") or [])})
+            return f"restored {', '.join(keys)} from {str(r.get('from_commit'))[:12]}"
         if self.command == "fork":
             return f"forked {r.get('key')} -> {r.get('ref')}"
         if self.command == "gc":

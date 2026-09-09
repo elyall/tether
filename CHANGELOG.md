@@ -53,6 +53,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
   place because pins are branches with children) are new.
+- **`tether restore KEY... --from REV`** (`plan_restore` / `apply_restore` /
+  `restore`): the per-object `jj restore --from` -- reset one object's working
+  branch to what `REV` pinned, leaving the other branches, the manifests, and
+  the VCS working copy alone. Not stale afterwards (the next `commit` pins
+  the restore); the fork point moves to `REV`'s state so `promote` sees a
+  moved base as a divergence. Refused for a branch with unpinned writes
+  unless `--discard`; undoable.
 - **`tether undo --to OP_ID`** (`Repo.undo_to`): undo every operation newer
   than `OP_ID`, newest first -- the per-delta counterpart of `jj op restore`.
   Stops, keeping what it reversed, at the first operation that cannot be

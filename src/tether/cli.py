@@ -898,6 +898,59 @@ def repair(
 
 
 @app.command()
+def restore(
+    keys: list[str] = typer.Argument(
+        ..., help="Objects whose working branch to reset."
+    ),
+    rev: str = typer.Option(
+        ..., "--from", "-f", help="Revision whose pins to restore."
+    ),
+    discard: bool = typer.Option(
+        False, "--discard", help="Reset even if the branch holds uncommitted writes."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show the plan; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None,
+        "--from-plan",
+        help="Apply a plan saved with --plan instead of replanning.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Reset an object's working branch to what an older commit pinned.
+
+    The per-object `jj restore --from REV`: only KEY's branch moves; the rest of
+    the workspace and the manifests stay. The object is not stale afterwards --
+    the next `commit` pins what you restored -- and `promote` treats the branch
+    as forked from REV. Refused if the branch holds writes you never committed,
+    unless `--discard`.
+    """
+    repo = _repo()
+    try:
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "restore")
+            done = repo.apply_restore(plan)
+        else:
+            plan = repo.plan_restore(keys, rev, discard=discard)
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+            done = repo.apply_restore(plan, verify=False)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit({"from": rev, "working_refs": done}, as_json=True)
+        return
+    for key, ref in sorted(done.items()):
+        typer.echo(f"{key} -> {ref}  (from {rev})")
+
+
+@app.command()
 def abandon(
     revs: list[str] = typer.Argument(..., help="Revisions to drop from history."),
     gc: bool = typer.Option(

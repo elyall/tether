@@ -2389,6 +2389,160 @@ class Repo:
         plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
         return self.apply_promote(plan, verify=False)
 
+    # -- restore --------------------------------------------------------- #
+    def plan_restore(
+        self, keys: Sequence[str], rev: str, *, discard: bool = False
+    ) -> Plan:
+        """Compute what re-forking `keys` from the pins at `rev` would do.
+
+        The per-object `jj restore --from REV`: the object's working branch is
+        reset onto (or created from) what `rev`'s manifest pinned, while the
+        rest of the workspace and the working-tree manifests stay put. The
+        object is *not* stale afterwards -- the next `commit` pins what was
+        restored -- but `promote` sees the branch's fork point move to `rev`'s
+        state, so a moved base is a divergence, not a fast-forward. A branch
+        holding unpinned writes is refused unless `discard`.
+
+        Args:
+            keys: Objects to restore.
+            rev: Revision whose manifests to take the pins from.
+            discard: Reset a branch even if it holds unpinned writes.
+
+        Raises:
+            ConfigError: A key is not registered.
+        """
+        commit = self.vcs.resolve(rev)
+        then = self._objects_at(commit)
+        plan = Plan(
+            command="restore",
+            context={
+                "from_rev": rev,
+                "from_commit": commit,
+                "discard": discard,
+                "manifest_hash": self.current_manifest_hash(),
+                "workspace_id": self.workspace.workspace_id,
+            },
+        )
+        for key in keys:
+            now = self.objects.get(key)
+            if now is None:
+                raise ConfigError(f"no such object: {key}")
+            m = then.get(key)
+            backend = self.backend_for(now.kind)
+            eff = effective_capabilities(backend, now.locator, now.policy)
+            refuse: str | None = None
+            if m is None:
+                refuse = f"not registered at {rev}"
+            elif Capability.FORK not in eff or now.policy.write == "track":
+                refuse = "no working branch to restore (not Forkable, or write=track)"
+            elif m.state is None:
+                refuse = f"nothing committed at {rev}"
+            elif m.pin is None and Capability.ADDRESSABLE not in eff:
+                refuse = f"no pin at {rev} and the backend cannot fork from a state"
+            if refuse is not None:
+                plan.actions.append(Action("refuse", key, now.kind, detail=refuse))
+                continue
+            assert m is not None and m.state is not None
+            existing = self.workspace.working_refs.get(key)
+            name = (
+                existing
+                or self.workspace.pending_forks.get(key)
+                or self._working_ref_for(key)
+            )
+            params: dict[str, Any] = {"then": m.to_toml(), "then_state": m.state}
+            detail = f"from {rev}: {m.pin.ref if m.pin else _short_state(m.state)}"
+            if existing is not None:
+                head = self._branch_has_new_writes(key, existing)
+                params["existing"] = existing
+                params["head"] = self.workspace.last_snapshot.get(key)
+                with contextlib.suppress(TetherError):
+                    params["head"] = backend.fingerprint(now.locator, existing)
+                detail += f"; resets {existing}"
+                if head is not None and not discard:
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            now.kind,
+                            target=existing,
+                            detail=f"{existing} has writes since this workspace last "
+                            f"committed ({_short_state(head)}); commit them, or pass "
+                            "--discard to throw them away",
+                        )
+                    )
+                    continue
+                if head is not None:
+                    detail += f", discarding its writes ({_short_state(head)})"
+            plan.actions.append(
+                Action("fork", key, now.kind, target=name, detail=detail, params=params)
+            )
+        return plan
+
+    def apply_restore(self, plan: Plan, *, verify: bool = True) -> dict[str, str]:
+        """Execute a plan from `plan_restore`; returns key -> working ref.
+
+        Raises:
+            TetherError: The plan carries a `refuse`, or a pin at the source
+                revision is gone.
+            StalePlanError: The manifests changed since the plan was made.
+        """
+        if plan.command != "restore":
+            raise ConfigError(f"expected a restore plan, got {plan.command!r}")
+        refused = [a for a in plan.actions if a.op == "refuse"]
+        if refused:
+            raise TetherError(
+                "cannot restore:\n"
+                + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
+            )
+        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
+            raise StalePlanError(
+                "manifests changed since the plan was made; re-run the plan"
+            )
+        forks = [a for a in plan.actions if a.op == "fork"]
+        pre = {
+            "workspace": self.workspace.to_toml(),
+            "heads": {
+                a.key: a.params.get("head") for a in forks if a.params.get("existing")
+            },
+        }
+        done: dict[str, str] = {}
+        for a in forks:
+            m = ObjectManifest.from_toml(str(a.params["then"]))
+            ref = self._fork_from_manifest(m, a.target)
+            done[a.key] = ref
+            self.workspace.working_refs[a.key] = ref
+            self.workspace.pending_forks.pop(a.key, None)
+            self.workspace.fork_points[a.key] = dict(a.params["then_state"])
+            self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
+        # What the branch now holds is deliberate: it corresponds to the
+        # working tree's manifest as far as staleness is concerned.
+        self._mark_base_states(done)
+        write_workspace(self.root, self.workspace)
+        self._log_op(
+            "restore",
+            plan=plan,
+            result={
+                "created": sorted(
+                    k
+                    for k, a in ((a.key, a) for a in forks)
+                    if not a.params.get("existing")
+                ),
+                "reset": sorted(a.key for a in forks if a.params.get("existing")),
+                "working_refs": done,
+                "from_commit": plan.context.get("from_commit"),
+            },
+            pre=pre,
+        )
+        return done
+
+    def restore(
+        self, keys: Sequence[str], rev: str, *, discard: bool = False
+    ) -> dict[str, str]:
+        """Re-fork `keys` from the pins at `rev` (see `plan_restore`)."""
+        return self.apply_restore(
+            self.plan_restore(keys, rev, discard=discard), verify=False
+        )
+
     # -- abandon --------------------------------------------------------- #
     def abandon(self, revs: Sequence[str], *, gc: bool = False) -> AbandonReport:
         """Drop dataset commits from VCS history and show (or release) what that frees.
@@ -2573,6 +2727,7 @@ class Repo:
         handler = {
             "commit": self._undo_commit,
             "new": self._undo_new,
+            "restore": self._undo_new,
             "fork": self._undo_fork,
             "gc": self._undo_gc,
             "promote": self._undo_promote,

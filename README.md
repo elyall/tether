@@ -127,6 +127,7 @@ jj squash --from <first-try>::<last-try> --into <result>   # drop intermediate d
 tether gc                           # dry run: pins no commit references, orphaned listings (never branches)
 tether gc --no-dry-run
 tether gc --prune-workspaces --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned (live jj workspaces / git worktrees are kept); --force-prune for the rest
+tether restore db/metrics --from main~2     # reset one object's working branch to an older commit's pin; nothing else moves
 tether abandon REV --gc                     # drop dataset commits and release the pins only they referenced
 tether ops                                  # what tether did to the stores, newest first
 tether undo                                 # reverse the newest entry where the store allows it (a commit -> uncommitted; a new -> branches gone)

@@ -44,7 +44,7 @@ cli:
       contents: [status, snapshot, diff, log, verify]
     - title: Record and branch
       desc: Pin state into commits and fork writable branches.
-      contents: [commit, new, open, promote]
+      contents: [commit, new, open, restore, promote]
     - title: Maintenance
       desc: Reclaim native refs, and see or reverse what tether did.
       contents: [gc, abandon, ops, undo, repair, upgrade]

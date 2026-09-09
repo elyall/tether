@@ -17,6 +17,7 @@ tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
 tether new [REV] [--keep] [--eager | --lazy] [--discard] [--dry-run | --plan FILE | --from-plan FILE]
 tether open KEY [-r REV] [--read-only | --writable]
+tether restore KEY... --from REV [--discard] [--dry-run | --plan FILE | --from-plan FILE]
 tether promote [KEY]... [-r REV] [--strategy auto|ff|merge] [-m MESSAGE] [--dry-run | --plan FILE | --from-plan FILE]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
@@ -162,7 +163,7 @@ plan: commit (2 write(s))
 ```
 
 Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new);
-`fast-forward`, `merge`, `refuse` (promote); `unpin`,
+`fork`, `refuse` (restore); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
 `add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
 (repair); `rename-pin`, `rename-branch`, `rewrite-history` (upgrade);
@@ -280,6 +281,18 @@ are only rewritten with `--ignore-immutable`. A store rename that fails is
 reported and the exit code is `2`; the manifests still carry the new names,
 so `tether repair` recreates the pin from its recorded state afterwards.
 
+## What `restore` does
+
+`tether restore KEY... --from REV` is the per-object `jj restore --from`: it
+resets (or creates) `KEY`'s working branch from what `REV`'s manifest pinned
+and touches nothing else -- other objects' branches, the working-tree
+manifests, and the VCS working copy stay. The object is *not* stale
+afterwards: the next `commit` pins what you restored. Its fork point moves to
+`REV`'s state, so `promote` treats a base that moved since as a divergence
+(merge or refuse), not a fast-forward. A branch holding writes you never
+committed is refused unless `--discard`; `undo` puts the branch back to the
+head it had. Plan/apply like the others.
+
 ## What `promote` does
 
 Per Forkable object, compares the base branch to the fork point recorded when
@@ -351,6 +364,7 @@ per-table counts.
 | `new` | `{"working_refs": {key: ref}, "pending_forks": {key: ref}, "fork_points": {key: state}}`; with `--dry-run`: the plan |
 | `promote` | `{"fast_forwarded": {key: state}, "merged": {key: state}, "skipped": [keys], "refused": {key: reason}, "conflicts": {key: [units]}}`; with `--dry-run`: the plan |
 | `open` | `{"key", "read_only", "address", "type"}` |
+| `restore` | `{"from": rev, "working_refs": {key: ref}}`; with `--dry-run`: the plan |
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |

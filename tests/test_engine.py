@@ -1353,3 +1353,61 @@ def test_undo_to_walks_back_through_several_operations(vcs_root: Path) -> None:
     assert "third" not in repo.objects
     with pytest.raises(TetherError, match="no operation"):
         repo.undo_to("nope00000000")
+
+
+def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    other = _mem_object(repo, "other")
+    store = default_store()
+    s1 = store.write(system, "main", {"v": 1})
+    repo.commit("v1")
+    c1 = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
+    s2 = store.write(system, "main", {"v": 2})
+    store.write(other, "main", {"o": 2})
+    repo.commit("v2")
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    oref = repo.workspace.working_refs["other"]
+    assert store.resolve(system, wref) == s2
+
+    # Only db goes back to v1; other's branch, the manifests, and the VCS stay.
+    plan = repo.plan_restore(["db"], c1)
+    (fork,) = plan.actions
+    assert fork.op == "fork" and fork.target == wref and "resets" in fork.detail
+    done = repo.apply_restore(plan)
+    assert done == {"db": wref}
+    assert store.resolve(system, wref) == s1
+    assert store.resolve(other, oref) == store.system(other).branches["main"]
+    assert repo.objects["db"].state == {"snapshot_id": s2}  # manifest untouched
+    assert not repo.is_stale()  # deliberate: the next commit pins the restore
+    assert repo.workspace.fork_points["db"] == {"snapshot_id": s1}
+    assert repo.ops()[0].command == "restore"
+    # promote now sees a divergence (base at s2, fork point s1): a merge, not
+    # a fast-forward.
+    pr = repo.plan_promote(["db"])
+    assert [a.op for a in pr.actions] == ["merge"], pr.actions
+    # Committing pins the restored state under db.
+    store.write(system, wref, {"v": "restored+"})
+    repo.commit("back to v1 and on")
+    assert repo.objects["db"].state == {"snapshot_id": store.resolve(system, wref)}
+
+    # Writes on the branch block a restore without --discard; undo puts the
+    # branch back where it was before the restore.
+    s_scratch = store.write(system, wref, {"v": "scratch"})
+    plan = repo.plan_restore(["db"], c1)
+    assert [a.op for a in plan.actions] == ["refuse"]
+    with pytest.raises(TetherError, match="cannot restore"):
+        repo.apply_restore(plan)
+    repo.restore(["db"], c1, discard=True)
+    assert store.resolve(system, wref) == s1
+    report = repo.undo()
+    assert report.op.command == "restore" and report.complete
+    assert store.resolve(system, wref) == s_scratch  # recorded head restored
+
+    # Not registered at that commit, or track policy: refused in the plan.
+    with pytest.raises(ConfigError):
+        repo.plan_restore(["nope"], c1)
+    repo.add("late", "memory", {"system": _mem_object(repo, "tmp") and system})
+    plan = repo.plan_restore(["late"], c1)
+    assert plan.actions[0].op == "refuse" and "not registered" in plan.actions[0].detail
