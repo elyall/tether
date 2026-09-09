@@ -217,3 +217,33 @@ def test_rewrite_history_rewrites_files_and_keeps_the_shape(vcs_root: Path) -> N
         )
     # Idempotent: nothing left to rewrite.
     assert vcs.rewrite_history("ds/.tether/objects", transform) == {}
+
+
+def test_abandon_keeps_descendant_manifests_as_snapshots(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "ds/.tether/objects/db.toml", "state = 1\n")
+    _write(vcs_root, "notes.txt", "a\n")
+    c1 = vcs.commit(["ds/.tether/objects", "notes.txt"], "one")
+    _write(vcs_root, "ds/.tether/objects/db.toml", "state = 2\n")
+    _write(vcs_root, "notes.txt", "a\nb\n")
+    c2 = vcs.commit(["ds/.tether/objects", "notes.txt"], "two")
+    _write(vcs_root, "ds/.tether/objects/db.toml", "state = 3\n")
+    c3 = vcs.commit(["ds/.tether/objects"], "three")
+
+    # Dropping the middle commit: a patch-rebase of `three` onto `one` would
+    # conflict on db.toml (both rewrite the same line). The manifest must come
+    # out exactly as `three` had it; notes.txt follows the VCS's own rebase.
+    assert vcs.abandon([c2], "ds/.tether/objects") == [c2]
+    revs = vcs.history_revs()
+    assert c2 not in revs and c1 in revs and c3 not in revs  # c3 was rebased
+    tip = vcs.resolve("@-" if vcs.kind == "jj" else "HEAD")
+    assert vcs.read_file_at(tip, "ds/.tether/objects/db.toml") == "state = 3\n"
+    assert vcs.read_file_at(tip, "notes.txt") == "a\n"  # two's edit is gone
+    assert not vcs.dirty(["ds/.tether/objects"])
+    assert (vcs_root / "ds/.tether/objects/db.toml").read_text() == "state = 3\n"
+
+    # Dropping the tip: the working tree goes back to its parent's manifests.
+    vcs.abandon([tip], "ds/.tether/objects")
+    tip2 = vcs.resolve("@-" if vcs.kind == "jj" else "HEAD")
+    assert tip2 == c1
+    assert (vcs_root / "ds/.tether/objects/db.toml").read_text() == "state = 1\n"

@@ -235,6 +235,22 @@ class RepairReport:
 
 
 @dataclass
+class AbandonReport:
+    """What `Repo.abandon` did.
+
+    Attributes:
+        abandoned: Commit ids dropped from VCS history.
+        gc_plan: What `gc` would release now that those commits are gone (the
+            pins only they referenced).
+        gc_report: The applied gc, when `gc=True`.
+    """
+
+    abandoned: list[str] = field(default_factory=list)
+    gc_plan: Plan | None = None
+    gc_report: GcReport | None = None
+
+
+@dataclass
 class UndoReport:
     """What `Repo.undo` reversed, could not reverse, and left alone.
 
@@ -2351,6 +2367,46 @@ class Repo:
         """
         plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
         return self.apply_promote(plan, verify=False)
+
+    # -- abandon --------------------------------------------------------- #
+    def abandon(self, revs: Sequence[str], *, gc: bool = False) -> AbandonReport:
+        """Drop dataset commits from VCS history and show (or release) what that frees.
+
+        The VCS half is `jj abandon` / a git rebase that removes the commits;
+        descendants keep their manifests exactly as they were (a manifest is a
+        whole-state record, so removing an earlier commit must not change a
+        later one). The store half is the `gc` plan afterwards: pins that only
+        the dropped commits referenced are now unreferenced. With `gc`, that
+        plan is applied in the same call.
+
+        Logged as `abandon`; not undoable by tether (the VCS's own undo or
+        reflog brings the commits back, and `repair` the pins).
+
+        Args:
+            revs: Revisions to drop (any VCS revset / revision syntax).
+            gc: Also release the newly unreferenced pins.
+
+        Raises:
+            VcsError: The revision cannot be abandoned (git: not on the current
+                branch, dirty tree, or a conflict outside the dataset).
+        """
+        pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
+        ids = self.vcs.abandon(list(revs), self._objects_reldir())
+        self._manifest_cache.clear()
+        self.objects = read_objects(self.root)
+        gc_plan = self.plan_gc()
+        report = AbandonReport(abandoned=ids, gc_plan=gc_plan)
+        self._log_op(
+            "abandon",
+            result={
+                "abandoned": ids,
+                "unreferenced": [a.target for a in gc_plan.actions if a.op == "unpin"],
+            },
+            pre=pre,
+        )
+        if gc and not gc_plan.is_empty:
+            report.gc_report = self.apply_gc(gc_plan)
+        return report
 
     # -- upgrade --------------------------------------------------------- #
     def plan_upgrade(self, *, ignore_immutable: bool = False) -> Plan:

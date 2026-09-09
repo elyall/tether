@@ -608,3 +608,38 @@ def test_cli_upgrade(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["upgrade"])
     assert r.exit_code == 0 and "already at version 2" in r.output
+
+
+def test_cli_abandon(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
+    store.write(system, "main", {"v": 2})
+    r = runner.invoke(app, ["commit", "-m", "v2", "--json"])
+    assert r.exit_code == 0, r.output
+    c2 = json.loads(r.output)["vcs_commit"]
+    p2 = json.loads(r.output)["pinned"]["db"]
+    store.write(system, "main", {"v": 3})
+    assert runner.invoke(app, ["commit", "-m", "v3"]).exit_code == 0
+
+    r = runner.invoke(app, ["abandon", c2])
+    assert r.exit_code == 0, r.output
+    assert f"abandoned {c2[:12]}" in r.output and "unpin" in r.output and p2 in r.output
+    assert "not applied" in r.output
+    assert p2.removeprefix("tether.") in Repo.find(vcs_root).backend_for(
+        "memory"
+    ).list_pins({"system": system})
+    r = runner.invoke(app, ["gc", "--no-dry-run", "--json"])
+    assert (
+        r.exit_code == 0
+        and p2.removeprefix("tether.") in json.loads(r.output)["unpinned"]["memory"]
+    )
+    r = runner.invoke(app, ["ops"])
+    assert "abandon" in r.output.splitlines()[1]

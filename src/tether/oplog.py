@@ -126,7 +126,7 @@ class OpEntry:
         return (
             self.undoes is None
             and self.undone_by is None
-            and self.command not in ("undo", "repair", "upgrade")
+            and self.command not in ("undo", "repair", "upgrade", "abandon")
         )
 
     def summary(self) -> str:
@@ -178,6 +178,9 @@ class OpEntry:
                 f"repinned {len(r.get('repinned') or [])}, reforked "
                 f"{len(r.get('reforked') or [])}"
             )
+        if self.command == "abandon":
+            ids = ", ".join(str(c)[:12] for c in r.get("abandoned") or [])
+            return f"abandoned {ids}; {len(r.get('unreferenced') or [])} pin(s) freed"
         if self.command == "upgrade":
             return (
                 f"v{r.get('from_version')} -> v{r.get('to_version')}: "

@@ -1262,3 +1262,43 @@ def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:
     sys_.tags[pin2.ref] = store.write(system, "main", {"v": "elsewhere"})
     plan = repo.plan_repair()
     assert plan.is_empty and any("drifted" in n for n in plan.notes)
+
+
+def test_abandon_frees_the_pins_only_those_commits_referenced(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    backend = repo.backend_for("memory")
+    locator = {"system": system}
+    repo.commit("v1")
+    p1 = repo.objects["db"].pin
+    store.write(system, "main", {"v": 2})
+    c2 = repo.commit("v2").vcs_commit
+    p2 = repo.objects["db"].pin
+    store.write(system, "main", {"v": 3})
+    repo.commit("v3")
+    p3 = repo.objects["db"].pin
+    assert p1 and p2 and p3 and c2
+
+    # Drop the middle commit: v3's manifest is untouched, v2's pin is freed.
+    report = repo.abandon([c2])
+    assert report.abandoned == [c2] and report.gc_plan is not None
+    assert [a.target for a in report.gc_plan.actions if a.op == "unpin"] == [p2.ref]
+    assert p2.id in backend.list_pins(locator)  # not released without gc=True
+    assert repo.objects["db"].pin == p3 and not repo.is_stale()
+    seen = {
+        m.pin.ref for _r, o in repo._iter_history_objects() for m in o.values() if m.pin
+    }
+    assert seen == {p1.ref, p3.ref}
+    assert repo.ops()[0].command == "abandon" and not repo.ops()[0].undoable
+    with pytest.raises(TetherError, match="cannot undo"):
+        repo.undo()
+
+    # Drop the tip with gc: the manifest reverts to v1 and v3's pin is gone.
+    tip = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
+    report = repo.abandon([tip], gc=True)
+    assert report.gc_report is not None
+    assert set(report.gc_report.unpinned["memory"]) == {p2.id, p3.id}  # p2 was pending
+    assert p3.id not in backend.list_pins(locator)
+    assert repo.objects["db"].pin == p1
+    assert p1.id in backend.list_pins(locator)

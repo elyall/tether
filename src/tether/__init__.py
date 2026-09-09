@@ -61,6 +61,7 @@ from tether.plan import Action, Plan
 from tether.registry import ImportSpec
 from tether.repo import (
     TETHER_REV_ENV,
+    AbandonReport,
     CommitResult,
     DiffEntry,
     GcReport,
@@ -75,6 +76,7 @@ from tether.repo import (
 
 __all__ = [
     "TETHER_REV_ENV",
+    "AbandonReport",
     "Action",
     "BackendError",
     "CapabilityError",

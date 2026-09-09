@@ -88,6 +88,30 @@ on the archive-quality store, use `record` on the scratch ones.
 Suppose an experiment produced five commits, and only the last matters. Every
 one of the four intermediate commits holds pins.
 
+The one-step way is `tether abandon`: it drops the commits in the VCS and
+shows the `gc` plan for what that freed, in the same breath.
+
+```bash
+tether abandon krlwtmzy ptnwqsyu        # jj change ids, or git shas
+```
+
+```
+abandoned 3c1e9f0a2b7d, 8d2f4a1b9c0e
+plan: gc (2 write(s))
+               unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
+(not applied; `tether gc --no-dry-run` releases these, or re-run with --gc)
+```
+
+Later commits keep their manifests exactly as they were -- a manifest records
+a whole state, so removing an earlier one must not conflict with it (a plain
+`jj abandon` or `git rebase` would). Under git the commits must be on the
+current branch and the tree clean. The abandon itself is the VCS's to undo
+(`jj undo`, the reflog); tether's `undo` refuses it, and if you bring the
+commits back before running `gc` nothing was lost.
+
+The VCS's own tools work too, followed by `tether gc`:
+
 ::: {.panel-tabset}
 
 ### jj

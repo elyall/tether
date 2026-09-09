@@ -843,6 +843,52 @@ def repair(
 
 
 @app.command()
+def abandon(
+    revs: list[str] = typer.Argument(..., help="Revisions to drop from history."),
+    gc: bool = typer.Option(
+        False, "--gc", help="Also release the pins only those commits referenced."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Drop dataset commits from VCS history and see what that frees.
+
+    `jj abandon` / a git rebase, with one difference: later commits keep their
+    manifests exactly as they were (a manifest records a whole state, so it
+    must not conflict with the removal of an earlier one). Then the `gc` plan:
+    pins that only the dropped commits referenced. Without `--gc` nothing is
+    released -- run `tether gc --no-dry-run` when ready (undoing the abandon
+    in jj/git first brings the pins back into use). Not undoable by tether.
+    """
+    repo = _repo()
+    try:
+        report = repo.abandon(revs, gc=gc)
+    except TetherError as exc:
+        _fail(exc)
+    assert report.gc_plan is not None
+    if json_out:
+        _emit(
+            {
+                "abandoned": report.abandoned,
+                "gc_plan": report.gc_plan.to_dict(),
+                "gc_applied": report.gc_report is not None,
+            },
+            as_json=True,
+        )
+        return
+    typer.echo("abandoned " + ", ".join(c[:12] for c in report.abandoned))
+    if report.gc_report is not None:
+        _print_gc_report(report.gc_report)
+    elif report.gc_plan.is_empty:
+        typer.echo("nothing became unreferenced")
+    else:
+        _show_plan(report.gc_plan, as_json=False)
+        typer.echo(
+            "(not applied; `tether gc --no-dry-run` releases these, "
+            "or re-run with --gc)"
+        )
+
+
+@app.command()
 def upgrade(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what the upgrade would do; write nothing."
@@ -995,6 +1041,10 @@ def gc(
             as_json=True,
         )
         return
+    _print_gc_report(report)
+
+
+def _print_gc_report(report: GcReport) -> None:
     total = sum(len(v) for v in report.unpinned.values())
     typer.echo(f"unpinned {total} pin(s)")
     for kind, ids in report.unpinned.items():

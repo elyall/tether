@@ -53,6 +53,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
   place because pins are branches with children) are new.
+- **`tether abandon REV... [--gc]`** (`Repo.abandon`): drop dataset commits
+  from VCS history and show -- or with `--gc` apply -- the `gc` plan for the
+  pins only they referenced. Descendants keep their manifests exactly as they
+  were (a manifest is a whole-state record; the VCS's own rebase would
+  conflict on it). `VcsAdapter.abandon(revs, keep_dir)` is new: jj abandons
+  then rewrites the descendants' manifests back; git rebases with conflicts
+  under the dataset resolved to the original content, then a fix-up pass.
+  Logged; not undoable by tether.
 - **`tether new --discard`.** `new` now fingerprints every working branch it
   would reset and refuses -- before touching the VCS or any store -- when a
   head holds writes beyond what this workspace last committed or forked at.

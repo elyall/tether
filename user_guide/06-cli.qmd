@@ -22,6 +22,7 @@ tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
 tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
+tether abandon REV... [--gc]
 tether ops [-n N]
 tether undo [OP_ID] [--discard]
 tether repair [--all-history] [--dry-run | --plan FILE | --from-plan FILE]
@@ -191,6 +192,17 @@ Both sweeps stay inside this dataset's namespace: pins and branches whose
 name carries another dataset's id are counted in the plan's notes (`N pin(s)
 of other datasets left alone`) and never touched, `--force-prune` included.
 
+## `abandon`
+
+`tether abandon REV...` is `jj abandon` / a git rebase that drops the commits,
+plus the `gc` plan for the pins only they referenced. Later commits keep
+their manifests exactly as they were (snapshot, not patch, semantics -- the
+VCS's own rebase would conflict on them). Nothing is released unless `--gc`;
+`tether gc --no-dry-run` does it later. Under git the commits must be on the
+current branch and the tree clean; a conflict outside `.tether/` aborts. Not
+undoable by tether -- `jj undo` / the reflog bring the commits back, `repair`
+the pins.
+
 ## `ops`, `undo`, `repair`
 
 Every command that writes to a store appends an entry to this workspace's
@@ -333,6 +345,7 @@ per-table counts.
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
+| `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
 | `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by"}]`, newest first |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
 | `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |

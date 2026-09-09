@@ -368,6 +368,22 @@ class VcsAdapter(Protocol):
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
 
+    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+        """Drop ``revs`` from history, rebasing their descendants -- except that
+        every descendant keeps the files under ``keep_dir`` exactly as they
+        were (snapshot, not patch, semantics: a manifest records a whole state,
+        so a later commit's manifest must survive the removal of an earlier
+        one untouched instead of conflicting with it). Returns the commit ids
+        that were abandoned.
+
+        jj: ``jj abandon`` then rewrite the descendants' ``keep_dir`` files
+        back (which also resolves the conflicts jj recorded there). git: the
+        commits must be on the current branch and the tree clean; ``rebase
+        --onto`` with conflicts under ``keep_dir`` resolved to the original
+        content, then a fix-up pass so every descendant's ``keep_dir`` matches
+        what it held before.
+        """
+
     def rewrite_history(
         self,
         reldir: str,
@@ -723,6 +739,46 @@ class JjAdapter:
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
 
+    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+        ids = [self.resolve(r) for r in revs]
+        union = " | ".join(ids)
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--reversed",
+            "-r",
+            f"descendants({union}) ~ ({union})",
+            "-T",
+            'change_id ++ "\\n"',
+        )
+        descendants = [c for c in out.stdout.split() if c]
+        before = {c: self.files_at(c, keep_dir) for c in descendants}
+        start = self.position()
+        self._jj("abandon", *ids)
+        # Snapshot semantics for keep_dir: put every descendant's files back.
+        # The working-copy change is a descendant too, but an *empty* one only
+        # inherited its files; it follows its new parent instead.
+        wc = start["id"]
+        for change in descendants:
+            files = before[change]
+            if change == wc:
+                if not start.get("empty"):
+                    for path, text in files.items():
+                        (self.root / path).write_text(text, encoding="utf-8")
+                continue
+            if self.files_at(change, keep_dir) == files:
+                continue
+            self._jj("new", change)
+            for path, text in files.items():
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text(text, encoding="utf-8")
+            self._jj("squash", "-u")
+        if descendants and descendants[-1] != wc:
+            # `jj new` moved the working copy; go back (the old @ may have
+            # been abandoned as empty, so land on its rebased parent).
+            self.goto({**self.position(), "empty": True})
+        return ids
+
     def rewrite_history(
         self,
         reldir: str,
@@ -927,6 +983,77 @@ class GitAdapter:
                 return
             name = f"tether/{sha[:12]}-{n}"  # taken and moved on; start a sibling
         raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
+
+    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+        status = self._git("status", "--porcelain", "--untracked-files=no")
+        if status.stdout.strip():
+            raise VcsError("git: commit or stash your changes before abandoning")
+        ids = [self.resolve(r) for r in revs]
+        done: list[str] = []
+        for commit in ids:
+            head = self.current_rev()
+            if commit in done:
+                continue
+            anc = self._git("merge-base", "--is-ancestor", commit, head, check=False)
+            if anc.returncode != 0:
+                raise VcsError(
+                    f"git: {commit[:12]} is not on the current branch; tether can "
+                    "only abandon commits of the checked-out history"
+                )
+            parent = self._git(
+                "rev-parse", "--verify", "--quiet", f"{commit}^", check=False
+            ).stdout.strip()
+            if not parent:
+                raise VcsError(f"git: cannot abandon the root commit {commit[:12]}")
+            descendants = self._git(
+                "rev-list", "--reverse", f"{commit}..{head}"
+            ).stdout.split()
+            before = {d: self.files_at(d, keep_dir) for d in descendants}
+            if not descendants:
+                self._git("reset", "--hard", parent)
+                done.append(commit)
+                continue
+            self._rebase_dropping(commit, parent, before, keep_dir)
+            # Fix-up: every descendant's keep_dir exactly as it was.
+            new_descendants = self._git(
+                "rev-list", "--reverse", f"{parent}..HEAD"
+            ).stdout.split()
+            desired = dict(
+                zip(new_descendants, (before[d] for d in descendants), strict=True)
+            )
+            self.rewrite_history(
+                keep_dir, lambda c, files, want=desired: want.get(c, files)
+            )
+            done.append(commit)
+        return ids
+
+    def _rebase_dropping(
+        self, commit: str, parent: str, before: dict[str, dict[str, str]], keep_dir: str
+    ) -> None:
+        env = {"GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
+        run = self._git("rebase", "--onto", parent, commit, check=False, env=env)
+        while run.returncode != 0:
+            in_progress = self._git(
+                "rev-parse", "--verify", "--quiet", "REBASE_HEAD", check=False
+            )
+            if in_progress.returncode != 0:
+                raise VcsError(f"git rebase failed: {run.stderr.strip()}")
+            original = in_progress.stdout.strip()
+            conflicted = self._git(
+                "diff", "--name-only", "--diff-filter=U"
+            ).stdout.split()
+            outside = [f for f in conflicted if not f.startswith(f"{keep_dir}/")]
+            if outside or original not in before:
+                self._git("rebase", "--abort", check=False)
+                raise VcsError(
+                    "git: abandoning conflicts outside the dataset "
+                    f"({', '.join(outside) or original[:12]}); resolve by hand"
+                )
+            for path, text in before[original].items():
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text(text, encoding="utf-8")
+            self._git("add", "--", keep_dir)
+            run = self._git("rebase", "--continue", check=False, env=env)
 
     def rewrite_history(
         self,
