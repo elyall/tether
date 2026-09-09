@@ -49,9 +49,9 @@ app = typer.Typer(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def _repo() -> Repo:
+def _repo(*, allow_outdated: bool = False) -> Repo:
     try:
-        return Repo.find(".")
+        return Repo.find(".", allow_outdated=allow_outdated)
     except TetherError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -838,6 +838,84 @@ def repair(
             typer.echo(f"note      {note}")
         for target, why in sorted(report.failed.items()):
             typer.secho(f"FAILED    {target}: {why}", err=True)
+    if report.failed:
+        raise typer.Exit(2)
+
+
+@app.command()
+def upgrade(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what the upgrade would do; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None,
+        "--from-plan",
+        help="Apply a plan saved with --plan instead of replanning.",
+    ),
+    ignore_immutable: bool = typer.Option(
+        False,
+        "--ignore-immutable",
+        help="jj: also rewrite commits jj marks immutable (pushed history).",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Bring a dataset made by an older tether up to this version.
+
+    Runs every pending migration in order (see `tether.migrations`), writing
+    the new `[tether] version` after each. When a migration changes how native
+    refs are named it renames them in every store and rewrites every historical
+    manifest to match, so `gc` keeps seeing the same pins from both sides.
+    Rewriting history changes commit ids: every other clone must re-sync
+    afterwards. Run `--dry-run` first. Exit code 2 if a store rename failed
+    (the manifests still got the new names; `tether repair` recreates them).
+    """
+    repo = _repo(allow_outdated=True)
+    try:
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "upgrade")
+        else:
+            plan = repo.plan_upgrade(ignore_immutable=ignore_immutable)
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+        report = repo.apply_upgrade(plan)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "from_version": report.from_version,
+                "to_version": report.to_version,
+                "renamed_pins": report.renamed_pins,
+                "renamed_branches": report.renamed_branches,
+                "rewritten_commits": report.rewritten_commits,
+                "failed": report.failed,
+                "vcs_commit": report.vcs_commit,
+            },
+            as_json=True,
+        )
+    else:
+        if report.from_version == report.to_version:
+            typer.echo(f"already at version {report.to_version}")
+        else:
+            typer.echo(f"upgraded v{report.from_version} -> v{report.to_version}")
+        for old, new in sorted(report.renamed_pins.items()):
+            typer.echo(f"  pin     {old} -> {new}")
+        for old, new in sorted(report.renamed_branches.items()):
+            typer.echo(f"  branch  {old} -> {new}")
+        if report.rewritten_commits:
+            typer.echo(
+                f"  rewrote {len(report.rewritten_commits)} commit(s); other clones "
+                "must re-sync"
+            )
+        if report.vcs_commit:
+            typer.echo(f"  commit  {report.vcs_commit[:12]}")
+        for target, why in sorted(report.failed.items()):
+            typer.secho(f"  FAILED  {target}: {why}", err=True)
     if report.failed:
         raise typer.Exit(2)
 

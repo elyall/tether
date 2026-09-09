@@ -67,6 +67,11 @@ class _NeonApi:
         if resp.status_code not in (200, 404):
             resp.raise_for_status()
 
+    def patch(self, path: str, body: dict) -> dict:
+        resp = self._client.patch(path, json=body)
+        resp.raise_for_status()
+        return resp.json()
+
 
 class NeonBackend(ObjectBackend):
     kind = "neon"
@@ -321,6 +326,27 @@ class NeonBackend(ObjectBackend):
             branch["parent_lsn"] = lsn
         self._api.post(f"/projects/{project_id}/branches", {"branch": branch})
         return name
+
+    def _rename_branch(self, project_id: str, old: str, new: str) -> None:
+        br = self._require_branch(project_id, old)
+        self._api.patch(
+            f"/projects/{project_id}/branches/{br['id']}", {"branch": {"name": new}}
+        )
+
+    def rename_pin(self, locator: Locator, old: Pin, state: State, new_id: str) -> Pin:
+        # A pin is a branch; working branches forked from it are its children,
+        # so pin-then-unpin would fail. Rename in place.
+        project_id = self._project(locator)
+        new_ref = ref_for_pin(new_id)
+        if self._branch_by_name(project_id, new_ref) is None:
+            self._rename_branch(project_id, old.ref, new_ref)
+        elif self._branch_by_name(project_id, old.ref) is not None:
+            self.unpin(locator, old)  # duplicate of an existing pin: drop it
+        return Pin(id=new_id, ref=new_ref)
+
+    def rename_working_ref(self, locator: Locator, old: str, new: str) -> str:
+        self._rename_branch(self._project(locator), old, new)
+        return new
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         project_id = self._project(locator)

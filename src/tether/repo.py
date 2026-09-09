@@ -47,6 +47,7 @@ from tether.errors import (
 from tether.export import ExportBundle, build_bundle
 from tether.handles import Handle
 from tether.manifest import (
+    CONFIG_VERSION,
     ObjectManifest,
     Pin,
     Policy,
@@ -75,6 +76,7 @@ from tether.manifest import (
     write_object,
     write_workspace,
 )
+from tether.migrations import UpgradeReport, pending
 from tether.oplog import OpEntry, append_op, mark_undone, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
@@ -323,7 +325,23 @@ class Repo:
         root: Path,
         config: RepoConfig,
         vcs: VcsAdapter,
+        *,
+        allow_outdated: bool = False,
     ) -> None:
+        if config.version > CONFIG_VERSION:
+            raise ConfigError(
+                f"tether.toml is version {config.version}, newer than this tether "
+                f"understands ({CONFIG_VERSION}); upgrade tether-vcs"
+            )
+        if config.version < CONFIG_VERSION and not allow_outdated:
+            steps = ", ".join(
+                f"v{m.version} {m.title}" for m in pending(config.version)
+            )
+            raise ConfigError(
+                f"tether.toml is version {config.version}; this tether expects "
+                f"{CONFIG_VERSION}. Run `tether upgrade --dry-run`, then "
+                f"`tether upgrade` (pending: {steps})"
+            )
         self.root = root
         self.config = config
         self.vcs = vcs
@@ -377,11 +395,17 @@ class Repo:
         return repo
 
     @classmethod
-    def find(cls, path: Path | str = ".") -> Repo:
+    def find(cls, path: Path | str = ".", *, allow_outdated: bool = False) -> Repo:
         """Open the dataset whose `tether.toml` is at or above `path`.
 
+        Args:
+            path: Anywhere inside the dataset.
+            allow_outdated: Open a dataset whose `[tether] version` is older
+                than this tether's (only `upgrade` should).
+
         Raises:
-            ConfigError: If no dataset root is found.
+            ConfigError: If no dataset root is found, or the dataset's version
+                is not this tether's (run `tether upgrade`).
         """
         root = find_dataset_root(Path(path))
         if root is None:
@@ -393,7 +417,7 @@ class Repo:
             git_path=config.vcs.get("git_path"),
             prefer=str(config.vcs.get("prefer", "jj")),
         )
-        return cls(root, config, vcs)
+        return cls(root, config, vcs, allow_outdated=allow_outdated)
 
     # -- internals ------------------------------------------------------- #
     def backend_for(self, kind: str) -> ObjectBackend:
@@ -2328,6 +2352,96 @@ class Repo:
         plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
         return self.apply_promote(plan, verify=False)
 
+    # -- upgrade --------------------------------------------------------- #
+    def plan_upgrade(self, *, ignore_immutable: bool = False) -> Plan:
+        """Compute what bringing this dataset to the current version would do.
+
+        Runs the plan step of every pending `tether.migrations.Migration`, in
+        order. Actions: `rename-pin` / `rename-branch` (native refs in the
+        stores), `rewrite-history` (historical manifests get the new names),
+        `vcs-commit`. Nothing is written.
+
+        Args:
+            ignore_immutable: Let the history rewrite touch commits jj marks
+                immutable (recorded in the plan; applied by `apply_upgrade`).
+        """
+        steps = pending(self.config.version)
+        plan = Plan(
+            command="upgrade",
+            context={
+                "from": self.config.version,
+                "to": CONFIG_VERSION,
+                "ignore_immutable": ignore_immutable,
+                "steps": [f"v{m.version}: {m.title}" for m in steps],
+            },
+        )
+        if not steps:
+            plan.notes.append(f"already at version {self.config.version}")
+            return plan
+        for m in steps:
+            m.plan(self, plan)
+        return plan
+
+    def apply_upgrade(self, plan: Plan) -> UpgradeReport:
+        """Execute a plan from `plan_upgrade`, one migration at a time.
+
+        After each migration `tether.toml` records the new version, so an
+        interrupted upgrade resumes from the last completed step. Store
+        renames that fail are reported, not raised; the history rewrite and
+        the final VCS commit happen regardless so the manifests and the stores
+        agree on names (a failed rename shows up as a missing pin for
+        `repair`). Rewriting history changes commit ids: every other clone
+        must re-sync.
+
+        Raises:
+            ConfigError: Not an upgrade plan, or the dataset's version differs
+                from the plan's.
+            TetherError: The dataset's manifests have uncommitted changes.
+        """
+        if plan.command != "upgrade":
+            raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
+        if int(plan.context.get("from", -1)) != self.config.version:
+            raise StalePlanError(
+                f"plan was made for version {plan.context.get('from')}, the dataset "
+                f"is at {self.config.version}; re-run the plan"
+            )
+        report = UpgradeReport(
+            from_version=self.config.version, to_version=CONFIG_VERSION, plan=plan
+        )
+        steps = pending(self.config.version)
+        if not steps:
+            return report
+        # Manifests and config must be committed (the .gitignore may legitimately
+        # be dirty: opening the dataset just taught it about the op log).
+        rel = self._dataset_rel()
+        if self.vcs.dirty(
+            [
+                (rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix(),
+                (rel / _m.CONFIG_FILENAME).as_posix(),
+            ]
+        ):
+            raise TetherError(
+                "the dataset's manifests have uncommitted changes; commit or restore "
+                "them before upgrading"
+            )
+        for m in steps:
+            m.apply(self, plan, report)
+        write_config(self.root, self.config)
+        if self.vcs.dirty(self._vcs_paths()):
+            report.vcs_commit = self.vcs.commit(
+                self._vcs_paths(),
+                f"tether upgrade: v{report.from_version} -> v{report.to_version}",
+            )
+        self._log_op("upgrade", plan=plan, result=_report_dict(report))
+        return report
+
+    def upgrade(self, *, ignore_immutable: bool = False) -> UpgradeReport:
+        """Bring the dataset to this tether's version.
+
+        Equivalent to `apply_upgrade(plan_upgrade(...))`.
+        """
+        return self.apply_upgrade(self.plan_upgrade(ignore_immutable=ignore_immutable))
+
     # -- undo ------------------------------------------------------------ #
     def undo(self, op_id: str | None = None, *, discard: bool = False) -> UndoReport:
         """Reverse an operation from the op log, where the stores still allow it.
@@ -2375,8 +2489,8 @@ class Repo:
                 raise TetherError(f"no operation {op_id!r} in this workspace's log")
             if target.undone_by:
                 raise TetherError(f"{op_id} was already undone by {target.undone_by}")
-            if target.undoes is not None or target.command in ("undo", "repair"):
-                raise TetherError(f"cannot undo a {target.command}; re-run instead")
+            if target.undoes is not None or not target.undoable:
+                raise TetherError(f"cannot undo {target.command!r}")
 
         report = UndoReport(op=target)
         handler = {
@@ -2390,7 +2504,7 @@ class Repo:
             "remove": self._undo_manifests,
         }.get(target.command)
         if handler is None:
-            raise TetherError(f"cannot undo a {target.command}")
+            raise TetherError(f"cannot undo {target.command!r}")
         handler(target, report, discard)
         if not report.restored and report.irreversible:
             raise TetherError(

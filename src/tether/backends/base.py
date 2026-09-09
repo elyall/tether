@@ -299,6 +299,32 @@ class ObjectBackend(Protocol):
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
 
+    def rename_pin(self, locator: Locator, old: Pin, state: State, new_id: str) -> Pin:
+        """Give the pin ``old`` (which names ``state``) the id ``new_id``.
+
+        Used by ``tether upgrade`` when the pin naming scheme changes. Default:
+        :meth:`pin` the state under the new id, then :meth:`unpin` the old one
+        -- which works wherever pins are tags. Backends whose pins are branches
+        with children (Neon) rename in place instead.
+        """
+        new = self.pin(locator, state, new_id)
+        if old.ref != new.ref:
+            self.unpin(locator, old)
+        return new
+
+    def rename_working_ref(self, locator: Locator, old: str, new: str) -> str:
+        """Rename working branch ``old`` to ``new``; return the resulting ref.
+
+        Used by ``tether upgrade`` when the branch naming scheme changes.
+        Default: fork ``new`` from ``old``'s head state and delete ``old``.
+        Requires ``FORK`` and a backend that can fork from a state.
+        """
+        head = self.fingerprint(locator, old)
+        ref = self.fork(locator, head, new)
+        if ref != old:
+            self.delete_working_ref(locator, old)
+        return ref
+
     def list_working_refs(self, locator: Locator) -> list[str]:
         """Native branches created by :meth:`fork` (``tether.ws.*``). Requires ``FORK``.
 

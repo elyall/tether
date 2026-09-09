@@ -36,6 +36,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   working branches this workspace expects but the store lost. Drifted pins
   are noted, never overwritten; states the store no longer has are reported
   (exit 2), not raised.
+- **`tether upgrade`** (`plan_upgrade` / `apply_upgrade` / `upgrade`;
+  `tether.migrations`). `tether.toml` now carries `[tether] version = 2`; a
+  dataset at an older version is refused by every command except `upgrade`,
+  which runs the pending migrations in order, writing the version after each
+  so an interrupted upgrade resumes. The v2 migration gives the dataset an
+  id, renames every pin (`tether.<hash>` -> `tether.<id>.<hash16>`) and
+  working branch (`tether.ws.<ws>.<slug>` -> `tether.ws.<id>.<ws>.<slug>-<key6>`)
+  in every store, and rewrites every historical manifest to the new names so
+  `gc` and `verify --all-history` keep agreeing with the stores -- history
+  rewriting changes commit ids (jj keeps change ids; `--ignore-immutable` for
+  pushed commits); every other clone must re-sync. `--dry-run` shows the
+  renames and the number of commits; failed renames exit 2 and `repair`
+  finishes the job. `VcsAdapter.rewrite_history()` (jj: `new` + `squash` per
+  change; git: plumbing `commit-tree`, refs updated) and
+  `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
+  `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
+  place because pins are branches with children) are new.
 - **`tether new --discard`.** `new` now fingerprints every working branch it
   would reset and refuses -- before touching the VCS or any store -- when a
   head holds writes beyond what this workspace last committed or forked at.
@@ -53,14 +70,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dataset had made in the same store. The same content pinned by two datasets
   is now two refs. `compute_pin_id` and `working_ref_name` take the dataset
   id; `pin_dataset()` and `working_ref_dataset()` parse it back. Breaking for
-  earlier alphas: a `tether.toml` without the id is refused with the line to
-  add, and pins / branches made before are not recognised -- re-commit and
-  `new` (or `repair`).
+  earlier alphas: run `tether upgrade` (below), which renames the refs and
+  rewrites history to match.
 - `apply_commit` commits to the VCS when the manifests are dirty in the
   working tree even if no object's state changed (an undone commit, an
   `add`, an `import`); before, that `commit` was a silent no-op.
 - The `memory` backend refuses to pin a snapshot that no longer exists, as
   real stores do.
+- Iceberg's `metadata_location` is a `VOLATILE_KEY`: it was part of the state
+  until 0.1.0a7 and still appears in old manifests, so it must not affect
+  content identity (the upgrade hashes old states through `content_state`).
 
 ## [0.1.0a7] - 2026-09-08
 

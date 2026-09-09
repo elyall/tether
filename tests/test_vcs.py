@@ -176,3 +176,44 @@ def test_new_never_leaves_git_detached(vcs_root: Path) -> None:
         vcs.new(f"tether/{c1[:12]}")
         assert current_branch() == f"tether/{c1[:12]}"
         assert vcs.resolve("HEAD") == c3
+
+
+def test_rewrite_history_rewrites_files_and_keeps_the_shape(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "ds/.tether/objects/db.toml", "pin = 'old-1'\n")
+    _write(vcs_root, "other.txt", "keep me\n")
+    c1 = vcs.commit(["ds/.tether/objects", "other.txt"], "first")
+    _write(vcs_root, "ds/.tether/objects/db.toml", "pin = 'old-2'\n")
+    c2 = vcs.commit(["ds/.tether/objects"], "second")
+    _write(vcs_root, "other.txt", "changed\n")
+    c3 = vcs.commit(["other.txt"], "third (no manifest change)")
+    before = vcs.position()
+    seen: list[str] = []
+
+    def transform(commit: str, files: dict[str, str]) -> dict[str, str]:
+        seen.append(commit)
+        return {p: t.replace("old-", "new-") for p, t in files.items()}
+
+    mapping = vcs.rewrite_history("ds/.tether/objects", transform)
+    # Every commit with a manifest was rewritten; c3 only because its parent was.
+    assert set(mapping) == {c1, c2, c3}
+    assert set(seen) >= {c1, c2, c3}
+    n1, n2, n3 = mapping[c1], mapping[c2], mapping[c3]
+    assert vcs.read_file_at(n1, "ds/.tether/objects/db.toml") == "pin = 'new-1'\n"
+    assert vcs.read_file_at(n2, "ds/.tether/objects/db.toml") == "pin = 'new-2'\n"
+    assert vcs.read_file_at(n3, "ds/.tether/objects/db.toml") == "pin = 'new-2'\n"
+    assert vcs.read_file_at(n3, "other.txt") == "changed\n"
+    assert vcs.read_file_at(n1, "other.txt") == "keep me\n"
+    # The old commits are gone from reachable history; the working copy is
+    # back on the (rewritten) tip and clean apart from the reldir itself.
+    revs = set(vcs.history_revs())
+    assert {n1, n2, n3} <= revs and not ({c1, c2, c3} & revs)
+    after = vcs.position()
+    if vcs.kind == "git":
+        assert after["branch"] == before["branch"] and after["commit"] == n3
+    else:
+        assert (after["parent"] == n3 and after["id"] != before["id"]) or (
+            after["parent"] == n3
+        )
+    # Idempotent: nothing left to rewrite.
+    assert vcs.rewrite_history("ds/.tether/objects", transform) == {}

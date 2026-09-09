@@ -126,7 +126,7 @@ class OpEntry:
         return (
             self.undoes is None
             and self.undone_by is None
-            and self.command not in ("undo", "repair")
+            and self.command not in ("undo", "repair", "upgrade")
         )
 
     def summary(self) -> str:
@@ -177,6 +177,13 @@ class OpEntry:
             return (
                 f"repinned {len(r.get('repinned') or [])}, reforked "
                 f"{len(r.get('reforked') or [])}"
+            )
+        if self.command == "upgrade":
+            return (
+                f"v{r.get('from_version')} -> v{r.get('to_version')}: "
+                f"{len(r.get('renamed_pins') or {})} pin(s), "
+                f"{len(r.get('renamed_branches') or {})} branch(es), "
+                f"{len(r.get('rewritten_commits') or {})} commit(s) rewritten"
             )
         return ""
 

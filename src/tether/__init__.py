@@ -26,7 +26,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 
-from tether import backends, handles, oplog, testing, vcs
+from tether import backends, handles, migrations, oplog, testing, vcs
 from tether.errors import (
     BackendError,
     CapabilityError,
@@ -55,6 +55,7 @@ from tether.manifest import (
     working_ref_name,
     working_ref_workspace,
 )
+from tether.migrations import UpgradeReport
 from tether.oplog import OpEntry
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec
@@ -105,6 +106,7 @@ __all__ = [
     "TetherError",
     "UndoReport",
     "UnpinnedStateError",
+    "UpgradeReport",
     "VcsError",
     "WorkspaceState",
     "backends",
@@ -112,6 +114,7 @@ __all__ = [
     "handles",
     "listing_name",
     "manifest_hash",
+    "migrations",
     "oplog",
     "ref_for_pin",
     "testing",

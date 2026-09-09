@@ -4,11 +4,14 @@ title: "Configuration"
 
 A dataset's configuration is `tether.toml` at the dataset root, committed with
 the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
-default; a minimal file is `[tether] version = 1` plus the id `init` generates.
+default; a minimal file is `[tether] version = 2` plus the id `init` generates.
+A dataset whose version is older than this tether's is refused by every
+command except `tether upgrade`, which brings it forward one migration at a
+time (see the [CLI guide](06-cli.qmd#upgrade)).
 
 ```toml
 [tether]
-version = 1
+version = 2         # the format this tether writes; older datasets need `tether upgrade`
 
 [dataset]
 id = "0a1b2c3d"      # 8 hex chars; the namespace of this dataset's pins and branches in every store
@@ -53,8 +56,11 @@ one Icechunk repo or Neon project without being able to delete each other's
 pins. Do not change it once anything has been committed: pins and branches
 made under the old id are no longer recognised as this dataset's (`gc` treats
 them as foreign and leaves them alone; `repair` recreates the pins the
-manifests name under the new id). Loading a `tether.toml` without a valid id
-is an error that prints the line to add.
+manifests name under the new id). Datasets from before the id existed get one
+from `tether upgrade`, which also renames their refs and rewrites history to
+match. A fork of the repository that is meant to become an *independent*
+dataset should change the id before it pins anything, or the two will share a
+namespace and be able to `gc` each other again.
 
 ## Policies
 

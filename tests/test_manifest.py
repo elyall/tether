@@ -92,6 +92,8 @@ def test_ref_and_slug_helpers() -> None:
     assert working_ref_workspace(name) == "abcd1234"
     assert working_ref_dataset(name) == "0a1b2c3d"
     assert working_ref_dataset("tether.ws.not-hex.abcd1234.zarr-x") is None
+    assert working_ref_dataset("tether.ws.abcd1234.zarr-x") is None  # pre-namespace
+    assert working_ref_workspace("tether.ws.abcd1234.zarr-x") is None
     assert working_ref_workspace("feature-x") is None
     # Keys that slugify identically still get distinct branches.
     assert name != working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr-imaging")

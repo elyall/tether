@@ -49,6 +49,9 @@ class FakeNeon:
         router.post(
             url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+/restore$"
         ).mock(side_effect=self._restore_branch)
+        router.patch(
+            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+$"
+        ).mock(side_effect=self._patch_branch)
         router.get(url__regex=rf"{re.escape(BASE)}/projects/{PID}/endpoints$").mock(
             side_effect=self._list_endpoints
         )
@@ -83,6 +86,16 @@ class FakeNeon:
         bid = request.url.path.rsplit("/", 1)[-1]
         self.branches.pop(bid, None)
         return httpx.Response(200, json={})
+
+    def _patch_branch(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        bid = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content)["branch"]
+        br = self.branches[bid]
+        if "name" in body:
+            br["name"] = body["name"]
+        return httpx.Response(200, json={"branch": br})
 
     def _restore_branch(self, request: httpx.Request) -> httpx.Response:
         import json
@@ -312,3 +325,30 @@ def test_fork_onto_an_existing_branch_restores_it(backend: NeonBackend) -> None:
         # An existing pin branch that points elsewhere is refused, not reused.
         with pytest.raises(BackendError, match="hangs off"):
             backend.pin(LOCATOR, {**state, "lsn": "0/9999999"}, "000000000001")
+
+
+def test_rename_pin_and_branch_in_place(backend: NeonBackend) -> None:
+    """Pins are branches with children; renames must not delete and recreate."""
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        state = backend.fingerprint(LOCATOR, None)
+        old = backend.pin(LOCATOR, state, "abcdef012345")
+        wref = backend.fork(LOCATOR, old, "tether.ws.7c1e0a4d.db")
+        pin_br = next(b for b in fake.branches.values() if b["name"] == old.ref)
+        work_br = next(b for b in fake.branches.values() if b["name"] == wref)
+        assert work_br["parent_id"] == pin_br["id"]  # the pin has a child
+
+        new = backend.rename_pin(LOCATOR, old, state, "d5d5d5d5.0123456789abcdef")
+        assert new.ref == "tether.d5d5d5d5.0123456789abcdef"
+        assert (
+            pin_br["name"] == new.ref and pin_br["id"] in fake.branches
+        )  # same branch
+        assert work_br["parent_id"] == pin_br["id"]  # child untouched
+        assert old.ref not in {b["name"] for b in fake.branches.values()}
+
+        renamed = backend.rename_working_ref(
+            LOCATOR, wref, "tether.ws.d5d5d5d5.7c1e0a4d.db-61a22c"
+        )
+        assert renamed == work_br["name"] == "tether.ws.d5d5d5d5.7c1e0a4d.db-61a22c"
+        assert fake.restores == []  # nothing was reset along the way

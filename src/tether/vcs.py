@@ -19,9 +19,10 @@ plumbing works there), which is ~50x cheaper per read.
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -87,6 +88,7 @@ def _run(
     cwd: Path,
     check: bool = True,
     input_text: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> _Run:
     try:
         proc = subprocess.run(
@@ -95,6 +97,7 @@ def _run(
             capture_output=True,
             text=True,
             input=input_text,
+            env={**os.environ, **env} if env else None,
         )
     except FileNotFoundError as exc:  # pragma: no cover - env dependent
         raise VcsError(f"executable not found: {argv[0]}") from exc
@@ -364,6 +367,28 @@ class VcsAdapter(Protocol):
     def dirty(self, relpaths: list[str]) -> bool:
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
+
+    def rewrite_history(
+        self,
+        reldir: str,
+        transform: Callable[[str, dict[str, str]], dict[str, str]],
+        *,
+        ignore_immutable: bool = False,
+    ) -> dict[str, str]:
+        """Rewrite the files under ``reldir`` in every commit.
+
+        ``transform(commit, files)`` receives ``{root-relative path: text}``
+        and returns the texts that should be there instead (same keys; a
+        commit whose result equals its input is left alone, but still gets a
+        new id if a parent changed). Descendants are rebased, bookmarks /
+        branches and tags follow, change ids (jj) are preserved. Returns
+        ``{old commit id: new commit id}`` for every commit that changed.
+        The working-copy commit is not rewritten (edit the working tree
+        instead); the working copy ends where it started.
+
+        This is history rewriting: every other clone must re-sync.
+        ``ignore_immutable`` (jj) rewrites commits jj considers immutable.
+        """
 
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
@@ -698,6 +723,56 @@ class JjAdapter:
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
 
+    def rewrite_history(
+        self,
+        reldir: str,
+        transform: Callable[[str, dict[str, str]], dict[str, str]],
+        *,
+        ignore_immutable: bool = False,
+    ) -> dict[str, str]:
+        start = self.position()
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--reversed",
+            "-r",
+            "all() ~ root()",
+            "-T",
+            'change_id ++ " " ++ commit_id ++ "\\n"',
+        )
+        changes = [line.split() for line in out.stdout.splitlines() if line.strip()]
+        mapping: dict[str, str] = {}
+        flags = ["--ignore-immutable"] if ignore_immutable else []
+        rewritten = False
+        for change, commit in changes:
+            if change == start["id"]:
+                continue  # the working copy: the caller edits it in place
+            files = self.files_at(commit, reldir)
+            new_files = transform(commit, files)
+            if new_files == files:
+                continue
+            # A child of the change holding the new texts, squashed into it;
+            # jj rebases the descendants and keeps the change id.
+            self._jj("new", *flags, change)
+            for path, text in new_files.items():
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text(text, encoding="utf-8")
+            self._jj("squash", "-u", *flags)
+            rewritten = True
+        if rewritten:
+            for change, commit in changes:
+                if change == start["id"]:
+                    continue
+                now = self.resolve(change)
+                if now != commit:
+                    mapping[commit] = now
+        # The recorded parent may itself have been rewritten; a `jj new` on the
+        # old commit id would revive the hidden pre-rewrite history.
+        if start.get("parent") in mapping:
+            start = {**start, "parent": mapping[start["parent"]]}
+        self.goto(start)
+        return mapping
+
 
 # --------------------------------------------------------------------------- #
 # git
@@ -709,8 +784,20 @@ class GitAdapter:
         self.root = root
         self._exe = executable
 
-    def _git(self, *args: str, check: bool = True) -> _Run:
-        return _run([self._exe, *args], cwd=self.root, check=check)
+    def _git(
+        self,
+        *args: str,
+        check: bool = True,
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> _Run:
+        return _run(
+            [self._exe, *args],
+            cwd=self.root,
+            check=check,
+            input_text=input_text,
+            env=env,
+        )
 
     def resolve(self, rev: str) -> str:
         out = self._git(
@@ -840,6 +927,90 @@ class GitAdapter:
                 return
             name = f"tether/{sha[:12]}-{n}"  # taken and moved on; start a sibling
         raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
+
+    def rewrite_history(
+        self,
+        reldir: str,
+        transform: Callable[[str, dict[str, str]], dict[str, str]],
+        *,
+        ignore_immutable: bool = False,
+    ) -> dict[str, str]:
+        start = self.position()
+        out = self._git("rev-list", "--reverse", "--topo-order", "--all", check=False)
+        commits = [c.strip() for c in out.stdout.splitlines() if c.strip()]
+        mapping: dict[str, str] = {}
+        git_dir = self._git("rev-parse", "--git-dir").stdout.strip()
+        index_file = (
+            self.root / git_dir / f"tether-rewrite-{os.getpid()}.index"
+        ).resolve()
+        env = {"GIT_INDEX_FILE": str(index_file)}
+        try:
+            for commit in commits:
+                parents = self._git(
+                    "rev-list", "--parents", "-n1", commit
+                ).stdout.split()[1:]
+                new_parents = [mapping.get(p, p) for p in parents]
+                files = self.files_at(commit, reldir)
+                new_files = transform(commit, files)
+                tree = self._git("rev-parse", f"{commit}^{{tree}}").stdout.strip()
+                if new_files != files:
+                    self._git("read-tree", tree, env=env)
+                    for path, text in new_files.items():
+                        blob = self._git(
+                            "hash-object", "-w", "--stdin", input_text=text
+                        ).stdout.strip()
+                        self._git(
+                            "update-index",
+                            "--add",
+                            "--cacheinfo",
+                            f"100644,{blob},{path}",
+                            env=env,
+                        )
+                    tree = self._git("write-tree", env=env).stdout.strip()
+                elif new_parents == parents:
+                    continue
+                meta = self._git(
+                    "log",
+                    "-1",
+                    "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B",
+                    commit,
+                ).stdout
+                an, ae, ad, cn, ce, cd, message = meta.split("\x00", 6)
+                args = ["commit-tree", tree]
+                for p in new_parents:
+                    args += ["-p", p]
+                new_commit = self._git(
+                    *args,
+                    input_text=message,
+                    env={
+                        "GIT_AUTHOR_NAME": an,
+                        "GIT_AUTHOR_EMAIL": ae,
+                        "GIT_AUTHOR_DATE": ad,
+                        "GIT_COMMITTER_NAME": cn,
+                        "GIT_COMMITTER_EMAIL": ce,
+                        "GIT_COMMITTER_DATE": cd,
+                    },
+                ).stdout.strip()
+                mapping[commit] = new_commit
+        finally:
+            index_file.unlink(missing_ok=True)
+        if not mapping:
+            return mapping
+        refs = self._git(
+            "for-each-ref", "--format=%(refname) %(objectname) %(objecttype)"
+        ).stdout.splitlines()
+        for line in refs:
+            name, sha, kind = line.split()
+            if kind == "commit" and sha in mapping:
+                self._git("update-ref", name, mapping[sha], sha)
+        if start.get("branch"):
+            # The branch ref moved under HEAD; refresh the index (worktree files
+            # under reldir still hold the old text until the caller rewrites them).
+            self._git("reset", "-q")
+        elif start.get("commit") in mapping:
+            self._git("update-ref", "--no-deref", "HEAD", mapping[start["commit"]])
+            self._git("reset", "-q")
+        return mapping
 
 
 # --------------------------------------------------------------------------- #

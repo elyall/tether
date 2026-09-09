@@ -47,7 +47,7 @@ cli:
       contents: [commit, new, open, promote]
     - title: Maintenance
       desc: Reclaim native refs, and see or reverse what tether did.
-      contents: [gc, ops, undo, repair]
+      contents: [gc, ops, undo, repair, upgrade]
     - title: Registries
       desc: "Experimental: derive SQL tables from history, push them to Postgres, or import the object set from a registry."
       contents: [export, publish, import]
@@ -74,6 +74,7 @@ reference:
         - PromoteReport
         - UndoReport
         - RepairReport
+        - UpgradeReport
         - DiffEntry
         - TETHER_REV_ENV
     - title: Operation log
@@ -81,6 +82,10 @@ reference:
       contents:
         - OpEntry
         - oplog
+    - title: Migrations
+      desc: Stacked upgrades behind `tether upgrade`; append a `Migration` when the format changes.
+      contents:
+        - migrations
     - title: Plans
       desc: >-
         What a store-writing command would do, as data. `Repo.plan_*` returns a

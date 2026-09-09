@@ -31,6 +31,9 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 class IcebergBackend(ObjectBackend):
     kind = "iceberg"
+    VOLATILE_KEYS = frozenset({"metadata_location"})
+    """Rewritten by every table commit; part of the state until 0.1.0a7 and
+    still present in old manifests, so it must not affect content identity."""
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

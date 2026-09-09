@@ -36,7 +36,9 @@ WORKSPACE_FILENAME = "workspace.toml"
 GITIGNORE_FILENAME = ".gitignore"
 
 REF_PREFIX = "tether."
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
+"""The `[tether] version` this code writes and expects. `tether upgrade` brings
+older datasets forward one migration at a time (see `tether.migrations`)."""
 
 WriteMode = Literal["fork", "track"]
 FileMode = Literal["immutable", "versioned"]
@@ -165,7 +167,9 @@ def _working_ref_parts(ref: str) -> tuple[str, str] | None:
     rest = ref[len(WORKING_REF_PREFIX) :]
     ds, _, rest = rest.partition(".")
     ws, _, _ = rest.partition(".")
-    if not is_dataset_id(ds) or not ws:
+    # Both ids are 8 hex; a pre-namespace name (`tether.ws.<ws8>.<slug>`) has a
+    # slug in the second position and is not one of ours.
+    if not is_dataset_id(ds) or not is_dataset_id(ws):
         return None
     return ds, ws
 
@@ -360,7 +364,8 @@ class RepoConfig:
         tether_tbl = tomlkit.table()
         tether_tbl["version"] = self.version
         doc["tether"] = tether_tbl
-        doc["dataset"] = {"id": self.dataset_id}
+        if self.dataset_id:
+            doc["dataset"] = {"id": self.dataset_id}
         doc["snapshot"] = {"auto": self.snapshot_auto}
         doc["verify"] = {"on_status": self.verify_on_status}
         doc["new"] = {"auto_fork": self.new_auto_fork, "fork": self.new_fork}
@@ -385,18 +390,19 @@ class RepoConfig:
         fork = str(new.get("fork", "lazy"))
         if fork not in ("lazy", "eager"):
             raise ConfigError(f"invalid [new] fork: {fork!r} (lazy or eager)")
+        version = int(tether_tbl.get("version", 1))
         dataset_id = (data.get("dataset") or {}).get("id")
-        if not is_dataset_id(dataset_id):
+        if version >= 2 and not is_dataset_id(dataset_id):
             raise ConfigError(
                 "tether.toml has no valid [dataset] id (8 hex chars). It namespaces "
                 "this dataset's pins and working branches in every store; add\n"
                 f'  [dataset]\n  id = "{new_dataset_id()}"\n'
                 "(pins and branches made before it was set are not recognised: "
-                "re-commit and `new`)"
+                "re-commit and `new`, or `tether repair`)"
             )
         return cls(
-            version=int(tether_tbl.get("version", CONFIG_VERSION)),
-            dataset_id=str(dataset_id),
+            version=version,
+            dataset_id=str(dataset_id) if is_dataset_id(dataset_id) else "",
             snapshot_auto=bool(snapshot.get("auto", True)),
             verify_on_status=bool(verify.get("on_status", False)),
             new_auto_fork=bool(new.get("auto_fork", False)),

@@ -130,6 +130,7 @@ tether gc --prune-workspaces --no-dry-run   # dead workspaces' tether.ws.* branc
 tether ops                                  # what tether did to the stores, newest first
 tether undo                                 # reverse the newest entry where the store allows it (a commit -> uncommitted; a new -> branches gone)
 tether repair                               # recreate pins / branches the manifests promise but a store lost
+tether upgrade --dry-run                    # a dataset from an older tether: what bringing it forward would rename / rewrite
 ```
 
 Multiple people (or agents) work in jj workspaces / git worktrees of the same
@@ -178,9 +179,9 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 
 ```
 <dataset-root>/
-  tether.toml                 # committed: dataset.id (the namespace of this dataset's refs), snapshot.auto,
-                              #   verify.on_status, new.auto_fork (commit re-runs new), new.fork (lazy|eager),
-                              #   default policies, backend options, credential *references*
+  tether.toml                 # committed: tether.version (older -> `tether upgrade`), dataset.id (the namespace
+                              #   of this dataset's refs), snapshot.auto, verify.on_status, new.auto_fork,
+                              #   new.fork (lazy|eager), default policies, backend options, credential *references*
   .tether/
     .gitignore                # ignores workspace.toml and ops.jsonl
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
