@@ -233,10 +233,17 @@ def test_abandon_keeps_descendant_manifests_as_snapshots(vcs_root: Path) -> None
     # Dropping the middle commit: a patch-rebase of `three` onto `one` would
     # conflict on db.toml (both rewrite the same line). The manifest must come
     # out exactly as `three` had it; notes.txt follows the VCS's own rebase.
-    assert vcs.abandon([c2], "ds/.tether/objects") == [c2]
+    abandoned, rewritten = vcs.abandon([c2], "ds/.tether/objects")
+    assert abandoned == [c2]
     revs = vcs.history_revs()
     assert c2 not in revs and c1 in revs and c3 not in revs  # c3 was rebased
     tip = vcs.resolve("@-" if vcs.kind == "jj" else "HEAD")
+    assert rewritten == {c3: tip}  # the rebased descendant, old -> new
+    assert vcs.commit_alive(c1) and vcs.commit_alive(tip)
+    # jj follows the change: c3's change lives on as tip. git has no such
+    # identity, so the old id is simply gone.
+    assert vcs.commit_alive(c3) == (vcs.kind == "jj")
+    assert not vcs.commit_alive(c2)
     assert vcs.read_file_at(tip, "ds/.tether/objects/db.toml") == "state = 3\n"
     assert vcs.read_file_at(tip, "notes.txt") == "a\n"  # two's edit is gone
     assert not vcs.dirty(["ds/.tether/objects"])

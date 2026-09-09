@@ -727,3 +727,45 @@ def test_cli_forget_workspace(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -
     }
     assert any(p.endswith("workspace.toml") for p in payload["removed_files"])
     assert wref not in store.system(system).branches
+
+
+def test_cli_status_and_ops_flag_vcs_drift(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
+    store.write(system, "main", {"v": 2})
+    r = runner.invoke(app, ["commit", "-m", "v2", "--json"])
+    c2 = json.loads(r.output)["vcs_commit"]
+    kind = Repo.find(vcs_root).vcs.kind
+    if kind == "jj":
+        subprocess.run(
+            ["jj", "abandon", c2], cwd=vcs_root, check=True, capture_output=True
+        )
+    else:
+        subprocess.run(
+            ["git", "reset", "--hard", "HEAD~1"],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    r = runner.invoke(app, ["status", "--no-snapshot"])
+    assert r.exit_code == 0, r.output
+    assert (
+        "warning:" in r.output and c2[:12] in r.output and "outside tether" in r.output
+    )
+    r = runner.invoke(app, ["status", "--no-snapshot", "--json"])
+    assert json.loads(r.output)["vcs_drift"][0]["commit"] == c2
+    r = runner.invoke(app, ["ops"])
+    line = next(ln for ln in r.output.splitlines() if "v2" in ln or c2[:12] in ln)
+    assert line.endswith("(vcs commit gone)")

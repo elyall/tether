@@ -103,6 +103,10 @@ def _status_payload(report: StatusReport) -> dict:
         "manifest_hash": report.manifest_hash,
         "stale": report.stale,
         "stale_keys": report.stale_keys,
+        "vcs_drift": [
+            {"op": d.op.id, "commit": d.commit, "referenced": d.referenced}
+            for d in report.vcs_drift
+        ],
         "objects": [
             {
                 "key": o.key,
@@ -355,6 +359,8 @@ def status(
         return
     flag = f" (STALE: {', '.join(report.stale_keys)})" if report.stale else ""
     typer.echo(f"dataset {report.manifest_hash[:12]}{flag}")
+    for drift in report.vcs_drift:
+        typer.secho(f"  warning: {drift.message}", fg=typer.colors.YELLOW, err=True)
     for o in report.objects:
         v = f" verify={o.verify.status.value}" if o.verify else ""
         rec = "" if o.recoverable else " unrecoverable"
@@ -713,8 +719,12 @@ def ops(
     """
     repo = _repo()
     entries = repo.ops(limit)
+    drifted = {d.op.id for d in repo.vcs_drift()}
     if json_out:
-        _emit([e.to_dict() for e in entries], as_json=True)
+        _emit(
+            [{**e.to_dict(), "vcs_commit_gone": e.id in drifted} for e in entries],
+            as_json=True,
+        )
         return
     if not entries:
         typer.echo("no operations recorded")
@@ -723,8 +733,8 @@ def ops(
         flag = ""
         if e.undone_by:
             flag = f"  (undone by {e.undone_by})"
-        elif e.undoes:
-            flag = ""
+        elif e.id in drifted:
+            flag = "  (vcs commit gone)"
         typer.echo(f"{e.id}  {e.at}  {e.command:<8} {e.summary()}{flag}")
 
 

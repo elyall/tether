@@ -119,7 +119,10 @@ but the store lost is forked again. `--all-history` checks every commit's pins.
 
 What `jj undo` / `git reset` can and cannot do is unchanged by all this: they
 revert the manifests, never the stores. Use them for the VCS side, `tether
-undo` for tether's.
+undo` for tether's. When they remove a dataset commit behind tether's back,
+`status` says so (`warning: dataset commit ... is no longer in VCS history`)
+and `ops` flags the entry, with whether the pins that commit made are still
+named by the working tree.
 
 ## Capability tiers
 

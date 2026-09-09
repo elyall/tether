@@ -53,6 +53,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
   place because pins are branches with children) are new.
+- **`status` and `ops` notice the VCS going around tether.** `Repo.vcs_drift()`
+  lists `commit` entries whose commit is no longer part of visible history
+  (`VcsAdapter.commit_alive`: jj follows the change id, so a rewrite is not a
+  loss; git checks reachability) and that tether did not remove or rewrite
+  itself. `status` prints a warning per entry with whether the pins it made
+  are still named by the working tree; `ops` flags them `(vcs commit gone)`.
+  `VcsAdapter.abandon` now also returns the rebased descendants' old -> new
+  commit ids, recorded in the `abandon` op.
 - **`tether forget-workspace [ID]`** (`plan_forget_workspace` /
   `apply_forget_workspace` / `forget_workspace`): `jj workspace forget` /
   `git worktree remove` plus tether's half -- that workspace's working

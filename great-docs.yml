@@ -69,6 +69,7 @@ reference:
         - Repo
         - StatusReport
         - ObjectStatus
+        - VcsDrift
         - CommitResult
         - GcReport
         - AbandonReport

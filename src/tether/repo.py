@@ -135,6 +135,48 @@ class ObjectStatus:
 
 
 @dataclass
+class VcsDrift:
+    """A dataset commit that is gone from VCS history without tether knowing.
+
+    `jj undo`, `jj abandon`, `git reset` -- anything that removes a commit
+    tether made -- leaves the op log believing the commit exists. Detected by
+    `Repo.vcs_drift`, shown by `status` and `ops`.
+
+    Attributes:
+        op: The `commit` entry.
+        commit: The commit id it recorded.
+        referenced: Key -> whether the working tree's manifest still names the
+            pin that commit made (an undone commit leaves the manifests as
+            uncommitted edits: still referenced; an abandoned one reverts
+            them: not referenced, so `gc` would release the pin).
+    """
+
+    op: OpEntry
+    commit: str
+    referenced: dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def message(self) -> str:
+        kept = sorted(k for k, v in self.referenced.items() if v)
+        dropped = sorted(k for k, v in self.referenced.items() if not v)
+        bits = [
+            f"dataset commit {self.commit[:12]} (op {self.op.id}) is no longer in "
+            "VCS history: undone or abandoned outside tether"
+        ]
+        if kept:
+            bits.append(
+                f"its pins for {', '.join(kept)} are still named by the working "
+                "tree (commit again, or restore the manifests to drop them)"
+            )
+        if dropped:
+            bits.append(
+                f"its pins for {', '.join(dropped)} are unreferenced; `gc` will "
+                "release them, `repair` recreates them if the commit comes back"
+            )
+        return "; ".join(bits)
+
+
+@dataclass
 class StatusReport:
     """Result of `Repo.status`."""
 
@@ -146,6 +188,9 @@ class StatusReport:
     """Per-object classifications, sorted by key."""
     stale_keys: list[str] = field(default_factory=list)
     """The objects that make the workspace stale (see `Repo.stale_keys`)."""
+    vcs_drift: list[VcsDrift] = field(default_factory=list)
+    """Dataset commits this workspace made that left VCS history behind
+    tether's back (see `Repo.vcs_drift`)."""
 
 
 @dataclass
@@ -546,6 +591,46 @@ class Repo:
         entries = list(reversed(read_ops(self.root)))
         return entries[:limit] if limit else entries
 
+    def vcs_drift(self) -> list[VcsDrift]:
+        """Dataset commits in the op log that the VCS no longer has.
+
+        A `commit` entry counts as drifted when its commit is not part of
+        visible history any more (`VcsAdapter.commit_alive`) and tether did
+        not do that itself: entries undone by `tether undo`, dropped by
+        `tether abandon`, or rewritten by `abandon` / `upgrade` (whose recorded
+        `rewritten_commits` are followed) are not drift. Newest first.
+        """
+        entries = self.ops()
+        gone: set[str] = set()
+        alias: dict[str, str] = {}
+        for e in entries:
+            if e.command == "abandon":
+                gone.update(str(c) for c in e.result.get("abandoned") or [])
+            for old, new in (e.result.get("rewritten_commits") or {}).items():
+                alias[str(old)] = str(new)
+        out: list[VcsDrift] = []
+        for e in entries:
+            if e.command != "commit" or e.undone_by or not e.result.get("vcs_commit"):
+                continue
+            commit = str(e.result["vcs_commit"])
+            seen: set[str] = set()
+            while commit in alias and commit not in seen:
+                seen.add(commit)
+                commit = alias[commit]
+            if commit in gone or self.vcs.commit_alive(commit):
+                continue
+            pinned = {k: v for k, v in (e.result.get("pinned") or {}).items() if v}
+            referenced: dict[str, bool] = {}
+            for k, pid in pinned.items():
+                current = self.objects[k].pin if k in self.objects else None
+                referenced[k] = current is not None and current.id == pid
+            out.append(
+                VcsDrift(
+                    op=e, commit=str(e.result["vcs_commit"]), referenced=referenced
+                )
+            )
+        return out
+
     def _log_op(
         self,
         command: str,
@@ -873,6 +958,7 @@ class Repo:
             stale=bool(stale),
             objects=objects,
             stale_keys=stale,
+            vcs_drift=self.vcs_drift(),
         )
 
     # -- commit ---------------------------------------------------------- #
@@ -2725,7 +2811,7 @@ class Repo:
                 branch, dirty tree, or a conflict outside the dataset).
         """
         pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
-        ids = self.vcs.abandon(list(revs), self._objects_reldir())
+        ids, rewritten = self.vcs.abandon(list(revs), self._objects_reldir())
         self._manifest_cache.clear()
         self.objects = read_objects(self.root)
         gc_plan = self.plan_gc()
@@ -2734,6 +2820,7 @@ class Repo:
             "abandon",
             result={
                 "abandoned": ids,
+                "rewritten_commits": rewritten,
                 "unreferenced": [a.target for a in gc_plan.actions if a.op == "unpin"],
             },
             pre=pre,

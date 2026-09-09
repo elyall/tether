@@ -1486,3 +1486,58 @@ def test_forget_workspace_deletes_its_branches_files_and_checkout(
         or not repo.workspace.working_refs
     )
     assert fresh.workspace.working_refs == {}
+
+
+def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -> None:
+    import subprocess
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("v1")
+    store.write(system, "main", {"v": 2})
+    c2 = repo.commit("v2").vcs_commit
+    assert c2 is not None
+    assert repo.vcs_drift() == [] and repo.status(do_snapshot=False).vcs_drift == []
+
+    # Remove the commit with the VCS directly, as a user would.
+    if repo.vcs.kind == "jj":
+        subprocess.run(
+            ["jj", "abandon", c2], cwd=vcs_root, check=True, capture_output=True
+        )
+    else:
+        subprocess.run(
+            ["git", "reset", "--hard", "HEAD~1"],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    repo = Repo.find(vcs_root)
+    (drift,) = repo.vcs_drift()
+    assert drift.commit == c2 and drift.op.command == "commit"
+    # The manifests reverted with the commit, so v2's pin is unreferenced.
+    assert drift.referenced == {"db": False}
+    assert "no longer in VCS history" in drift.message and "gc" in drift.message
+    assert repo.status(do_snapshot=False).vcs_drift[0].commit == c2
+
+    # tether's own removals are not drift: undo (uncommit) and abandon.
+    store.write(system, "main", {"v": 3})
+    c3 = repo.commit("v3").vcs_commit
+    repo.undo()  # uncommit c3
+    store.write(system, "main", {"v": 4})
+    c4 = repo.commit("v4").vcs_commit
+    repo.abandon([c4]) if c4 else None
+    assert [d.commit for d in repo.vcs_drift()] == [c2]
+    assert c3 is not None
+
+    # A rewrite tether did itself (abandon rebases descendants) is followed
+    # through the recorded mapping, not reported as drift.
+    store.write(system, "main", {"v": 5})
+    c5 = repo.commit("v5").vcs_commit
+    store.write(system, "main", {"v": 6})
+    c6 = repo.commit("v6").vcs_commit
+    assert c5 and c6
+    report = repo.abandon([c5])  # c6 is rebased and gets a new id
+    assert c6 in repo.ops()[0].result["rewritten_commits"]
+    assert [d.commit for d in repo.vcs_drift()] == [c2]
+    del report

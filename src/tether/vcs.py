@@ -374,13 +374,22 @@ class VcsAdapter(Protocol):
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
 
-    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+    def commit_alive(self, commit: str) -> bool:
+        """Whether ``commit`` -- or, in jj, the change it belonged to -- is still
+        part of visible history. jj resolves the commit to its change id (hidden
+        commits still resolve) and asks whether that change is visible, so a
+        rewrite does not count as loss; git checks reachability from any ref."""
+
+    def abandon(
+        self, revs: list[str], keep_dir: str
+    ) -> tuple[list[str], dict[str, str]]:
         """Drop ``revs`` from history, rebasing their descendants -- except that
         every descendant keeps the files under ``keep_dir`` exactly as they
         were (snapshot, not patch, semantics: a manifest records a whole state,
         so a later commit's manifest must survive the removal of an earlier
         one untouched instead of conflicting with it). Returns the commit ids
-        that were abandoned.
+        that were abandoned and ``{old commit id: new commit id}`` for the
+        descendants that were rebased.
 
         jj: ``jj abandon`` then rewrite the descendants' ``keep_dir`` files
         back (which also resolves the conflicts jj recorded there). git: the
@@ -769,7 +778,34 @@ class JjAdapter:
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
 
-    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+    def commit_alive(self, commit: str) -> bool:
+        change = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            commit,
+            "-T",
+            "change_id",
+            check=False,
+        )
+        if change.returncode != 0 or not change.stdout.strip():
+            return False
+        visible = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            change.stdout.strip(),
+            "-T",
+            "commit_id",
+            check=False,
+        )
+        return visible.returncode == 0 and bool(visible.stdout.strip())
+
+    def abandon(
+        self, revs: list[str], keep_dir: str
+    ) -> tuple[list[str], dict[str, str]]:
         ids = [self.resolve(r) for r in revs]
         union = " | ".join(ids)
         out = self._jj(
@@ -779,9 +815,11 @@ class JjAdapter:
             "-r",
             f"descendants({union}) ~ ({union})",
             "-T",
-            'change_id ++ "\\n"',
+            'change_id ++ " " ++ commit_id ++ "\\n"',
         )
-        descendants = [c for c in out.stdout.split() if c]
+        pairs = [line.split() for line in out.stdout.splitlines() if line.strip()]
+        descendants = [change for change, _commit in pairs]
+        old_commits = dict(pairs)
         before = {c: self.files_at(c, keep_dir) for c in descendants}
         start = self.position()
         self._jj("abandon", *ids)
@@ -807,7 +845,15 @@ class JjAdapter:
             # `jj new` moved the working copy; go back (the old @ may have
             # been abandoned as empty, so land on its rebased parent).
             self.goto({**self.position(), "empty": True})
-        return ids
+        mapping = {}
+        for change in descendants:
+            try:
+                now = self.resolve(change)
+            except VcsError:
+                continue  # the empty working-copy change was dropped along the way
+            if now != old_commits[change]:
+                mapping[old_commits[change]] = now
+        return ids, mapping
 
     def rewrite_history(
         self,
@@ -1024,12 +1070,19 @@ class GitAdapter:
             name = f"tether/{sha[:12]}-{n}"  # taken and moved on; start a sibling
         raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
 
-    def abandon(self, revs: list[str], keep_dir: str) -> list[str]:
+    def commit_alive(self, commit: str) -> bool:
+        out = self._git("rev-list", "--all", check=False)
+        return commit in out.stdout.split()
+
+    def abandon(
+        self, revs: list[str], keep_dir: str
+    ) -> tuple[list[str], dict[str, str]]:
         status = self._git("status", "--porcelain", "--untracked-files=no")
         if status.stdout.strip():
             raise VcsError("git: commit or stash your changes before abandoning")
         ids = [self.resolve(r) for r in revs]
         done: list[str] = []
+        mapping: dict[str, str] = {}
         for commit in ids:
             head = self.current_rev()
             if commit in done:
@@ -1061,11 +1114,13 @@ class GitAdapter:
             desired = dict(
                 zip(new_descendants, (before[d] for d in descendants), strict=True)
             )
-            self.rewrite_history(
+            fixed = self.rewrite_history(
                 keep_dir, lambda c, files, want=desired: want.get(c, files)
             )
+            for old_d, new_d in zip(descendants, new_descendants, strict=True):
+                mapping[old_d] = fixed.get(new_d, new_d)
             done.append(commit)
-        return ids
+        return ids, mapping
 
     def _rebase_dropping(
         self, commit: str, parent: str, before: dict[str, dict[str, str]], keep_dir: str

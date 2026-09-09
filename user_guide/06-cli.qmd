@@ -248,6 +248,16 @@ cannot come back and are printed as `IRREVERSIBLE` (exit `2`). `import`,
 previous base heads printed. A branch that gained writes since the operation
 is refused until you commit them or pass `--discard`.
 
+When the VCS goes around tether -- `jj undo`, `jj abandon`, `git reset` on a
+dataset commit -- the op log still believes the commit exists. `tether status`
+prints a `warning:` line for each such commit, saying whether the pins it made
+are still named by the working tree (an undone commit leaves the manifests as
+uncommitted edits: still named, commit again) or not (an abandoned one reverts
+them: `gc` will release the pins, `repair` recreates them if the commit comes
+back), and `tether ops` flags the entry `(vcs commit gone)`. Removals tether
+did itself (`undo`, `abandon`) and rewrites it did itself (`abandon`,
+`upgrade`) are not reported.
+
 `tether undo --to OP_ID` is the closest thing to `jj op restore`: it undoes
 every operation newer than `OP_ID`, newest first, and reports each. jj's log
 stores whole views so a restore is one exact jump; tether's stores per-op
@@ -373,7 +383,7 @@ per-table counts.
 | Command | Shape |
 | --- | --- |
 | `init` | `{"root": "<absolute path>", "dataset_id": "<8 hex>"}` |
-| `status` | `{"manifest_hash", "stale", "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
+| `status` | `{"manifest_hash", "stale", "stale_keys", "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
 | `snapshot` | `{key: state}` |
 | `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan (below) |
 | `new` | `{"working_refs": {key: ref}, "pending_forks": {key: ref}, "fork_points": {key: state}}`; with `--dry-run`: the plan |
@@ -386,7 +396,7 @@ per-table counts.
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
 | `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
 | `forget-workspace` | `{"workspace": id8, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "removed_files": [paths], "vcs": str or null, "failed": {target: reason}}`; with `--dry-run`: the plan |
-| `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by"}]`, newest first |
+| `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by", "vcs_commit_gone"}]`, newest first |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
 | `undo --to` | `{"to": op id, "undone": [{"op", "command", "undo_id", "restored", "irreversible", "skipped"}], "stopped_at": op id or null, "reason"}` |
 | `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |
