@@ -299,6 +299,17 @@ class ObjectBackend(Protocol):
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
 
+    def working_ref_blockers(self, locator: Locator, ref: str) -> str | None:
+        """Why ``ref`` cannot be deleted right now, or ``None`` if it can.
+
+        Consulted by ``gc --prune-workspaces`` and ``forget-workspace`` before
+        planning a ``delete-branch``, so an undeletable branch is planned as
+        kept with the reason instead of failing at apply time. Neon: a branch
+        with children (pins taken on it) cannot be deleted until they are.
+        Default: no blockers.
+        """
+        return None
+
     def rename_pin(self, locator: Locator, old: Pin, state: State, new_id: str) -> Pin:
         """Give the pin ``old`` (which names ``state``) the id ``new_id``.
 

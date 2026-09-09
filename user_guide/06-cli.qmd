@@ -138,10 +138,12 @@ expiring. `Repo.materialize_fork(key)` creates one deferred branch on demand.
 The trade-offs are laid out in [Branching and writing](04-branching-and-writing.qmd#lazy-or-eager).
 
 A working branch this workspace already has is *reset* onto the pin by the
-fork. If its head holds writes that were never committed, the plan shows a
-`refuse` action and `new` stops before touching the VCS or any store; commit
-the writes, or pass `--discard` to throw them away (the fork action then says
-what it discards).
+fork -- unless it already sits exactly at the pin (you just committed from
+it), in which case the plan says `reuse` and the branch is kept as is. If its
+head holds writes that were never committed, the plan shows a `refuse` action
+and `new` stops before touching the VCS or any store; commit the writes, or
+pass `--discard` to throw them away (the fork action then says what it
+discards).
 
 If a pin fails, pins created by the same commit are released best-effort.
 
@@ -163,12 +165,12 @@ plan: commit (2 write(s))
                       db/metrics: unchanged
 ```
 
-Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new);
+Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`, `track` (new);
 `fork`, `refuse` (restore); `delete-branch`, `keep-branch`, `delete-file`, `forget-vcs-workspace` (forget-workspace); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
 `add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
 (repair); `rename-pin`, `rename-branch`, `rewrite-history` (upgrade);
-`vcs-commit`. `track`, `defer-fork`, `refuse`, and `keep-branch` are
+`vcs-commit`. `track`, `defer-fork`, `reuse`, `refuse`, and `keep-branch` are
 informational -- they write nothing.
 
 ## `gc` scope
@@ -188,7 +190,9 @@ equals the base branch's head; a branch with unpinned writes, a pin-less
 (`--pin record`) state, or on a backend whose branches are the storage itself
 (Neon, `BRANCH_IS_STORAGE`) is `keep-branch`. `--force-prune` turns every
 `keep-branch` into a `delete-branch` marked `FORCED`; the data on those
-branches is lost.
+branches is lost. A branch the store will refuse to delete (Neon: pins hang
+off it) is planned as `keep-branch: cannot be deleted` with the reason, force
+or not, rather than failing when applied.
 
 Both sweeps stay inside this dataset's namespace: pins and branches whose
 name carries another dataset's id are counted in the plan's notes (`N pin(s)

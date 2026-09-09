@@ -145,6 +145,25 @@ with psycopg.connect(h.url) as conn:     # URL for the forked branch's endpoint
 Opening a Neon fork writable creates a `read_write` compute endpoint on the
 branch if none exists; the URL points at it.
 
+::: {.callout-note title="Neon: pins are children of the branch they were taken on"}
+A Neon pin is a branch at an LSN, and a pin taken on your working branch is a
+*child* of it. That shapes what `new` and `gc` can do afterwards:
+
+- `commit` then `new` keeps your working branch: it already sits at the state
+  that was just pinned from it, so the plan says `reuse` and nothing is reset.
+- `new` onto a *different* pin (an older commit, a teammate's) cannot reset a
+  branch that has pin children -- Neon will not restore it in place -- so the
+  fork lands on a sibling name (`...db-61a22c.2`) and the old branch stays as
+  the pins' parent. Your workspace records the sibling.
+- Neither `gc --prune-workspaces` nor `--force-prune` can delete a branch
+  while pins hang off it; the plan lists it as `keep-branch: cannot be
+  deleted` with the pins named. Release those pins first (drop the commits
+  that reference them, `gc`), then the branch goes.
+
+Icechunk, Iceberg, Lance, lakeFS, and Dolt pins are tags or independent refs,
+so none of this applies to them.
+:::
+
 ### Code
 
 ```python

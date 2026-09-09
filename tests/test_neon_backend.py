@@ -84,6 +84,10 @@ class FakeNeon:
 
     def _delete_branch(self, request: httpx.Request) -> httpx.Response:
         bid = request.url.path.rsplit("/", 1)[-1]
+        if any(b.get("parent_id") == bid for b in self.branches.values()):
+            return httpx.Response(
+                409, json={"message": "branch has children; delete them first"}
+            )
         self.branches.pop(bid, None)
         return httpx.Response(200, json={})
 
@@ -172,6 +176,11 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         # Working branches are excluded from list_pins.
         assert "ws.abcd1234.db" not in backend.list_pins(LOCATOR)
 
+        # The fork is a child of the pin branch: Neon will not delete the pin
+        # while it exists (the pin is the fork's storage).
+        with pytest.raises(BackendError):
+            backend.unpin(LOCATOR, pin)
+        backend.delete_working_ref(LOCATOR, wref)
         backend.unpin(LOCATOR, pin)
         assert "abc123def456" not in backend.list_pins(LOCATOR)
         assert backend.verify(LOCATOR, state, pin, deep=False).status is (
@@ -352,3 +361,27 @@ def test_rename_pin_and_branch_in_place(backend: NeonBackend) -> None:
         )
         assert renamed == work_br["name"] == "tether.ws.d5d5d5d5.7c1e0a4d.db-61a22c"
         assert fake.restores == []  # nothing was reset along the way
+
+
+def test_working_ref_blockers_names_the_pin_children(backend: NeonBackend) -> None:
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        state = backend.fingerprint(LOCATOR, None)
+        pin = backend.pin(LOCATOR, state, "d5d5d5d5.0000000000000001")
+        wref = backend.fork(LOCATOR, pin, "tether.ws.d5d5d5d5.7c1e0a4d.db-61a22c")
+        assert backend.working_ref_blockers(LOCATOR, wref) is None
+        # A commit on the working branch hangs a pin off it.
+        child = backend.pin(
+            LOCATOR,
+            {"lsn": "0/4000000", "next_xid": "900", "branch": wref},
+            "d5d5d5d5.0000000000000002",
+        )
+        why = backend.working_ref_blockers(LOCATOR, wref)
+        assert why is not None and child.ref in why and "release those pins" in why
+        with pytest.raises(BackendError):
+            backend.delete_working_ref(LOCATOR, wref)  # the fake enforces it too
+        backend.unpin(LOCATOR, child)
+        assert backend.working_ref_blockers(LOCATOR, wref) is None
+        backend.delete_working_ref(LOCATOR, wref)
+        assert wref not in backend.list_working_refs(LOCATOR)

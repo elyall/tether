@@ -52,25 +52,33 @@ class _NeonApi:
             timeout=30.0,
         )
 
+    @staticmethod
+    def _ok(resp: Any, *, allow: tuple[int, ...] = ()) -> Any:
+        """Raise a `BackendError` carrying Neon's message on an HTTP error."""
+        if resp.is_success or resp.status_code in allow:
+            return resp
+        try:
+            detail = resp.json().get("message") or resp.text
+        except ValueError:
+            detail = resp.text
+        raise BackendError(
+            f"Neon API {resp.request.method} {resp.request.url.path}: "
+            f"{resp.status_code} {detail}".strip(),
+            kind="neon",
+        )
+
     def get(self, path: str, **params: Any) -> dict:
         resp = self._client.get(path, params={k: v for k, v in params.items() if v})
-        resp.raise_for_status()
-        return resp.json()
+        return self._ok(resp).json()
 
     def post(self, path: str, body: dict) -> dict:
-        resp = self._client.post(path, json=body)
-        resp.raise_for_status()
-        return resp.json()
+        return self._ok(self._client.post(path, json=body)).json()
 
     def delete(self, path: str) -> None:
-        resp = self._client.delete(path)
-        if resp.status_code not in (200, 404):
-            resp.raise_for_status()
+        self._ok(self._client.delete(path), allow=(404,))
 
     def patch(self, path: str, body: dict) -> dict:
-        resp = self._client.patch(path, json=body)
-        resp.raise_for_status()
-        return resp.json()
+        return self._ok(self._client.patch(path, json=body)).json()
 
 
 class NeonBackend(ObjectBackend):
@@ -347,6 +355,23 @@ class NeonBackend(ObjectBackend):
     def rename_working_ref(self, locator: Locator, old: str, new: str) -> str:
         self._rename_branch(self._project(locator), old, new)
         return new
+
+    def working_ref_blockers(self, locator: Locator, ref: str) -> str | None:
+        project_id = self._project(locator)
+        branches = self._branches(project_id)
+        me = next((b for b in branches if b.get("name") == ref), None)
+        if me is None:
+            return None
+        children = sorted(
+            str(b.get("name", "")) for b in branches if b.get("parent_id") == me["id"]
+        )
+        if not children:
+            return None
+        return (
+            f"{len(children)} branch(es) hang off it ({', '.join(children[:3])}"
+            f"{', ...' if len(children) > 3 else ''}); Neon deletes a branch only "
+            "once its children are gone -- release those pins first"
+        )
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         project_id = self._project(locator)

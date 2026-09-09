@@ -1336,6 +1336,25 @@ class Repo:
                 plan.notes.append(f"{key}: no pin and not addressable; cannot fork")
                 continue
             params: dict[str, Any] = dict(source)
+            if (
+                existing is not None
+                and head is not None
+                and self._same(m.kind, head, m.state)
+            ):
+                # The branch already holds exactly the pinned state (the usual
+                # commit-then-new). Nothing to reset -- and on Neon a reset of
+                # a branch with pin children would have meant a sibling.
+                plan.actions.append(
+                    Action(
+                        "reuse",
+                        key,
+                        m.kind,
+                        target=existing,
+                        detail=f"already at {detail.removeprefix('from ')}; kept",
+                        params={"then_state": m.state},
+                    )
+                )
+                continue
             if existing is not None:
                 params["existing"] = existing
                 params["head"] = head
@@ -1429,12 +1448,16 @@ class Repo:
 
         working_refs: dict[str, str] = {}
         pending: dict[str, str] = {}
+        reused: dict[str, State] = {}
         forks = {a.key: a for a in plan.actions if a.op == "fork"}
         for a in plan.actions:
             if a.op == "track":
                 working_refs[a.key] = a.target
             elif a.op == "defer-fork":
                 pending[a.key] = a.target
+            elif a.op == "reuse":
+                working_refs[a.key] = a.target
+                reused[a.key] = dict(a.params["then_state"])
 
         def fork_one(key: str) -> str:
             m = self.objects[key]
@@ -1463,6 +1486,7 @@ class Repo:
             state = self.objects[key].state
             if state is not None:
                 fork_points[key] = dict(state)
+        fork_points.update(reused)  # the branch sits at the pin: that is its fork point
         self.workspace.fork_points = fork_points
         self.workspace.base_states = {
             k: v for k, v in self.workspace.base_states.items() if k in leftovers
@@ -1483,6 +1507,7 @@ class Repo:
                 "vcs": self.vcs.position(),
                 "created": sorted(k for k in forked if k not in reset),
                 "reset": sorted(reset),
+                "reused": sorted(reused),
                 "working_refs": dict(working_refs),
                 "pending_forks": dict(pending),
                 "failed": sorted(errors),
@@ -2041,6 +2066,21 @@ class Repo:
                 reason: str | None = None
                 safe = ""
                 full_head: State | None = None
+                blocker = backend.working_ref_blockers(m.locator, ref)
+                if blocker is not None:
+                    # Not a judgement call: the store will refuse. Plan it as
+                    # kept, with the reason, even under --force-prune.
+                    plan.actions.append(
+                        Action(
+                            "keep-branch",
+                            key,
+                            m.kind,
+                            target=ref,
+                            detail=f"{origin}; cannot be deleted: {blocker}",
+                            params={"locator": m.locator, "blocked": True},
+                        )
+                    )
+                    continue
                 if storage:
                     reason = "branch is storage; deleting reclaims its data"
                 else:

@@ -25,7 +25,7 @@ class Action:
     """One store-writing step in a `Plan`."""
 
     op: str
-    """`pin`, `record`, `fork`, `defer-fork`, `track`, `refuse`, `unpin`,
+    """`pin`, `record`, `fork`, `defer-fork`, `reuse`, `track`, `refuse`, `unpin`,
     `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`,
     `fast-forward`, `merge`, `add`, `update`, `remove`, `upsert`, `repin`,
     `refork`, or `vcs-commit`."""
@@ -79,7 +79,7 @@ class Plan:
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
 
-    NON_WRITES = frozenset({"track", "keep-branch", "defer-fork", "refuse"})
+    NON_WRITES = frozenset({"track", "keep-branch", "defer-fork", "refuse", "reuse"})
     """Actions that write nothing to an external system when applied."""
 
     @property

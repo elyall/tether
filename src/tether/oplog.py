@@ -150,6 +150,8 @@ class OpEntry:
                 bits.append(f"forked {', '.join(sorted(r['created']))}")
             if r.get("reset"):
                 bits.append(f"reset {', '.join(sorted(r['reset']))}")
+            if r.get("reused"):
+                bits.append(f"kept {', '.join(sorted(r['reused']))}")
             if r.get("pending_forks"):
                 bits.append(f"deferred {', '.join(sorted(r['pending_forks']))}")
             rev = ((self.plan or {}).get("context") or {}).get("rev")

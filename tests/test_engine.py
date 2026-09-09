@@ -256,9 +256,14 @@ def test_lazy_forking(vcs_root: Path) -> None:
     assert isinstance(again, MemoryHandle) and again.ref == wref
     assert repo.materialize_fork("db") == wref  # idempotent
 
-    # Removing a still-pending object leaves nothing behind to gc.
+    # A second new keeps a branch that already sits at the pin (it was just
+    # committed from): no re-fork, no deferral.
     repo.new()
-    assert "db" in repo.workspace.pending_forks  # re-deferred (branch reset later)
+    assert repo.workspace.working_refs["db"] == wref
+    assert "db" not in repo.workspace.pending_forks
+    (kept,) = [a for a in repo.plan_new().actions if a.key == "db"]
+    assert kept.op == "reuse"
+    # Removing a still-pending object leaves nothing behind to gc.
     repo.remove("scratch")
     assert "scratch" not in repo.workspace.pending_forks
     assert not [a for a in repo.plan_gc().actions if a.key == "db"]
@@ -386,11 +391,11 @@ def test_new_auto_fork_reforks_after_commit(vcs_root: Path) -> None:
     assert isinstance(handle, MemoryHandle) and handle.ref == first
     default_store().write(system, first, {"x": 1})
     repo.commit("update")
-    # Deferred again after the commit; the branch keeps the deterministic name
-    # and is reset to the new pin on the next writable open.
-    assert repo.workspace.pending_forks["db"] == first
-    repo.open("db")
+    # The branch already holds the state that was just pinned from it, so the
+    # auto new keeps it as the working ref rather than deferring a re-fork.
     assert repo.workspace.working_refs["db"] == first
+    assert "db" not in repo.workspace.pending_forks
+    repo.open("db")
     assert default_store().read(system, first) == {"x": 1}
     assert not repo.is_stale()
 
@@ -912,11 +917,14 @@ def test_op_log_records_every_store_write(vcs_root: Path) -> None:
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
+    baseline = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
     repo.new(eager=True)
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 2})
     repo.commit("second")
-    repo.new()  # lazy: defers; the existing branch's head is recorded
+    # Back onto the baseline pin: the branch is not at it, so the fork is
+    # deferred (lazy) and the existing branch's head is recorded.
+    repo.new(baseline)
     repo.open("db", read_only=False)  # materializes -> "fork" op
     repo.remove("db")
     repo.gc(dry_run=False)
@@ -992,12 +1000,12 @@ def test_new_refuses_to_discard_unpinned_writes(vcs_root: Path) -> None:
     assert store.resolve(system, wref) == s_writes  # untouched
     assert not [e for e in repo.ops() if e.command == "new" and e.result.get("failed")]
 
-    # Committing them first makes the reset safe again...
+    # Committing them first makes the branch *the* pinned state: kept as is.
     repo.commit("save the writes")
     plan = repo.plan_new(eager=True)
-    assert [a.op for a in plan.actions] == ["fork"]
+    assert [a.op for a in plan.actions] == ["reuse"]
     repo.apply_new(plan, verify=False)
-    assert store.resolve(system, wref) == s_writes  # reset onto the new pin: same
+    assert store.resolve(system, wref) == s_writes
 
     # ... and --discard throws them away on purpose, saying so in the plan.
     store.write(system, wref, {"v": "scratch"})
@@ -1541,3 +1549,35 @@ def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -
     assert c6 in repo.ops()[0].result["rewritten_commits"]
     assert [d.commit for d in repo.vcs_drift()] == [c2]
     del report
+
+
+def test_prune_plans_undeletable_branches_as_kept(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that will refuse the delete (Neon: pin children) is planned as
+    kept with the reason -- even under --force-prune -- not failed at apply."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    ds = repo.config.dataset_id
+    stray = f"tether.ws.{ds}.deadbeef.db-000000"
+    store.system(system).branches[stray] = store.system(system).branches["main"]
+    backend = repo.backend_for("memory")
+    monkeypatch.setattr(
+        backend,
+        "working_ref_blockers",
+        lambda locator, ref: "2 branch(es) hang off it" if ref == stray else None,
+    )
+    for force in (False, True):
+        plan = repo.plan_gc(prune_workspaces=True, force_prune=force)
+        (a,) = [x for x in plan.actions if x.target == stray]
+        assert a.op == "keep-branch" and "cannot be deleted" in a.detail
+        assert a.params.get("blocked") is True
+    report = repo.gc(dry_run=False, prune_workspaces=True, force_prune=True)
+    assert report.kept_working_refs == {"db": [stray]}
+    assert stray in store.system(system).branches
+    # forget-workspace goes through the same rule.
+    plan = repo.plan_forget_workspace("deadbeef")
+    (a,) = [x for x in plan.actions if x.target == stray]
+    assert a.op == "keep-branch" and "cannot be deleted" in a.detail
