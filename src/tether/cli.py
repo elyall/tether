@@ -500,6 +500,12 @@ def new(
         help="Create every working branch now (--eager) or on the first writable "
         "open (--lazy). Default: [new] fork in tether.toml (lazy).",
     ),
+    discard: bool = typer.Option(
+        False,
+        "--discard",
+        help="Reset working branches even if they hold writes that were never "
+        "committed (otherwise such a new is refused).",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show which branches would be forked; write nothing."
     ),
@@ -521,7 +527,9 @@ def new(
     never write leave nothing behind); `--eager` creates them all now.
     `pin = "record"` objects always fork now, from their recorded state, so it
     cannot expire underneath them. Track-policy objects stay on their base
-    branch. `--dry-run` / `--plan` preview; `--from-plan` applies a saved plan.
+    branch. A working branch you already have is reset; if it holds writes you
+    never committed, `new` refuses unless you pass `--discard`. `--dry-run` /
+    `--plan` preview; `--from-plan` applies a saved plan.
     """
     repo = _repo()
     try:
@@ -529,7 +537,7 @@ def new(
             plan = _load_plan(from_plan, "new")
             repo.apply_new(plan)
         else:
-            plan = repo.plan_new(rev, keep=keep, eager=eager)
+            plan = repo.plan_new(rev, keep=keep, eager=eager, discard=discard)
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)

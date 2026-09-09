@@ -1037,6 +1037,7 @@ class Repo:
         *,
         keep: bool = False,
         eager: bool | None = None,
+        discard: bool = False,
     ) -> Plan:
         """Compute what `new` would do without writing anywhere.
 
@@ -1053,10 +1054,18 @@ class Repo:
         in lazy mode: its recorded state has no native ref, so the branch
         itself is what keeps the snapshot/version from expiring.
 
+        A working branch this workspace already has is *reset* by the fork
+        (now, or when it is materialized). If its head holds writes that were
+        never committed -- its content differs from the state this workspace
+        last committed or forked at -- the plan carries a `refuse` action
+        instead and `apply_new` raises, unless `discard` is set. Committing
+        first pins the writes; `discard` throws them away on purpose.
+
         Args:
             rev: Revision whose manifests to fork from (`None`: working tree).
             keep: Only refresh the baseline; keep working refs.
             eager: Fork every object during `new`; default from `config.new_fork`.
+            discard: Reset working branches even if they hold unpinned writes.
         """
         objects = self._objects_at(self.vcs.resolve(rev)) if rev else self.objects
         eager = (self.config.new_fork == "eager") if eager is None else eager
@@ -1066,6 +1075,7 @@ class Repo:
                 "rev": rev,
                 "keep": keep,
                 "eager": eager,
+                "discard": discard,
                 "manifest_hash": manifest_hash(objects),
                 "workspace_id": self.workspace.workspace_id,
             },
@@ -1116,6 +1126,34 @@ class Repo:
                 params["existing"] = existing
                 params["head"] = head
                 detail += f"; resets {existing}"
+                # Anything on the branch beyond what this workspace last
+                # committed (or forked from) is about to be thrown away.
+                known = [
+                    self.workspace.base_states.get(key),
+                    self.objects[key].state if key in self.objects else None,
+                    self.workspace.fork_points.get(key),
+                ]
+                unpinned = head is not None and not any(
+                    self._same(m.kind, head, k) for k in known if k is not None
+                )
+                if unpinned and not discard:
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            m.kind,
+                            target=existing,
+                            detail=(
+                                f"{existing} has writes since this workspace last "
+                                f"committed ({_short_state(head)}); commit them, or "
+                                "pass --discard to throw them away"
+                            ),
+                            params=params,
+                        )
+                    )
+                    continue
+                if unpinned:
+                    detail += f", discarding its writes ({_short_state(head)})"
             if eager or not durable:
                 if not durable and not eager:
                     detail += "; forked now so the state cannot expire"
@@ -1146,6 +1184,12 @@ class Repo:
         """
         if plan.command != "new":
             raise ConfigError(f"expected a new plan, got {plan.command!r}")
+        refused = [a for a in plan.actions if a.op == "refuse"]
+        if refused:
+            raise TetherError(
+                "refusing to reset working branches with unpinned writes:\n"
+                + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
+            )
         rev = plan.context.get("rev")
         if verify:
             # Check the target *before* touching the VCS working copy, so a
@@ -1308,6 +1352,7 @@ class Repo:
         *,
         keep: bool = False,
         eager: bool | None = None,
+        discard: bool = False,
     ) -> None:
         """Start working on top of `rev`: set up writable refs off its pins.
 
@@ -1325,11 +1370,17 @@ class Repo:
                 and reload the manifests; `None` keeps the current commit.
             keep: Only refresh the stale-detection baseline; keep working refs.
             eager: Create every branch now; default `config.new_fork == "eager"`.
+            discard: Reset working branches that hold unpinned writes (see
+                `plan_new`); without it such a `new` is refused.
 
         Raises:
+            TetherError: A working branch holds unpinned writes and `discard`
+                is not set.
             MultiObjectError: A pin is missing or a fork failed.
         """
-        self.apply_new(self.plan_new(rev, keep=keep, eager=eager), verify=False)
+        self.apply_new(
+            self.plan_new(rev, keep=keep, eager=eager, discard=discard), verify=False
+        )
 
     # -- open ------------------------------------------------------------ #
     def open(

@@ -10,6 +10,7 @@ from tether.errors import (
     ConfigError,
     ImmutableObjectModified,
     StaleWorkingCopyError,
+    TetherError,
 )
 from tether.handles import MemoryHandle
 from tether.manifest import Pin, Policy, ref_for_pin
@@ -964,3 +965,44 @@ def test_op_log_records_every_store_write(vcs_root: Path) -> None:
     )
     assert read_ops(vcs_root) == list(reversed(repo.ops()))
     assert len(repo.ops(2)) == 2
+
+
+def test_new_refuses_to_discard_unpinned_writes(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+
+    # Nothing written: a second new resets the branch without complaint.
+    repo.new(eager=True)
+    assert repo.workspace.working_refs["db"] == wref
+
+    # Written but never committed: refused, before anything is touched.
+    s_writes = store.write(system, wref, {"v": "uncommitted"})
+    plan = repo.plan_new(eager=True)
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert refuse.key == "db" and "--discard" in refuse.detail
+    assert not [a for a in plan.actions if a.op == "fork"]
+    with pytest.raises(TetherError, match="unpinned writes"):
+        repo.apply_new(plan, verify=False)
+    with pytest.raises(TetherError, match="unpinned writes"):
+        repo.new()  # lazy forks reset the branch later; same refusal
+    assert store.resolve(system, wref) == s_writes  # untouched
+    assert not [e for e in repo.ops() if e.command == "new" and e.result.get("failed")]
+
+    # Committing them first makes the reset safe again...
+    repo.commit("save the writes")
+    plan = repo.plan_new(eager=True)
+    assert [a.op for a in plan.actions] == ["fork"]
+    repo.apply_new(plan, verify=False)
+    assert store.resolve(system, wref) == s_writes  # reset onto the new pin: same
+
+    # ... and --discard throws them away on purpose, saying so in the plan.
+    store.write(system, wref, {"v": "scratch"})
+    plan = repo.plan_new(eager=True, discard=True)
+    (fork,) = [a for a in plan.actions if a.op == "fork"]
+    assert "discarding its writes" in fork.detail and plan.context["discard"]
+    repo.apply_new(plan, verify=False)
+    assert store.resolve(system, wref) == s_writes
