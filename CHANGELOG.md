@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A **Use Cases** guide: seven scenarios -- reproduce an analysis months
+  later; reprocess on a branch then land or discard it; A/B two candidates
+  and keep one; catch drift nightly without a watcher; publish history to a
+  registry; keep the data bill down; recover -- each as the commands you run,
+  what they guarantee, and the guide that explains the mechanics. The README
+  lists them. Later guides are renumbered (`07-cli` ... `11-extending`).
+
+### Fixed
+
+- `ForgetWorkspaceReport` was listed in `tether.__all__` but never imported,
+  which broke the docs build; a test now checks `__all__` against the module.
+
 ## [0.1.0a8] - 2026-09-09
 
 ### Added

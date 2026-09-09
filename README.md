@@ -30,9 +30,22 @@ manifests into your git/jj repo, but where DVC only fingerprints files, tether
 also *pins* and *forks* live systems.
 
 Documentation: <https://evanlyall.com/tether/> -- user guide (getting
-started, concepts, pinning, branching and writing, CLI, configuration,
-backends, writing a backend) plus the generated API and CLI reference. The
-guide sources live in [`user_guide/`](https://github.com/elyall/tether/tree/main/user_guide).
+started, concepts, pinning, branching and writing, reclaiming storage,
+[use cases](https://evanlyall.com/tether/user-guide/use-cases.html), CLI,
+configuration, backends, registries, writing a backend) plus the generated
+API and CLI reference. The guide sources live in
+[`user_guide/`](https://github.com/elyall/tether/tree/main/user_guide).
+
+Where it fits, in one line each -- the [use cases](https://evanlyall.com/tether/user-guide/use-cases.html)
+page walks through every one:
+
+- **Reproduce an analysis months later**: inputs pinned in the same commit as the code; `TETHER_REV=<sha>` or `open --rev` reads them back; `verify --all-history` in CI.
+- **Reprocess on a branch, then land it or throw it away**: `new`, write, `diff --content`, `promote` -- or `new --discard`.
+- **A/B two candidates, keep one**: two workspaces, disjoint forks, `diff a b --content`, `promote` the winner, `forget-workspace` and `abandon --gc` the loser.
+- **Catch drift nightly without a watcher**: `status` and `verify` on a schedule; nothing is polled between runs.
+- **Publish history to a registry** (experimental): `publish` to Postgres, `export` to Parquet, `import` the other way.
+- **Keep the data bill down**: `--pin record` for scratch, `abandon --gc` for failed tries, the store's own expiry for the bytes.
+- **Recover**: `undo`, `restore --from`, `repair`, and an op log that says what happened.
 
 ## Why this exists (prior art)
 

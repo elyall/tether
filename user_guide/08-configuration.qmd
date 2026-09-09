@@ -7,7 +7,7 @@ the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
 default; a minimal file is `[tether] version = 2` plus the id `init` generates.
 A dataset whose version is older than this tether's is refused by every
 command except `tether upgrade`, which brings it forward one migration at a
-time (see the [CLI guide](06-cli.qmd#upgrade)).
+time (see the [CLI guide](07-cli.qmd#upgrade)).
 
 ```toml
 [tether]
@@ -79,7 +79,7 @@ A `Policy` is stored per object (`[policy]` in its manifest) and set with the
 nor `--query` is given. It must yield tether's canonical columns (`key`,
 `kind`, `uri` / `locator_json`, optional `policy_*`, `at`); the source (DSN or
 file) is still passed on the command line, so no credentials land in the repo.
-See [Registries and SQL](09-registries-and-sql.qmd).
+See [Registries and SQL](10-registries-and-sql.qmd).
 
 ```toml
 [import]
@@ -91,7 +91,7 @@ query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHE
 `[backends.<kind>]` is handed to the backend when it is first used. Only
 non-secret settings belong here (regions, endpoints, environment-variable
 *names*); credentials come from the environment. The per-backend keys are
-listed in [Backends](08-backends.qmd).
+listed in [Backends](09-backends.qmd).
 
 ## Workspace state
 

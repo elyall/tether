@@ -1,0 +1,399 @@
+---
+title: "Use Cases"
+---
+
+Seven situations tether is built for, each as the commands you would run and
+what they guarantee. They share the dataset the other guides use -- an
+Icechunk store `zarr/imaging`, a Neon database `db/metrics`, a Lance table
+`features`, a directory of raw files `raw/plate1`, and the analysis code
+repository `code` -- and each ends with the guide that explains the mechanics.
+
+```bash
+jj git init analysis && cd analysis            # or: git init analysis
+tether init
+tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --branch main
+tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
+tether add features     --kind lance s3://bucket/features.lance
+tether add raw/plate1   --kind file s3://bucket/raw/plate1/
+tether add code         --kind git ../analysis-code --remote origin
+```
+
+## 1. Reproduce an analysis months later
+
+*The report is out. Someone asks how a number was computed. The code is in
+git; the data it read has moved on three times since.*
+
+Commit the inputs next to the code that read them:
+
+```bash
+tether commit -m "Inputs for the Q3 report"
+```
+
+```
+  pinned code -> tether.0a1b2c3d.f01a9d3c2b7ee5f6
+  pinned db/metrics -> tether.0a1b2c3d.a91f0e2b77c3e5f6
+  pinned features -> tether.0a1b2c3d.9e7c4b2f0a61e5f6
+  pinned zarr/imaging -> tether.0a1b2c3d.6674305d5e1fe5f6
+  recorded raw/plate1 (not recoverable)
+committed 8d5719841a09
+```
+
+That commit holds the manifests -- one file per object naming the pin -- and
+sits in the same history as `make_report.py`. Months later, from any clone:
+
+```bash
+TETHER_REV=8d5719841a09 python make_report.py      # every repo.open() resolves at that commit's pins
+tether open zarr/imaging --rev 8d5719841a09         # s3://bucket/imaging.icechunk#tether.0a1b2c3d.6674305d5e1fe5f6
+```
+
+```python
+from tether import Repo
+
+repo = Repo.find(".")
+h = repo.open("zarr/imaging", rev="8d5719841a09")   # read-only, at the pinned snapshot
+```
+
+And in CI, so you find out the day a pin stops resolving rather than the day
+you need it:
+
+```bash
+tether verify --all-history        # exit 1 on any missing or drifted pin
+```
+
+What tether guaranteed: the Icechunk tag, the Neon branch, the Lance tag, and
+the git tag are native refs that their systems will not expire or garbage
+collect; the raw prefix was *recorded* (size, count, etag digest) and `verify`
+reports whether it still matches, but files cannot be pinned -- the line says
+so at commit time.
+
+Read next: [Pinning](03-pinning.qmd).
+
+## 2. Reprocess on a branch, then land it or throw it away
+
+*A new model should relabel the imaging store and rewrite the metrics table.
+Production readers must not see a half-done state, and the attempt may fail.*
+
+```bash
+tether new main
+```
+
+```
+working refs set up
+  code          -> tether.ws.0a1b2c3d.7c1e0a4d.code-2f8a1c          (created on first writable open)
+  db/metrics    -> tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d    (created on first writable open)
+  features      -> tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f      (created on first writable open)
+  zarr/imaging  -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0  (created on first writable open)
+```
+
+Nothing was created yet. The job opens what it writes, and the branch for
+that object appears in its system at that moment, forked from the pin:
+
+```python
+repo = Repo.find(".")
+h = repo.open("zarr/imaging", read_only=False)   # the Icechunk branch is created now
+...                                               # write through h.session, then h.session.commit(...)
+```
+
+`main` in every system is untouched throughout. When the job is done:
+
+```bash
+tether commit -m "Relabel plate1 with model v3"
+tether diff main --content
+```
+
+```
+   modified  db/metrics  [3 tables changed]
+                    modified  public.metrics  +1200 rows, -1200 rows
+   modified  zarr/imaging  [2 arrays changed, 148 chunks]
+                    modified  labels/0.0.0
+                    modified  labels/0.0.1
+                    ... 146 more (use --limit)
+```
+
+Two endings. Land it:
+
+```bash
+tether promote
+```
+
+```
+  fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK2M9A1B7C8D4E'}
+  fast-forwarded features -> {'branch': 'main', 'version': 42}
+  fast-forwarded code -> {'sha': '9e1c3a0b...'}
+  refused        db/metrics: Neon cannot promote a child branch into its parent; use `--write track` for branches that must receive writes, or copy the data with pg_dump/psql
+```
+
+Icechunk, Lance, and git base branches moved to the forks because nothing else
+had touched them since the fork point (a fast-forward). Neon refuses -- there
+is no way to move `main` onto a child branch -- and says what to do instead:
+register the production database with `--write track` so the job writes on
+`main` directly, or copy the rows across. That refusal is the honest answer,
+not a bug.
+
+Or throw it away:
+
+```bash
+tether new --discard          # reset every working branch onto the pins; the attempt is gone
+```
+
+Without `--discard`, `new` refuses to reset a branch holding writes you never
+committed. That is the guard against losing an afternoon.
+
+::: {.callout-note title="Rehearsing a database migration"}
+The same flow rehearses a schema change: `tether new`, run the migration
+against the Neon fork's URL, run the test suite, `tether diff main --content`
+to see the row counts move. Landing it is the `track` recipe above or applying
+the migration to `main` yourself; the fork was the rehearsal.
+:::
+
+Read next: [Branching and Writing](04-branching-and-writing.qmd).
+
+## 3. A/B: two candidates, keep one
+
+*Two labeling approaches. Run both against the same inputs, compare, promote
+the winner, and leave nothing of the loser behind.*
+
+Each candidate gets its own checkout of the repository -- a jj workspace or a
+git worktree -- and with it its own tether workspace, so the two never share a
+branch in any system:
+
+```bash
+jj workspace add ../analysis-b         # git: git worktree add ../analysis-b -b b
+cd ../analysis-b && tether new main    # forks named tether.ws.0a1b2c3d.3e9b2c71.*
+cd ../analysis   && tether new main    # forks named tether.ws.0a1b2c3d.7c1e0a4d.*
+```
+
+Both jobs run; both commit (`jj bookmark set a` / `b` on their dataset
+commits, or the git branches). Compare them as datasets, not as directories:
+
+```bash
+tether diff a b --content
+```
+
+```
+   modified  zarr/imaging  [1 array changed, 148 chunks]
+                    modified  labels/0.0.0
+                    ...
+   modified  db/metrics  [1 table changed]
+                    modified  public.metrics  +1200 rows, -1200 rows
+```
+
+A wins. From A's checkout:
+
+```bash
+tether promote                # fast-forward: main had not moved since A forked
+```
+
+Now B's checkout is *stale* for those objects -- B forked from a state the
+dataset no longer says is current -- and tether says so before B can write:
+
+```bash
+cd ../analysis-b && tether status
+```
+
+```
+dataset 3ba1c07e55d2 (STALE: zarr/imaging, features, code)
+  ...
+```
+
+Retire B in the order that keeps every step safe. Forget the workspace
+*first*: its branch heads are pinned by B's commit, so deleting them loses
+nothing.
+
+```bash
+tether forget-workspace 3e9b2c71
+```
+
+```
+forgot workspace 3e9b2c71
+  deleted  zarr/imaging: tether.ws.0a1b2c3d.3e9b2c71.zarr-imaging-3fa1c0
+  deleted  features: tether.ws.0a1b2c3d.3e9b2c71.features-9b2e4f
+  deleted  code: tether.ws.0a1b2c3d.3e9b2c71.code-2f8a1c
+  kept     db/metrics: tether.ws.0a1b2c3d.3e9b2c71.db-metrics-77e21d (holds data; --force-prune)
+  removed  /.../analysis-b/.tether/workspace.toml
+  vcs      jj workspace 'analysis-b' forgotten (its directory is left in place)
+```
+
+Then drop B's dataset commit and release the pins only it referenced:
+
+```bash
+tether abandon b --gc
+```
+
+Had you abandoned first, the branches would have been holding writes no pin
+covered any more, and `forget-workspace` would have kept them all without
+`--force-prune`. Neon's branch is kept either way: it *is* the storage, so
+tether never deletes it without being told (`--force-prune`).
+
+Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-auto_fork),
+[Reclaiming Storage](05-reclaiming-storage.qmd).
+
+## 4. Catch drift nightly without a watcher
+
+*Twenty inputs across four systems. Some are "immutable" raw files. Something
+will change under you eventually, and you would rather hear it from a cron job
+than from a wrong result.*
+
+Register the inventory -- by hand, or from the registry that already lists it:
+
+```bash
+tether import inventory.csv       # key, kind, uri, ... one row per object
+tether commit -m "Inventory as of 2026-09-01"
+```
+
+Then schedule two commands:
+
+```bash
+tether status          # fingerprints every object concurrently; exit 1 if an immutable file changed
+tether verify          # exit 1 if a pin is missing or points elsewhere
+```
+
+A raw file overwritten in place (`status` stops at the snapshot; the exit code
+is 1):
+
+```
+error: immutable object 'raw/plate1' changed since it was committed; re-register with acceptance to record the new state
+```
+
+A tag moved by hand in the Icechunk repo, so it no longer names what the
+manifest says:
+
+```
+      ok  db/metrics  
+ drifted  zarr/imaging  tether.0a1b2c3d.6674305d5e1fe5f6 -> K9B2M1A7C3D8E4F0, expected 6674305D5E1FQ2ZJ
+```
+
+Nothing watches anything. Each run fingerprints the objects (an Icechunk
+snapshot id, a Neon LSN, a Lance version, one `LIST` of the prefix) and
+compares them with the manifests; the cost is one round of metadata calls.
+
+Read next: [Pinning](03-pinning.qmd#drift), [Registries and SQL](10-registries-and-sql.qmd).
+
+## 5. Publish history to a registry (experimental)
+
+*A dashboard, a training pipeline, and a data catalog all want to know which
+state of which table a run used. None of them should have to clone the
+repository to find out.*
+
+After every merge to `main`, push the history into Postgres:
+
+```bash
+tether publish --to "$REGISTRY_DSN" --schema tether
+```
+
+```
+published 27 row(s) to schema 'tether' (0 commit(s) already present)
+  commits               3 row(s)
+  commit_parents        2 row(s)
+  objects              12 row(s)
+  object_states        10 row(s)
+```
+
+Consumers join their own run log against `tether.object_states`:
+
+```sql
+select r.run_id, s.key, s.pin_id, s.state_json
+from   runs r
+join   tether.object_states s on s.commit_id = r.dataset_commit
+where  r.run_id = 'train-2026-09-14';
+```
+
+For a provenance dashboard, `tether export ./history --format parquet` writes
+the same tables as files. And when the registry -- not the repository -- is
+where objects are declared, run the other direction: `tether import` from a
+query, `commit`, and the manifests follow the registry.
+
+Producers and consumers meet in the middle: the producer commits and
+publishes, the consumer's pipeline runs `tether verify --rev <commit>` before
+training and refuses to start on a pin that is gone.
+
+Read next: [Registries and SQL](10-registries-and-sql.qmd).
+
+## 6. Keep the data bill down
+
+*Two weeks of experiments, five commits a day, each pinning a snapshot the
+store must now keep. Only the last one matters.*
+
+Decide at `add` time which objects deserve durable pins:
+
+```bash
+tether add scratch/features --kind iceberg db.scratch_features --pin record   # no tag; the recorded snapshot lives as long as the table's retention
+tether add features         --kind lance s3://bucket/features.lance              # native pins: tags the store will not expire
+```
+
+When the experiment is over, drop the commits that were only tries and see
+what that frees, in one step:
+
+```bash
+tether abandon krlwtmzy ptnwqsyu --gc
+```
+
+```
+abandoned 3c1e9f0a2b7d, 8d2f4a1b9c0e
+unpinned 4 pin(s)
+  icechunk: 0a1b2c3d.7d1e0c9a2b34e5f6
+  icechunk: 0a1b2c3d.c48b2f6e1d07a9b0
+  lance: 0a1b2c3d.7d1e0c9a2b34e5f6
+  lance: 0a1b2c3d.c48b2f6e1d07a9b0
+```
+
+Releasing a tag makes the snapshot *eligible*; the store reclaims the bytes on
+its own schedule (`repo.expire_snapshots(...)` then `repo.garbage_collect(...)`
+for Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
+retention show up in `tether verify --all-history` as missing -- that is the
+trade you made with `--pin record`, stated back to you.
+
+Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
+
+## 7. Recover
+
+*Something went wrong. Three kinds of wrong, and what comes back.*
+
+**An unwanted `new`** -- you re-forked and shouldn't have. The op log knows
+what was created and reset:
+
+```bash
+tether ops
+tether undo
+```
+
+```
+undid 3f1c9a2b7d4e (new: forked db/metrics, zarr/imaging)
+  restored   db/metrics: deleted tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d
+  restored   zarr/imaging: tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0 back at snapshot_id=K3F7...
+  restored   workspace.toml restored
+```
+
+**One object's branch on the wrong state** -- everything else is fine, only
+`zarr/imaging` should go back to what an older commit pinned:
+
+```bash
+tether restore zarr/imaging --from 8d5719841a09
+```
+
+The other branches, the manifests, and the working copy stay put; the next
+`commit` pins what you restored.
+
+**A pin deleted by hand, or by a `gc` run on the wrong clone** -- the
+manifests still promise it:
+
+```bash
+tether verify              # drifted / missing
+tether repair              # recreate every missing pin from its recorded state, while the store still has it
+```
+
+```
+repinned  zarr/imaging -> 0a1b2c3d.6674305d5e1fe5f6
+```
+
+And when several things went wrong in a row, `tether undo --to <op id>` walks
+back through every operation newer than that one, stopping -- with everything
+so far reversed -- at the first the store will not allow.
+
+The boundary: `jj undo` and `git reset` move the manifests, never the stores;
+tether's `undo` and `repair` cover tether's side and say exactly what they
+could not do (a pin whose snapshot the store already expired, a `promote`).
+`status` also tells you when a dataset commit vanished from the VCS behind
+tether's back.
+
+Read next: [CLI Guide](07-cli.qmd#ops-undo-repair), [Concepts](02-concepts.qmd#the-operation-log).

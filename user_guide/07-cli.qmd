@@ -66,13 +66,13 @@ you are done with.
 | --- | --- |
 | `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
 | `PATH`, `JJ_CONFIG` | Used by the `jj` / `git` executables tether shells out to (also configurable via `[vcs] jj_path` / `git_path`). |
-| Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](08-backends.qmd). |
+| Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](09-backends.qmd). |
 
 ## Locator options for `add`
 
 The positional `LOCATOR` becomes the `uri` field. Named options map to locator
 fields; `--set key=value` (repeatable) covers everything else. Which fields a
-backend reads is listed per backend in [Backends](08-backends.qmd).
+backend reads is listed per backend in [Backends](09-backends.qmd).
 
 | Option | Locator field | Typical backends |
 | --- | --- | --- |
@@ -375,7 +375,7 @@ changed object's native diff; `--limit` caps entries printed per object
 
 ## `export`, `publish`, `import`
 
-The registry commands are covered in [Registries and SQL](09-registries-and-sql.qmd).
+The registry commands are covered in [Registries and SQL](10-registries-and-sql.qmd).
 In short: `export` writes the derived tables to a SQLite file (default) or a
 directory of parquet / csv / jsonl files; `publish` upserts them into a
 Postgres schema (DSN from `--to` or `$TETHER_PUBLISH_DSN`, never
