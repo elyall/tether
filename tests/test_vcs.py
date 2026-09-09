@@ -197,7 +197,9 @@ def test_rewrite_history_rewrites_files_and_keeps_the_shape(vcs_root: Path) -> N
     mapping = vcs.rewrite_history("ds/.tether/objects", transform)
     # Every commit with a manifest was rewritten; c3 only because its parent was.
     assert set(mapping) == {c1, c2, c3}
-    assert set(seen) >= {c1, c2, c3}
+    # The transform ran for the commits that touch the directory; c3 did not
+    # (jj: not in files(); git: same subtree as c2, answer cached).
+    assert set(seen) == {c1, c2}
     n1, n2, n3 = mapping[c1], mapping[c2], mapping[c3]
     assert vcs.read_file_at(n1, "ds/.tether/objects/db.toml") == "pin = 'new-1'\n"
     assert vcs.read_file_at(n2, "ds/.tether/objects/db.toml") == "pin = 'new-2'\n"

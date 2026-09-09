@@ -863,16 +863,31 @@ class JjAdapter:
         ignore_immutable: bool = False,
     ) -> dict[str, str]:
         start = self.position()
-        out = self._jj(
+        # Only commits that touch reldir can need new content; every other
+        # descendant inherits its parent's files when jj rebases it. A dataset
+        # nested in a large repository therefore pays for its own commits, not
+        # the whole history.
+        touched = self._jj(
             "log",
             "--no-graph",
             "--reversed",
             "-r",
-            "all() ~ root()",
+            f'files("{reldir}") ~ root()',
             "-T",
             'change_id ++ " " ++ commit_id ++ "\\n"',
         )
-        changes = [line.split() for line in out.stdout.splitlines() if line.strip()]
+        changes = [line.split() for line in touched.stdout.splitlines() if line.strip()]
+        affected = self._jj(
+            "log",
+            "--no-graph",
+            "-r",
+            f'descendants(files("{reldir}")) ~ root()',
+            "-T",
+            'change_id ++ " " ++ commit_id ++ "\\n"',
+        )
+        descendants = [
+            line.split() for line in affected.stdout.splitlines() if line.strip()
+        ]
         mapping: dict[str, str] = {}
         flags = ["--ignore-immutable"] if ignore_immutable else []
         rewritten = False
@@ -892,10 +907,13 @@ class JjAdapter:
             self._jj("squash", "-u", *flags)
             rewritten = True
         if rewritten:
-            for change, commit in changes:
+            for change, commit in descendants:
                 if change == start["id"]:
                     continue
-                now = self.resolve(change)
+                try:
+                    now = self.resolve(change)
+                except VcsError:
+                    continue  # an empty working-copy change dropped along the way
                 if now != commit:
                     mapping[commit] = now
         # The recorded parent may itself have been rewritten; a `jj new` on the
@@ -1166,14 +1184,28 @@ class GitAdapter:
             self.root / git_dir / f"tether-rewrite-{os.getpid()}.index"
         ).resolve()
         env = {"GIT_INDEX_FILE": str(index_file)}
+        # Commits sharing a reldir subtree share the transform's answer; in a
+        # large repository most commits never touch the dataset at all.
+        by_subtree: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
         try:
             for commit in commits:
                 parents = self._git(
                     "rev-list", "--parents", "-n1", commit
                 ).stdout.split()[1:]
                 new_parents = [mapping.get(p, p) for p in parents]
-                files = self.files_at(commit, reldir)
-                new_files = transform(commit, files)
+                sub = self._git(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"{commit}:{reldir}",
+                    check=False,
+                ).stdout.strip()
+                if sub in by_subtree:
+                    files, new_files = by_subtree[sub]
+                else:
+                    files = self.files_at(commit, reldir) if sub else {}
+                    new_files = transform(commit, files) if files else files
+                    by_subtree[sub] = (files, new_files)
                 tree = self._git("rev-parse", f"{commit}^{{tree}}").stdout.strip()
                 if new_files != files:
                     self._git("read-tree", tree, env=env)

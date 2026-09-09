@@ -17,6 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branches `gc` deleted). `tether ops` and `Repo.ops()` read it;
   `tether.oplog` is the module. `Repo` re-asserts the `.tether/.gitignore`
   rules on open so jj never snapshots the log.
+- `VcsAdapter.rewrite_history` only reads and transforms the commits that
+  touch the dataset directory (jj: the `files()` revset -- other descendants
+  inherit the rewritten files when jj rebases them; git: the answer is cached
+  per subtree id), so a dataset nested in a large repository pays for its own
+  commits, not the whole history.
 - The op log is strictly append-only: an undo appends a mark line
   (`{"undone": ID, "by": UNDO_ID}`) instead of rewriting the file, and a torn
   final line from an interrupted write is skipped on read.
