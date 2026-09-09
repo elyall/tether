@@ -33,10 +33,10 @@ tether new main
 
 ```
 working refs set up
-  code          -> tether.ws.7c1e0a4d.code          (created on first writable open)
-  db/metrics    -> tether.ws.7c1e0a4d.db-metrics    (created on first writable open)
-  features      -> tether.ws.7c1e0a4d.features      (created on first writable open)
-  zarr/imaging  -> tether.ws.7c1e0a4d.zarr-imaging  (created on first writable open)
+  code          -> tether.ws.0a1b2c3d.7c1e0a4d.code          (created on first writable open)
+  db/metrics    -> tether.ws.0a1b2c3d.7c1e0a4d.db-metrics    (created on first writable open)
+  features      -> tether.ws.0a1b2c3d.7c1e0a4d.features      (created on first writable open)
+  zarr/imaging  -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging  (created on first writable open)
 ```
 
 For every Forkable object, `new` decided a branch name and where it will be
@@ -47,15 +47,16 @@ branch, not four.
 
 | Object | Pin at `main` | Working ref (created on first write) |
 | --- | --- | --- |
-| `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.7c1e0a4d.zarr-imaging` |
-| `db/metrics` | Neon branch | Neon child branch `tether.ws.7c1e0a4d.db-metrics` |
-| `features` | Lance tag | Lance branch `tether.ws.7c1e0a4d.features` |
-| `code` | git tag | git branch `tether.ws.7c1e0a4d.code` |
+| `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging` |
+| `db/metrics` | Neon branch | Neon child branch `tether.ws.0a1b2c3d.7c1e0a4d.db-metrics` |
+| `features` | Lance tag | Lance branch `tether.ws.0a1b2c3d.7c1e0a4d.features` |
+| `code` | git tag | git branch `tether.ws.0a1b2c3d.7c1e0a4d.code` |
 
-`7c1e0a4d` is this workspace's id (from the untracked
-`.tether/workspace.toml`), so two people -- or two jj workspaces -- forking the
-same commit get disjoint branches everywhere. `raw/plate1` has no working ref:
-files cannot be forked.
+`0a1b2c3d` is the dataset's id (from `tether.toml`) and `7c1e0a4d` this
+workspace's (from the untracked `.tether/workspace.toml`), so two people -- or
+two jj workspaces, or two datasets sharing a store -- forking the same commit
+get disjoint branches everywhere. `raw/plate1` has no working ref: files
+cannot be forked.
 
 `status` reads objects that have not been forked yet at their base (the pin),
 and all are `clean`; once a branch exists, `status` reads it instead.
@@ -111,7 +112,7 @@ from tether.handles import IcechunkHandle
 repo = Repo.find(".")
 h = repo.open("zarr/imaging")
 assert isinstance(h, IcechunkHandle) and not h.read_only
-print(h.branch)                       # tether.ws.7c1e0a4d.zarr-imaging
+print(h.branch)                       # tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging
 
 group = zarr.open_group(h.session.store, mode="a")
 group["labels"][...] = relabel(group["labels"][...])
@@ -160,7 +161,7 @@ From the shell, `tether open <key>` prints the same addresses:
 tether open db/metrics
 postgresql://runner@ep-brisk-forest-x9y8z7.us-west-2.aws.neon.tech/metrics?...
 tether open features
-s3://bucket/features.lance#tether.ws.7c1e0a4d.features@v4
+s3://bucket/features.lance#tether.ws.0a1b2c3d.7c1e0a4d.features@v4
 ```
 
 ## See what changed
@@ -190,10 +191,10 @@ tether commit -m "Relabel plate1 with model v3; scores for A1"
 ```
 
 ```
-  pinned code -> tether.f01a9d3c2b7e
-  pinned db/metrics -> tether.55e2ab7d9c10
-  pinned features -> tether.9e7c4b2f0a61
-  pinned zarr/imaging -> tether.deb4861eb388
+  pinned code -> tether.0a1b2c3d.f01a9d3c2b7ee5f6
+  pinned db/metrics -> tether.0a1b2c3d.55e2ab7d9c10e5f6
+  pinned features -> tether.0a1b2c3d.9e7c4b2f0a61e5f6
+  pinned zarr/imaging -> tether.0a1b2c3d.deb4861eb388e5f6
 committed 41c0d9e2b7f3
 ```
 
@@ -373,9 +374,57 @@ make you stale, and adding or removing unrelated objects does not clear it.
 you *committed* is safe: those pins are tags, independent of any branch. Writes
 you did not commit are not: re-forking an existing branch resets it to the new
 pin (Icechunk `reset_branch`, Lance/lakeFS/Dolt delete-and-recreate, git
-`branch -f`; Neon keeps the old branch as-is), so commit before you `new`.
-Branches that were still pending are simply re-decided; there was nothing to
-reset.
+`branch -f`, Neon branch restore). `new` therefore looks at every branch it
+would reset first, and refuses if one holds writes beyond what you last
+committed:
+
+```
+$ tether new
+error: refusing to reset working branches with unpinned writes:
+  zarr/imaging: tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0 has writes since this workspace last committed (snapshot_id=Q7ZK…); commit them, or pass --discard to throw them away
+```
+
+Commit, or `tether new --discard` if that was scratch work. Branches that
+were still pending are simply re-decided; there was nothing to reset.
+
+## Undo
+
+Every command that touched a store is in this workspace's operation log:
+
+```bash
+tether ops
+```
+
+```
+9f2e1c7b3a5d  2026-09-05T10:41:12+00:00  commit   pinned zarr/imaging, db/metrics; vcs 4c1e2a9b7d3f
+3f1c9a2b7d4e  2026-09-05T10:22:03+00:00  fork     forked zarr/imaging -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0
+b7d4e3f1c9a2  2026-09-05T10:21:55+00:00  new      deferred code, db/metrics, features, zarr/imaging; at main
+```
+
+`tether undo` reverses the newest entry where the store still allows it. Undo
+the commit and it is *uncommitted*: the dataset commit leaves the VCS, the
+manifests are working-tree changes again, and the pins stay -- they are still
+referenced, so `gc` keeps them and `tether commit` re-records them. Undo the
+fork and the branch is deleted (refused, like `new`, if it gained writes you
+never committed -- `--discard` overrides) and `workspace.toml` goes back to
+saying the fork is pending. Undo the `new` and the working copy returns to
+where it was, too.
+
+```bash
+tether undo            # the commit -> uncommitted; pins kept
+tether undo            # the fork  -> branch deleted, fork pending again
+tether ops             # both entries now read "(undone by ...)"
+```
+
+What undo cannot do it says so: a `gc` that deleted pins gets its branches
+and listings back but reports the pins as `IRREVERSIBLE` (exit code 2); a
+`promote` is refused with the previous base heads printed. `jj undo` and
+`git reset` stay what they were -- they move the manifests, never the stores;
+tether's undo is the other half.
+
+If a store lost something a manifest promises -- a pin deleted by hand, a
+branch this workspace expects -- `tether repair` recreates it from the recorded
+state, while the store still has that state.
 
 ## Workspaces and `auto_fork`
 

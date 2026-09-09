@@ -44,8 +44,8 @@ tether commit -m "Baseline: plate1 imaging + metrics"
 ```
 
 ```
-  pinned zarr/imaging -> tether.6674305d5e1f
-  pinned db/metrics -> tether.a91f0e2b77c3
+  pinned zarr/imaging -> tether.0a1b2c3d.6674305d5e1fe5f6
+  pinned db/metrics -> tether.0a1b2c3d.a91f0e2b77c3e5f6
   recorded raw/plate1 (not recoverable)
 committed 8d5719841a09
 ```
@@ -54,8 +54,8 @@ What happened, per object:
 
 | Object | State recorded | Pin created |
 | --- | --- | --- |
-| `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.6674305d5e1f` (immutable, excluded from expiry) |
-| `db/metrics` | `lsn`, `next_xid` of `main` | protected Neon child branch `tether.a91f0e2b77c3` at that LSN |
+| `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.0a1b2c3d.6674305d5e1fe5f6` (immutable, excluded from expiry) |
+| `db/metrics` | `lsn`, `next_xid` of `main` | protected Neon child branch `tether.0a1b2c3d.a91f0e2b77c3e5f6` at that LSN |
 | `raw/plate1` | `count`, `size`, `digest` | none; the per-file listing is stored under `.tether/listings/` |
 
 Then the manifests (and the listing) were committed to your jj/git repository as
@@ -75,7 +75,7 @@ Added regular file .tether/objects/zarr/imaging.toml:
        16: snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
        18: [pin]
        19: id = "6674305d5e1f"
-       20: ref = "tether.6674305d5e1f"
+       20: ref = "tether.0a1b2c3d.6674305d5e1fe5f6"
 ```
 
 Pin ids are content-addressed from `(kind, locator identity, state)`. Commit
@@ -103,8 +103,8 @@ tether commit -m "Re-segmented plate1; metrics through 2026-09-04"
 ```
 
 ```
-  pinned zarr/imaging -> tether.deb4861eb388
-  pinned db/metrics -> tether.0c31e7aa5f92
+  pinned zarr/imaging -> tether.0a1b2c3d.deb4861eb388e5f6
+  pinned db/metrics -> tether.0a1b2c3d.0c31e7aa5f92e5f6
 committed cfc66fa79c0a
 ```
 
@@ -136,7 +136,7 @@ tether open zarr/imaging -r 8d571984
 ```
 
 ```
-s3://bucket/imaging.icechunk#tether.6674305d5e1f
+s3://bucket/imaging.icechunk#tether.0a1b2c3d.6674305d5e1fe5f6
 ```
 
 ```bash
@@ -253,7 +253,7 @@ tether gc --no-dry-run    # release orphaned pins, prune unreferenced listings
 
 ```
 plan: gc (1 write(s))
-               unpin  zarr/imaging  [icechunk] tether.3c80e6bda56d  no manifest in history references it
+               unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.3c80e6bda56de5f6  no manifest in history references it
 ```
 
 Run `verify --all-history` first; `gc` trusts history, and a pin that is

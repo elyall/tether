@@ -15,13 +15,16 @@ tether status [--no-snapshot]
 tether snapshot
 tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-run | --plan FILE]
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
-tether new [REV] [--keep] [--eager | --lazy] [--dry-run | --plan FILE | --from-plan FILE]
+tether new [REV] [--keep] [--eager | --lazy] [--discard] [--dry-run | --plan FILE | --from-plan FILE]
 tether open KEY [-r REV] [--read-only | --writable]
 tether promote [KEY]... [-r REV] [--strategy auto|ff|merge] [-m MESSAGE] [--dry-run | --plan FILE | --from-plan FILE]
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
 tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
+tether ops [-n N]
+tether undo [OP_ID] [--discard]
+tether repair [--all-history] [--dry-run | --plan FILE | --from-plan FILE]
 tether export PATH [--rev REV]... [--format sqlite|parquet|csv|jsonl] [--listings] [--workspace] [--append]
 tether publish [--to DSN] [--schema NAME] [--rev REV]... [--listings] [--dry-run]
 tether import SOURCE [--table NAME | --query SQL] [--sync] [--dry-run | --plan FILE | --from-plan FILE]
@@ -36,8 +39,10 @@ concurrently across objects, and every command that prints a result accepts
 
 `0` on success, `1` on any `TetherError` (printed to stderr as `error: ...`).
 `verify` also exits `1` when any report is not `ok`, which makes it a natural
-CI gate. Failures in one object's backend during a fan-out are aggregated into
-one message listing each object.
+CI gate. `undo` and `repair` exit `2` when they did part of the job and the
+store would not allow the rest (each such part is printed as `IRREVERSIBLE` /
+`FAILED`). Failures in one object's backend during a fan-out are aggregated
+into one message listing each object.
 
 ## Revisions
 
@@ -119,7 +124,8 @@ suspended); `[snapshot] auto = false` makes that the default.
 ## What `new` does
 
 Reads the manifests at `REV` and, per Forkable object, records a working ref:
-the base branch for `write = "track"`, otherwise `tether.ws.<workspace>.<key-slug>-<key-hash>`.
+the base branch for `write = "track"`, otherwise
+`tether.ws.<dataset>.<workspace>.<key-slug>-<key-hash>`.
 By default (`[new] fork = "lazy"`) that branch is *not created yet* -- the plan
 shows `defer-fork` and the first writable `open` creates it from the pin.
 `--eager` creates them all during `new`. Objects with `pin = "record"` fork
@@ -127,12 +133,18 @@ during `new` regardless, because only a branch keeps their recorded state from
 expiring. `Repo.materialize_fork(key)` creates one deferred branch on demand.
 The trade-offs are laid out in [Branching and writing](04-branching-and-writing.qmd#lazy-or-eager).
 
+A working branch this workspace already has is *reset* onto the pin by the
+fork. If its head holds writes that were never committed, the plan shows a
+`refuse` action and `new` stops before touching the VCS or any store; commit
+the writes, or pass `--discard` to throw them away (the fork action then says
+what it discards).
+
 If a pin fails, pins created by the same commit are released best-effort.
 
 ## Plans: `--dry-run`, `--plan`, `--from-plan`
 
-`commit`, `new`, and `gc` are the commands that write to external systems, and
-each is a plan followed by an apply. `--dry-run` runs only the plan and prints
+`commit`, `new`, `gc`, `promote`, `import`, and `repair` are the commands that
+write to external systems, and each is a plan followed by an apply. `--dry-run` runs only the plan and prints
 it (as JSON with `--json`); `--plan FILE` also saves it; `--from-plan FILE`
 skips planning and applies the saved actions. Before applying, tether
 re-fingerprints the planned objects (and, for `new`, re-reads the manifests at
@@ -142,7 +154,7 @@ given.
 
 ```
 plan: commit (2 write(s))
-                 pin  zarr/imaging  [icechunk] tether.deb4861eb388  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
+                 pin  zarr/imaging  [icechunk] tether.0a1b2c3d.deb4861eb388e5f6  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
           vcs-commit  jj commit: 'Relabel plate1'
                       db/metrics: unchanged
 ```
@@ -150,8 +162,9 @@ plan: commit (2 write(s))
 Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new);
 `fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
-`add`, `update`, `remove` (import); `upsert` (publish); `vcs-commit`. `track`,
-`defer-fork`, `refuse`, and `keep-branch` are informational -- they write nothing.
+`add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
+(repair); `vcs-commit`. `track`, `defer-fork`, `refuse`, and `keep-branch` are
+informational -- they write nothing.
 
 ## `gc` scope
 
@@ -171,6 +184,46 @@ equals the base branch's head; a branch with unpinned writes, a pin-less
 (Neon, `BRANCH_IS_STORAGE`) is `keep-branch`. `--force-prune` turns every
 `keep-branch` into a `delete-branch` marked `FORCED`; the data on those
 branches is lost.
+
+Both sweeps stay inside this dataset's namespace: pins and branches whose
+name carries another dataset's id are counted in the plan's notes (`N pin(s)
+of other datasets left alone`) and never touched, `--force-prune` included.
+
+## `ops`, `undo`, `repair`
+
+Every command that writes to a store appends an entry to this workspace's
+operation log, `.tether/ops.jsonl` (untracked; see
+[Concepts](02-concepts.qmd#the-operation-log)). `tether ops` prints the newest
+entries, one line each -- id, time, command, what it did, and `(undone by ID)`
+where applicable.
+
+`tether undo [OP_ID]` reverses the newest undoable entry (or the one named):
+
+```
+$ tether undo
+undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
+  restored   db: deleted tether.ws.0a1b2c3d.7e8f9a0b.db-4c1e2a
+  restored   zarr/imaging: deleted tether.ws.0a1b2c3d.7e8f9a0b.zarr-imaging-91be0f
+  restored   workspace.toml restored
+```
+
+A `commit` is uncommitted (jj: squashed back into `@`; git: `reset --soft`)
+while it is still the working copy's parent -- the manifests become
+working-tree changes and the pins stay. A `new` or lazy fork has its branches
+deleted (created) or re-pointed to their recorded heads (reset), its
+`workspace.toml` restored, and the VCS working copy returned if it has not
+moved. A `gc` gets its deleted branches and listings back; its deleted pins
+cannot come back and are printed as `IRREVERSIBLE` (exit `2`). `import`,
+`add`, and `remove` restore the manifests. `promote` is refused with the
+previous base heads printed. A branch that gained writes since the operation
+is refused until you commit them or pass `--discard`.
+
+`tether repair` rebuilds what the manifests promise: a pin whose native ref is
+missing is recreated from the recorded state (if the store still has it); a
+working branch this workspace expects but the store lost is forked again.
+`--all-history` checks every commit's pins, not just the working tree's. Pins
+that exist but point elsewhere are reported as notes, never overwritten. It is
+a plan/apply command like the others.
 
 ## What `promote` does
 
@@ -236,7 +289,7 @@ per-table counts.
 
 | Command | Shape |
 | --- | --- |
-| `init` | `{"root": "<absolute path>"}` |
+| `init` | `{"root": "<absolute path>", "dataset_id": "<8 hex>"}` |
 | `status` | `{"manifest_hash", "stale", "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
 | `snapshot` | `{key: state}` |
 | `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan (below) |
@@ -247,6 +300,9 @@ per-table counts.
 | `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
+| `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by"}]`, newest first |
+| `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
+| `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |
 | plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |
 | `export` | `{"path", "format", "head", "rows": {table: count}}` |
 | `publish` | `{"schema", "head", "upserted": {table: count}, "skipped_commits"}`; with `--dry-run`: the plan (one `upsert` action per table) |

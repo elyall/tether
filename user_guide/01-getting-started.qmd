@@ -55,8 +55,8 @@ tether commit -m "Baseline imaging + metrics"
 ```
 
 ```
-  pinned zarr/imaging -> tether.6674305d5e1f
-  pinned db/metrics -> tether.a91f0e2b77c3
+  pinned zarr/imaging -> tether.0a1b2c3d.6674305d5e1fe5f6
+  pinned db/metrics -> tether.0a1b2c3d.a91f0e2b77c3e5f6
   recorded raw/plate1 (not recoverable)
 committed 8d5719841a09
 ```

@@ -3,12 +3,15 @@ title: "Configuration"
 ---
 
 A dataset's configuration is `tether.toml` at the dataset root, committed with
-the manifests and loaded into `RepoConfig`. Every key has a default; a minimal
-file is just `[tether] version = 1`.
+the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
+default; a minimal file is `[tether] version = 1` plus the id `init` generates.
 
 ```toml
 [tether]
 version = 1
+
+[dataset]
+id = "0a1b2c3d"      # 8 hex chars; the namespace of this dataset's pins and branches in every store
 
 [snapshot]
 auto = true          # CLI status/commit fingerprint by default (--no-snapshot wins)
@@ -39,6 +42,19 @@ api_key_env = "NEON_API_KEY"
 [backends.ducklake]
 init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
 ```
+
+## Dataset id
+
+`init` generates `[dataset] id`, and because `tether.toml` is committed every
+clone shares it. Every native ref tether creates carries it -- pins are
+`tether.<id>.<hash>`, working branches `tether.ws.<id>.<workspace>.<key>` --
+and `gc` only considers refs in that namespace, so several datasets can share
+one Icechunk repo or Neon project without being able to delete each other's
+pins. Do not change it once anything has been committed: pins and branches
+made under the old id are no longer recognised as this dataset's (`gc` treats
+them as foreign and leaves them alone; `repair` recreates the pins the
+manifests name under the new id). Loading a `tether.toml` without a valid id
+is an error that prints the line to add.
 
 ## Policies
 
@@ -74,18 +90,19 @@ listed in [Backends](08-backends.qmd).
 ## Workspace state
 
 `.tether/workspace.toml` is untracked (ignored by the `.tether/.gitignore` that
-`init` writes) and is per checkout / per jj workspace:
+`init` writes, alongside the operation log `.tether/ops.jsonl`) and is per
+checkout / per jj workspace:
 
 ```toml
 workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
 last_snapshot_at = "2026-09-04T22:10:03.118Z"
 
 [working_refs]                       # branches that exist
-"zarr/imaging" = "tether.ws.7c1e0a4d.zarr-imaging-3fa1c0"
-"db/metrics" = "tether.ws.7c1e0a4d.db-metrics-77e21d"
+"zarr/imaging" = "tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0"
+"db/metrics" = "tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d"
 
 [pending_forks]                      # decided by `new`, created on first writable open
-"features" = "tether.ws.7c1e0a4d.features-9b2e4f"
+"features" = "tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f"
 
 [base_states."zarr/imaging"]         # committed state this working ref corresponds to
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
@@ -101,6 +118,17 @@ snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 are what `open` writes to; `pending_forks` are the branches `new` decided on but has not
 created (the first writable `open` moves an entry to `working_refs`);
 `last_snapshot` is what `--no-snapshot` reuses.
+
+## Operation log
+
+`.tether/ops.jsonl` sits next to `workspace.toml`, equally untracked and
+per workspace: one JSON object per line for every command that wrote to a
+store -- the plan it applied, what it did (`result`), and what it replaced
+(`pre`: the workspace state and VCS position before a `new`, the heads of
+branches it reset, the manifests an `import` rewrote, the base heads a
+`promote` moved from). `tether ops` reads it; `tether undo` reverses entries
+from it and appends its own, marking the target `undone_by`. Deleting the
+file loses nothing but the ability to undo what came before.
 
 ## Environment variables
 

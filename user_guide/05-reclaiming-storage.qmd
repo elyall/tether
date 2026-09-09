@@ -25,7 +25,7 @@ tether commit -m "Relabel plate1" --dry-run
 
 ```
 plan: commit (3 write(s))
-                 pin  zarr/imaging  [icechunk] tether.deb4861eb388  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
+                 pin  zarr/imaging  [icechunk] tether.0a1b2c3d.deb4861eb388e5f6  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
               record  features      [lance] pin=record: state branch=main version=7, no native ref
               record  raw/plate1    [file] Observed: recorded, not recoverable
           vcs-commit  jj commit: 'Relabel plate1'
@@ -146,15 +146,19 @@ tether gc                        # dry run: the plan
 
 ```
 plan: gc (5 write(s))
-               unpin  zarr/imaging  [icechunk] tether.7d1e0c9a2b34  no manifest in history references it
-               unpin  zarr/imaging  [icechunk] tether.c48b2f6e1d07  no manifest in history references it
-               unpin  db/metrics    [neon] tether.7d1e0c9a2b34  no manifest in history references it
-               unpin  db/metrics    [neon] tether.c48b2f6e1d07  no manifest in history references it
+               unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
+               unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.c48b2f6e1d07a9b0  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.c48b2f6e1d07a9b0  no manifest in history references it
       delete-listing                a1c9…e3f2.jsonl  unreferenced
 ```
 
 Two tags in Icechunk, two branches in Neon, one content listing. Nothing named
-by the three surviving commits appears. Apply it:
+by the three surviving commits appears -- and nothing that belongs to another
+dataset: every ref carries the dataset's id (`0a1b2c3d` here) and `gc` only
+looks inside its own namespace. Had another dataset pinned the same Icechunk
+repo, the plan would say `zarr/imaging: 2 pin(s) of other datasets left alone`
+and stop there. Apply it:
 
 ```bash
 tether gc --no-dry-run
@@ -162,10 +166,10 @@ tether gc --no-dry-run
 
 ```
 unpinned 4 pin(s)
-  icechunk: 7d1e0c9a2b34
-  icechunk: c48b2f6e1d07
-  neon: 7d1e0c9a2b34
-  neon: c48b2f6e1d07
+  icechunk: 0a1b2c3d.7d1e0c9a2b34e5f6
+  icechunk: 0a1b2c3d.c48b2f6e1d07a9b0
+  neon: 0a1b2c3d.7d1e0c9a2b34e5f6
+  neon: 0a1b2c3d.c48b2f6e1d07a9b0
 deleted 1 orphan listing(s)
 ```
 
@@ -176,6 +180,14 @@ tether gc --plan /tmp/gc.json
 tether gc --from-plan /tmp/gc.json
 ```
 
+`gc` is the one command whose store writes cannot all be undone: `tether undo`
+after a `gc` brings back deleted branches (from the heads it recorded) and
+listings (from the VCS), and reports the released pins as irreversible. If you
+restore a commit that references a released pin -- `jj undo` of the abandon --
+`tether repair` recreates the pin from the manifest's state, as long as the
+system has not expired that snapshot yet. That window is the argument for
+running `gc` some time *after* the history edit, not in the same breath.
+
 Releasing a tag or branch makes the data *eligible* for reclamation; the
 system decides when. Icechunk needs `repo.expire_snapshots(...)` then
 `repo.garbage_collect(...)`; Iceberg needs `expire_snapshots`; Lance needs
@@ -184,7 +196,7 @@ Those are the system's operations, not tether's.
 
 ### Working branches from dead workspaces
 
-Every workspace gets its own `tether.ws.<id>.<key>-<hash>` branch per Forkable
+Every workspace gets its own `tether.ws.<dataset>.<workspace>.<key>-<hash>` branch per Forkable
 object it writes to (forks are lazy by default, so objects a workspace only
 read never got one; `--pin record` objects and `--eager` workspaces have a
 branch per object). Workspaces that were forgotten, machines that were wiped,
@@ -215,9 +227,9 @@ tether gc --prune-workspaces --keep-workspace 7e21d0ab   # plus a checkout on an
 
 ```
 plan: gc (1 write(s))
-       delete-branch  zarr/imaging  [icechunk] tether.ws.c0ffee42.zarr-imaging-3fa1c0  workspace c0ffee42 (not kept); head is pinned
-         keep-branch  features      [lance] tether.ws.c0ffee42.features-9b2e4f  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
-         keep-branch  db/metrics    [neon] tether.ws.c0ffee42.db-metrics-77e21d  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
+       delete-branch  zarr/imaging  [icechunk] tether.ws.0a1b2c3d.c0ffee42.zarr-imaging-3fa1c0  workspace c0ffee42 (not kept); head is pinned
+         keep-branch  features      [lance] tether.ws.0a1b2c3d.c0ffee42.features-9b2e4f  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
+         keep-branch  db/metrics    [neon] tether.ws.0a1b2c3d.c0ffee42.db-metrics-77e21d  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
                       keeping live workspaces: 7c1e0a4d
 ```
 

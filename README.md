@@ -19,10 +19,11 @@ creates a durable native reference (an Icechunk tag, a Neon child branch, a git
 tag, an Iceberg tag, a Lance tag, a lakeFS tag, a Dolt tag) so the exact state
 can be recovered and branched from later.
 `tether new` sets up fresh writable branches off any committed state (created
-lazily, on first write). The VCS
-supplies history, undo, bookmarks, workspaces, and sharing; `tether` only
-implements what is novel: cross-system fan-out, drift detection, and the
-pin/fork lifecycle.
+lazily, on first write). The VCS supplies history, bookmarks, workspaces, and
+sharing; `tether` only implements what is novel: cross-system fan-out, drift
+detection, the pin/fork lifecycle, and an operation log of what it did to the
+stores -- the part the VCS cannot see -- so `tether undo` and `tether repair`
+can reverse or rebuild it.
 
 Think of it as **DVC for *branchable* systems**: like DVC it commits small
 manifests into your git/jj repo, but where DVC only fingerprints files, tether
@@ -74,7 +75,7 @@ aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,
 
 tether has no store of its own. It lives *inside* a git or jj repository and
 commits small manifests there; that repository's history, branches, bookmarks,
-workspaces, undo, and remotes are tether's too. Start in one:
+workspaces, and remotes are tether's too. Start in one:
 
 ```bash
 jj git init my-dataset && cd my-dataset      # or: git init my-dataset
@@ -106,7 +107,7 @@ tether status                       # fan-out: modified / unpinned / drifted per
 tether commit -m "Baseline imaging + metrics"   # pins, writes manifests, jj/git commit
 jj log                              # the dataset's history *is* the repo's history
 tether new main                     # jj new main / git switch main; working branches are decided (created on first write)
-tether open db/metrics              # -> postgresql://...tether.ws.ab12cd34...
+tether open db/metrics              # -> postgresql://...tether.ws.0a1b2c3d.ab12cd34...
 tether open zarr/imaging -r main    # read-only handle at main's pinned tag
 tether promote                      # move each system's main to the fork: fast-forward, native merge, or refuse with a recipe
 tether diff main @ --content        # what changed inside each object between two revisions, natively
@@ -126,13 +127,18 @@ jj squash --from <first-try>::<last-try> --into <result>   # drop intermediate d
 tether gc                           # dry run: pins no commit references, orphaned listings (never branches)
 tether gc --no-dry-run
 tether gc --prune-workspaces --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned (live jj workspaces / git worktrees are kept); --force-prune for the rest
+tether ops                                  # what tether did to the stores, newest first
+tether undo                                 # reverse the newest entry where the store allows it (a commit -> uncommitted; a new -> branches gone)
+tether repair                               # recreate pins / branches the manifests promise but a store lost
 ```
 
 Multiple people (or agents) work in jj workspaces / git worktrees of the same
-repository; each gets its own `tether.ws.<workspace-id>.<key>-<hash>` branches in every
-system, and pushing the repository publishes the dataset history. The
-`tether.toml` and `.tether/` paths are the only things tether adds to the
-repo; `.tether/workspace.toml` is per-checkout and ignored.
+repository; each gets its own `tether.ws.<dataset-id>.<workspace-id>.<key>-<hash>`
+branches in every system, and pushing the repository publishes the dataset
+history. Several datasets can share one store: every ref carries the dataset's
+id and `gc` never touches another dataset's. The `tether.toml` and `.tether/`
+paths are the only things tether adds to the repo; `.tether/workspace.toml`
+and the operation log `.tether/ops.jsonl` are per-checkout and ignored.
 
 Python:
 
@@ -161,7 +167,8 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 | `new <rev>` | checkout + **fork** decision per object; the branch is created on the first writable `open` (`--eager`: during `new`) |
 | `squash --into main` | **promote**: fast-forward each system's base branch to the fork, or native-merge where the system can (lakeFS, Dolt, git) |
 | stale working copy | per object: the committed state a fork was taken from is recorded; a manifest that now says otherwise => refuse writes to that object |
-| bookmarks / op log / undo / workspaces / push | delegated to the VCS |
+| bookmarks / workspaces / push | delegated to the VCS |
+| `jj op log` / `jj undo` | **ops** / **undo**: tether's own log of what each command did to the stores (the VCS cannot see that), reversed where the store still allows it; **repair** rebuilds what a manifest promises |
 | `.dvc` files | `.tether/objects/<key>.toml` (committed) |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff (files, tables, arrays, fragments, commits) |
 | -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins) |
@@ -171,20 +178,23 @@ that commit's pinned state -- convenient for downstream, reproducible reads.
 
 ```
 <dataset-root>/
-  tether.toml                 # committed: snapshot.auto (CLI snapshots by default), verify.on_status,
-                              #   new.auto_fork (commit re-runs new), new.fork (lazy|eager), default policies,
-                              #   backend options, credential *references*
+  tether.toml                 # committed: dataset.id (the namespace of this dataset's refs), snapshot.auto,
+                              #   verify.on_status, new.auto_fork (commit re-runs new), new.fork (lazy|eager),
+                              #   default policies, backend options, credential *references*
   .tether/
-    .gitignore                # ignores workspace.toml
+    .gitignore                # ignores workspace.toml and ops.jsonl
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
                               #   states (so `diff --content` can compare them); pruned by gc
-    workspace.toml            # untracked: workspace_id, base manifest hash, working refs, pending forks, last snapshot
+    workspace.toml            # untracked: workspace_id, working refs, pending forks, base states, fork points, last snapshot
+    ops.jsonl                 # untracked: the operation log -- every store write, what it did, what it replaced
 ```
 
-`pin_id = blake2b(kind, locator identity, content state)[:16]`; the native ref is
-`tether.<pin_id>`. Identical state yields the same pin, so re-committing an
-unchanged object is a no-op and identical states dedupe to one pin.
+`pin_id = <dataset-id>.<blake2b(kind, locator identity, content state)[:16]>`;
+the native ref is `tether.<pin_id>`. Identical state yields the same pin within
+a dataset, so re-committing an unchanged object is a no-op and identical states
+dedupe to one pin; the dataset id keeps `gc` inside its own namespace when
+several datasets pin one store.
 
 ## Capability tiers
 
@@ -327,6 +337,14 @@ run_conformance(MyHarness())  # runs only the tier-appropriate checks
 - **No cross-system atomicity.** A commit records each object's state within a
   capture window; point-consistency requires quiesced writers (the Neon check
   helps; `tether commit` refuses while writers are active unless `--force`).
+- **What `undo` can and cannot do.** `jj undo` / `git reset` move the
+  manifests, never the stores. `tether undo` covers tether's side from its op
+  log: a commit is uncommitted (pins kept), a `new`'s branches are deleted or
+  re-pointed to their recorded heads, a `gc`'s branches come back but its
+  released pins do not (`tether repair` recreates them once a manifest
+  references them again, while the snapshot still exists), a `promote` is
+  refused with the previous heads printed. A branch that gained writes is
+  never reset or deleted without `--discard` -- by `undo` or by `new`.
 - **Pin-then-commit ordering.** Pins are created before the VCS commit; if the
   commit never lands, pins leak until `gc` (which scans VCS history + the current
   workspace). Re-run `tether verify` after merging manifests across branches.
