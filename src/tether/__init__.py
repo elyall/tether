@@ -64,6 +64,7 @@ from tether.repo import (
     AbandonReport,
     CommitResult,
     DiffEntry,
+    ForgetWorkspaceReport,
     GcReport,
     ImportReport,
     ObjectStatus,
