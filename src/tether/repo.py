@@ -2903,17 +2903,18 @@ class Repo:
         """Execute a plan from `plan_upgrade`, one migration at a time.
 
         After each migration `tether.toml` records the new version, so an
-        interrupted upgrade resumes from the last completed step. Store
-        renames that fail are reported, not raised; the history rewrite and
-        the final VCS commit happen regardless so the manifests and the stores
-        agree on names (a failed rename shows up as a missing pin for
-        `repair`). Rewriting history changes commit ids: every other clone
-        must re-sync.
+        interrupted upgrade resumes from the last completed step. A migration
+        that renames native refs fails *closed*: if any store rename fails, it
+        stops before rewriting history or the manifests, so both sides keep
+        naming the old refs; the renames that did succeed are logged and
+        skipped on the next run. Rewriting history changes commit ids: every
+        other clone must re-sync.
 
         Raises:
             ConfigError: Not an upgrade plan, or the dataset's version differs
                 from the plan's.
-            TetherError: The dataset's manifests have uncommitted changes.
+            TetherError: The dataset's manifests have uncommitted changes, or a
+                store rename failed (nothing else was changed).
         """
         if plan.command != "upgrade":
             raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
@@ -2928,21 +2929,27 @@ class Repo:
         steps = pending(self.config.version)
         if not steps:
             return report
-        # Manifests and config must be committed (the .gitignore may legitimately
-        # be dirty: opening the dataset just taught it about the op log).
+        # Manifests must be committed. tether.toml and .tether/.gitignore may be
+        # dirty for tether's own reasons (a stopped upgrade wrote the dataset
+        # id; opening the dataset taught it about the op log).
         rel = self._dataset_rel()
-        if self.vcs.dirty(
-            [
-                (rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix(),
-                (rel / _m.CONFIG_FILENAME).as_posix(),
-            ]
-        ):
+        if self.vcs.dirty([(rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()]):
             raise TetherError(
                 "the dataset's manifests have uncommitted changes; commit or restore "
                 "them before upgrading"
             )
         for m in steps:
-            m.apply(self, plan, report)
+            try:
+                m.apply(self, plan, report)
+            except TetherError:
+                # Record what did happen (store renames), then surface the stop.
+                if report.renamed_pins or report.renamed_branches:
+                    self._log_op(
+                        "upgrade",
+                        plan=plan,
+                        result={**_report_dict(report), "stopped": True},
+                    )
+                raise
         write_config(self.root, self.config)
         if self.vcs.dirty(self._vcs_paths()):
             report.vcs_commit = self.vcs.commit(

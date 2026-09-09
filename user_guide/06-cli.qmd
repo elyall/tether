@@ -306,9 +306,12 @@ Rewriting history changes commit ids (jj keeps change ids; bookmarks and
 branches follow); every other clone has to re-sync afterwards -- in jj a
 `jj git fetch` shows the rewritten changes, in git it is a force-push and a
 reset on the other side. Under jj, commits marked immutable (pushed `main`)
-are only rewritten with `--ignore-immutable`. A store rename that fails is
-reported and the exit code is `2`; the manifests still carry the new names,
-so `tether repair` recreates the pin from its recorded state afterwards.
+are only rewritten with `--ignore-immutable`. The upgrade fails *closed*: the
+dataset id is written first, then the store renames; if any rename fails the
+upgrade stops there -- history and the manifests still name the old refs, so
+nothing is orphaned -- and the error lists what failed. Fix the cause and run
+`tether upgrade` again: it continues under the same dataset id and skips the
+renames already made.
 
 ## What `restore` does
 

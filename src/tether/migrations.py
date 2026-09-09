@@ -119,7 +119,12 @@ def _new_branch_name(ref: str, dataset_id: str, slugs: dict[str, str]) -> str:
 
 
 def _plan_v2(repo: Repo, plan: Plan) -> None:
-    dataset_id = plan.context.setdefault("dataset_id", new_dataset_id())
+    # A stopped upgrade has already written the id it renamed under; a fresh
+    # one gets a new id. Either way the plan carries it, and apply persists it
+    # before the first store rename so a re-run continues under the same id.
+    dataset_id = plan.context.setdefault(
+        "dataset_id", repo.config.dataset_id or new_dataset_id()
+    )
     plan.notes.append(f"dataset id: {dataset_id}")
 
     # Every pin history (or the working tree) names in the old format.
@@ -238,6 +243,17 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
 
     dataset_id = str(plan.context["dataset_id"])
     mine = [a for a in plan.actions if a.params.get("migration") == 2]
+    if repo.config.dataset_id and repo.config.dataset_id != dataset_id:
+        raise TetherError(
+            f"this dataset already renamed refs under id {repo.config.dataset_id}; "
+            f"the plan carries {dataset_id} -- re-run the plan"
+        )
+
+    # 0. Persist the namespace first: every rename below is made under it, and
+    # a re-run after a failure must use the same one.
+    if repo.config.dataset_id != dataset_id:
+        repo.config.dataset_id = dataset_id
+        write_config(repo.root, repo.config)
 
     # 1. Stores: rename pins, then working branches. Skip what already happened.
     for a in mine:
@@ -270,6 +286,19 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
             except TetherError as exc:
                 report.failed[f"rename-branch {old}"] = str(exc)
 
+    # Fail closed: if any rename did not happen, leave the manifests naming the
+    # old refs. Rewriting them now would make history point at names the store
+    # does not have while the old ones -- outside the namespace -- became
+    # invisible to gc. Re-running the upgrade skips the renames already done.
+    if report.failed:
+        raise TetherError(
+            "upgrade stopped before rewriting history: "
+            f"{len(report.failed)} store rename(s) failed:\n"
+            + "\n".join(f"  {k}: {v}" for k, v in sorted(report.failed.items()))
+            + "\nfix the cause and re-run `tether upgrade` (renames already made "
+            "are skipped)"
+        )
+
     # 2. History: every manifest with an old-format pin gets the new name.
     def transform(_commit: str, files: dict[str, str]) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -298,7 +327,6 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         repo._manifest_cache.clear()
 
     # 3. Working tree, workspace, config.
-    repo.config.dataset_id = dataset_id
     for key, m in list(repo.objects.items()):
         if _old_pin(m):
             new_id = _new_pin_id(repo, m, dataset_id)

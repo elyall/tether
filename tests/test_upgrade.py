@@ -206,3 +206,54 @@ def test_upgrade_refuses_uncommitted_manifest_changes(vcs_root: Path) -> None:
     )
     with pytest.raises(Exception, match="uncommitted changes"):
         repo.apply_upgrade(repo.plan_upgrade())
+
+
+def test_upgrade_stops_before_rewriting_history_when_a_rename_fails(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tether.errors import BackendError, TetherError
+
+    system, _s1, _s2, pin1, pin2 = _v1_dataset(vcs_root)
+    sys_ = default_store().system(system)
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    parent = "@-" if repo.vcs.kind == "jj" else "HEAD"
+    tip_before = repo.vcs.resolve(parent)
+    backend = repo.backend_for("memory")
+    real = backend.rename_pin
+
+    def flaky(locator, old, state, new_id):
+        if old.id == pin2:
+            raise BackendError("store unavailable", kind="memory")
+        return real(locator, old, state, new_id)
+
+    monkeypatch.setattr(backend, "rename_pin", flaky)
+    plan = repo.plan_upgrade()
+    with pytest.raises(TetherError, match="stopped before rewriting history") as exc:
+        repo.apply_upgrade(plan)
+    assert f"rename-pin tether.{pin2}" in str(exc.value)
+    # The rename that worked is done; nothing else moved: history untouched,
+    # manifests (in history and the working tree) still name the old pins.
+    assert f"tether.{pin1}" not in sys_.tags and f"tether.{pin2}" in sys_.tags
+    assert repo.vcs.resolve(parent) == tip_before
+    assert {
+        m.pin.id for _r, o in repo._iter_history_objects() for m in o.values() if m.pin
+    } == {pin1, pin2}
+    cfg = read_config(vcs_root)
+    assert cfg.version == 1 and cfg.dataset_id == plan.context["dataset_id"]
+    current = Repo.find(vcs_root, allow_outdated=True).objects["db"].pin
+    assert current is not None and current.id == pin2
+    assert repo.ops()[0].command == "upgrade" and repo.ops()[0].result["stopped"]
+
+    # Re-running once the store is back finishes the job; the earlier rename
+    # is recognised and skipped.
+    monkeypatch.setattr(backend, "rename_pin", real)
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan2 = repo.plan_upgrade()
+    assert plan2.context["dataset_id"] == plan.context["dataset_id"]  # same namespace
+    assert any(f"pin tether.{pin1} is not in the store" in n for n in plan2.notes)
+    report = repo.apply_upgrade(plan2)
+    assert not report.failed and report.to_version == 2
+    assert f"tether.{pin2}" not in sys_.tags
+    assert set(report.renamed_pins) == {f"tether.{pin2}"}  # pin1 was done last time
+    repo = Repo.find(vcs_root)
+    assert all(r.status.value == "ok" for r in repo.verify(all_history=True).values())

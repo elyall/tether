@@ -47,8 +47,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gc` and `verify --all-history` keep agreeing with the stores -- history
   rewriting changes commit ids (jj keeps change ids; `--ignore-immutable` for
   pushed commits); every other clone must re-sync. `--dry-run` shows the
-  renames and the number of commits; failed renames exit 2 and `repair`
-  finishes the job. `VcsAdapter.rewrite_history()` (jj: `new` + `squash` per
+  renames and the number of commits. The upgrade fails closed: the dataset id
+  is persisted before the first rename, and a failed store rename stops the
+  upgrade before history or the manifests are touched, so both sides keep
+  naming the old refs; a re-run continues under the same id and skips the
+  renames already made. `VcsAdapter.rewrite_history()` (jj: `new` + `squash` per
   change; git: plumbing `commit-tree`, refs updated) and
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in

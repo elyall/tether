@@ -1111,8 +1111,9 @@ def upgrade(
     refs are named it renames them in every store and rewrites every historical
     manifest to match, so `gc` keeps seeing the same pins from both sides.
     Rewriting history changes commit ids: every other clone must re-sync
-    afterwards. Run `--dry-run` first. Exit code 2 if a store rename failed
-    (the manifests still got the new names; `tether repair` recreates them).
+    afterwards. Run `--dry-run` first. A failed store rename stops the upgrade
+    before anything else changes (renames already made are skipped on the next
+    run); exit code 2 marks a partially applied step.
     """
     repo = _repo(allow_outdated=True)
     try:
