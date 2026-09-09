@@ -566,12 +566,30 @@ def find_dataset_root(start: Path) -> Path | None:
     return None
 
 
+UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl")
+"""Per-workspace files under ``.tether/`` that must never be committed."""
+
+
 def ensure_layout(root: Path) -> None:
-    """Create ``.tether/`` and its ``.gitignore`` (ignoring workspace.toml)."""
+    """Create ``.tether/`` and its ``.gitignore`` (ignoring the per-workspace files)."""
     objects_dir(root).mkdir(parents=True, exist_ok=True)
+    ensure_ignored(root)
+
+
+def ensure_ignored(root: Path) -> None:
+    """Make sure ``.tether/.gitignore`` lists every per-workspace file.
+
+    jj snapshots anything not ignored into the working-copy commit, so a new
+    untracked file (the op log, say) must be ignored before it first appears.
+    """
     gitignore = tether_path(root) / GITIGNORE_FILENAME
-    if not gitignore.exists():
-        gitignore.write_text(f"/{WORKSPACE_FILENAME}\n", encoding="utf-8")
+    lines = (
+        gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
+    )
+    missing = [f"/{name}" for name in UNTRACKED_FILES if f"/{name}" not in lines]
+    if missing or not gitignore.exists():
+        gitignore.parent.mkdir(parents=True, exist_ok=True)
+        gitignore.write_text("".join(f"{x}\n" for x in [*lines, *missing]), "utf-8")
 
 
 def _atomic_write(path: Path, text: str) -> None:

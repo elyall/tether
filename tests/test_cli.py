@@ -476,3 +476,30 @@ def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert store.read(system, "main") == {"a": 7, "b": 2, "c": 3}
     r = runner.invoke(app, ["promote", "--strategy", "sideways"])
     assert r.exit_code == 1
+
+
+def test_cli_ops(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    r = runner.invoke(app, ["init"])
+    assert r.exit_code == 0 and "dataset id" in r.output
+    r = runner.invoke(app, ["ops"])
+    assert r.exit_code == 0 and "no operations recorded" in r.output
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["commit", "-m", "baseline"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["ops"])
+    assert r.exit_code == 0, r.output
+    lines = r.output.strip().splitlines()
+    assert (
+        len(lines) == 2 and lines[0].split()[2] == "commit" and "pinned db" in lines[0]
+    )
+    assert lines[1].split()[2] == "add"
+    r = runner.invoke(app, ["ops", "-n", "1", "--json"])
+    payload = json.loads(r.output)
+    assert len(payload) == 1 and payload[0]["command"] == "commit"
+    assert payload[0]["result"]["pinned"]["db"] and payload[0]["pre"]["objects"]["db"]

@@ -897,3 +897,70 @@ def test_two_datasets_sharing_a_store_do_not_gc_each_other(
     a3, b3 = a.objects["db"].pin, b.objects["db"].pin
     assert a3 is not None and b3 is not None and a3.id != b3.id
     assert {a3.id, b3.id} <= backend.list_pins({"system": system})
+
+
+def test_op_log_records_every_store_write(vcs_root: Path) -> None:
+    from tether.manifest import tether_path
+    from tether.oplog import read_ops
+
+    repo = Repo.init(vcs_root)
+    assert repo.ops() == []
+    ignore = (tether_path(vcs_root) / ".gitignore").read_text()
+    assert "/ops.jsonl" in ignore and "/workspace.toml" in ignore
+
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 2})
+    repo.commit("second")
+    repo.new()  # lazy: defers; the existing branch's head is recorded
+    repo.open("db", read_only=False)  # materializes -> "fork" op
+    repo.remove("db")
+    repo.gc(dry_run=False)
+
+    commands = [e.command for e in reversed(repo.ops())]
+    assert commands == [
+        "add",
+        "commit",
+        "new",
+        "commit",
+        "new",
+        "fork",
+        "remove",
+        "gc",
+    ]
+    by = {e.command: e for e in reversed(repo.ops())}  # newest of each kind
+
+    first_new = next(e for e in reversed(repo.ops()) if e.command == "new")
+    assert first_new.result["created"] == ["db"] and first_new.result["reset"] == []
+    assert first_new.pre["vcs"]["kind"] == repo.vcs.kind
+    assert "workspace_id" in first_new.pre["workspace"]
+
+    second_new = by["new"]
+    assert second_new.result["pending_forks"] == {"db": wref}
+    assert second_new.plan is not None
+    (defer,) = [a for a in second_new.plan["actions"] if a["op"] == "defer-fork"]
+    assert defer["params"]["existing"] == wref
+    assert "snapshot_id" in defer["params"]["head"]  # head recorded before reset
+
+    fork = by["fork"]
+    assert fork.result["key"] == "db" and fork.result["ref"] == wref
+    assert "db" in fork.pre["heads"]  # the branch existed and was reset
+
+    commit = by["commit"]
+    assert commit.result["pinned"]["db"].startswith(repo.config.dataset_id + ".")
+    assert commit.pre["objects"]["db"] is not None and commit.result["vcs_commit"]
+
+    assert by["remove"].pre["objects"]["db"].startswith("key = ")
+    assert by["gc"].result["forgotten_working_refs"] == {"db": [wref]}
+    assert all(e.undone_by is None and e.undoes is None for e in repo.ops())
+
+    # The log is per workspace and never enters the VCS.
+    assert not any(
+        "ops.jsonl" in path
+        for path in repo.vcs.list_files_at(repo.vcs.current_rev(), "")
+    )
+    assert read_ops(vcs_root) == list(reversed(repo.ops()))
+    assert len(repo.ops(2)) == 2

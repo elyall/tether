@@ -692,6 +692,35 @@ def diff(
 
 
 @app.command()
+def ops(
+    limit: int = typer.Option(20, "-n", "--limit", help="Show the newest N entries."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Show this workspace's operation log (what tether did to the stores).
+
+    Every store-writing command appends an entry: the plan it applied, what it
+    created or deleted, and what it replaced. The log is per workspace and
+    untracked, like jj's own `op log`. `tether undo ID` reverses an entry
+    where the store still allows it.
+    """
+    repo = _repo()
+    entries = repo.ops(limit)
+    if json_out:
+        _emit([e.to_dict() for e in entries], as_json=True)
+        return
+    if not entries:
+        typer.echo("no operations recorded")
+        return
+    for e in entries:
+        flag = ""
+        if e.undone_by:
+            flag = f"  (undone by {e.undone_by})"
+        elif e.undoes:
+            flag = ""
+        typer.echo(f"{e.id}  {e.at}  {e.command:<8} {e.summary()}{flag}")
+
+
+@app.command()
 def gc(
     dry_run: bool = typer.Option(
         True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."

@@ -53,6 +53,7 @@ from tether.manifest import (
     RepoConfig,
     State,
     compute_pin_id,
+    ensure_ignored,
     ensure_layout,
     find_dataset_root,
     listing_name,
@@ -74,6 +75,7 @@ from tether.manifest import (
     write_object,
     write_workspace,
 )
+from tether.oplog import OpEntry, append_op, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
@@ -240,6 +242,13 @@ def _source_object(source: Mapping[str, Any]) -> str | Pin | State:
     return dict(source["state"])
 
 
+def _report_dict(report: Any) -> dict[str, Any]:
+    """A report dataclass as plain data for the op log (without its plan)."""
+    data = dataclasses.asdict(report)
+    data.pop("plan", None)
+    return data
+
+
 def _short_state(state: State | None) -> str:
     """Compact one-line rendering of a state for plan output."""
     if not state:
@@ -278,6 +287,7 @@ class Repo:
         self.root = root
         self.config = config
         self.vcs = vcs
+        ensure_ignored(root)  # the op log is new since a7; never let jj snapshot it
         self.objects = read_objects(root)
         self.workspace = read_workspace(root)
         self._backends: dict[str, ObjectBackend] = {}
@@ -404,6 +414,37 @@ class Repo:
             with contextlib.suppress(Exception):
                 ids.add(read_workspace(root / rel).workspace_id)
         return ids
+
+    # -- operation log --------------------------------------------------- #
+    def ops(self, limit: int | None = None) -> list[OpEntry]:
+        """This workspace's operation log, newest first (see `tether.oplog`)."""
+        entries = list(reversed(read_ops(self.root)))
+        return entries[:limit] if limit else entries
+
+    def _log_op(
+        self,
+        command: str,
+        *,
+        plan: Plan | None = None,
+        result: Mapping[str, Any] | None = None,
+        pre: Mapping[str, Any] | None = None,
+        undoes: str | None = None,
+    ) -> OpEntry:
+        entry = OpEntry.now(
+            command,
+            plan=plan.to_dict() if plan is not None else None,
+            result=dict(result or {}),
+            pre=dict(pre or {}),
+            undoes=undoes,
+        )
+        append_op(self.root, entry)
+        return entry
+
+    def _manifest_texts(self, keys: Iterable[str]) -> dict[str, str | None]:
+        """Current manifest TOML per key (`None` where the object does not exist)."""
+        return {
+            k: (self.objects[k].to_toml() if k in self.objects else None) for k in keys
+        }
 
     def _vcs_paths(self) -> list[str]:
         # Never include the untracked workspace file; commit the committed
@@ -552,6 +593,19 @@ class Repo:
         Raises:
             ConfigError: If `key` exists, is unsafe, or `kind` cannot be built.
         """
+        pre = {"objects": {key: None}, "workspace": self.workspace.to_toml()}
+        manifest = self._add(key, kind, locator, policy=policy)
+        self._log_op("add", result={"key": key}, pre=pre)
+        return manifest
+
+    def _add(
+        self,
+        key: str,
+        kind: str,
+        locator: dict,
+        *,
+        policy: Policy | None = None,
+    ) -> ObjectManifest:
         if key in self.objects:
             raise ConfigError(f"object already exists: {key}")
         # Validate the backend kind eagerly.
@@ -582,6 +636,16 @@ class Repo:
         Raises:
             ConfigError: If `key` is not registered.
         """
+        if key not in self.objects:
+            raise ConfigError(f"no such object: {key}")
+        pre = {
+            "objects": self._manifest_texts([key]),
+            "workspace": self.workspace.to_toml(),
+        }
+        self._remove(key)
+        self._log_op("remove", result={"key": key}, pre=pre)
+
+    def _remove(self, key: str) -> None:
         if key not in self.objects:
             raise ConfigError(f"no such object: {key}")
         remove_object(self.root, key)
@@ -846,6 +910,11 @@ class Repo:
 
         created_pins: list[tuple[str, Pin]] = []
         outcomes: dict[str, tuple[State, Pin | None, bool]] = {}
+        pre = {
+            "vcs": self.vcs.position() if vcs else None,
+            "objects": self._manifest_texts(a.key for a in object_actions),
+            "workspace": self.workspace.to_toml(),
+        }
         try:
             for a in object_actions:
                 m = self.objects[a.key]
@@ -894,6 +963,19 @@ class Repo:
             if k in self.workspace.working_refs or k in self.workspace.pending_forks
         )
         write_workspace(self.root, self.workspace)
+        if outcomes:
+            self._log_op(
+                "commit",
+                plan=plan,
+                result={
+                    "vcs_commit": result.vcs_commit,
+                    "pinned": {
+                        k: (p.id if p else None) for k, p in result.pinned.items()
+                    },
+                    "unrecoverable": list(result.unrecoverable),
+                },
+                pre=pre,
+            )
         if outcomes and self.config.new_auto_fork:
             # jj-style: every commit leaves you on a fresh working copy.
             self.new()
@@ -1009,6 +1091,15 @@ class Repo:
                 )
                 continue
             name = self._working_ref_for(key)
+            # An existing branch of this workspace is reset by the fork (now or
+            # when materialized). Record its head so the op log can restore it.
+            existing = self.workspace.working_refs.get(key)
+            head: State | None = None
+            if existing is not None and existing != m.locator.get("branch", "main"):
+                try:
+                    head = backend.fingerprint(m.locator, existing)
+                except TetherError:
+                    existing = None  # gone already; nothing to reset
             if m.pin is not None:
                 source = {"pin": m.pin.to_dict()}
                 detail = f"from pin {m.pin.ref}"
@@ -1020,12 +1111,17 @@ class Repo:
             else:
                 plan.notes.append(f"{key}: no pin and not addressable; cannot fork")
                 continue
+            params: dict[str, Any] = dict(source)
+            if existing is not None:
+                params["existing"] = existing
+                params["head"] = head
+                detail += f"; resets {existing}"
             if eager or not durable:
                 if not durable and not eager:
                     detail += "; forked now so the state cannot expire"
                 plan.actions.append(
                     Action(
-                        "fork", key, m.kind, target=name, detail=detail, params=source
+                        "fork", key, m.kind, target=name, detail=detail, params=params
                     )
                 )
             else:
@@ -1036,6 +1132,7 @@ class Repo:
                         m.kind,
                         target=name,
                         detail=f"{detail}; created on first writable open",
+                        params=params,
                     )
                 )
         return plan
@@ -1060,6 +1157,7 @@ class Repo:
                 raise StalePlanError(
                     "manifests at the target differ from the plan; re-run the plan"
                 )
+        pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
         if rev:
             self.vcs.new(str(rev))
             self.objects = read_objects(self.root)
@@ -1068,6 +1166,7 @@ class Repo:
                 set(self.workspace.working_refs) | set(self.workspace.pending_forks)
             )
             write_workspace(self.root, self.workspace)
+            self._log_op("new", plan=plan, result={"vcs": self.vcs.position()}, pre=pre)
             return
 
         working_refs: dict[str, str] = {}
@@ -1112,6 +1211,26 @@ class Repo:
         }
         self._mark_base_states(set(working_refs) | set(pending))
         write_workspace(self.root, self.workspace)
+        # What this op did to the stores, and what it replaced, for undo.
+        reset = {
+            k: a.params
+            for k, a in forks.items()
+            if k in forked and a.params.get("existing")
+        }
+        pre["heads"] = {k: p.get("head") for k, p in reset.items()}
+        self._log_op(
+            "new",
+            plan=plan,
+            result={
+                "vcs": self.vcs.position(),
+                "created": sorted(k for k in forked if k not in reset),
+                "reset": sorted(reset),
+                "working_refs": dict(working_refs),
+                "pending_forks": dict(pending),
+                "failed": sorted(errors),
+            },
+            pre=pre,
+        )
         if errors:
             raise MultiObjectError(
                 f"could not fork working refs for {', '.join(sorted(errors))} "
@@ -1163,6 +1282,12 @@ class Repo:
                 "changed since `new`; run `tether new` before writing"
             )
         m = self.objects[key]
+        backend = self.backend_for(m.kind)
+        pre: dict[str, Any] = {"workspace": self.workspace.to_toml()}
+        # A branch left by an earlier `new` of this workspace is about to be
+        # reset; remember its head so undo can put it back.
+        if name in backend.list_working_refs(m.locator):
+            pre["heads"] = {key: backend.fingerprint(m.locator, name)}
         ref = self._fork_from_manifest(m, name)
         self.workspace.working_refs[key] = ref
         self.workspace.pending_forks.pop(key, None)
@@ -1170,6 +1295,11 @@ class Repo:
             self.workspace.fork_points[key] = dict(m.state)
         self._mark_base_states([key])
         write_workspace(self.root, self.workspace)
+        self._log_op(
+            "fork",
+            result={"key": key, "ref": ref, "kind": m.kind, "locator": dict(m.locator)},
+            pre=pre,
+        )
         return ref
 
     def new(
@@ -1637,13 +1767,13 @@ class Repo:
                 # Why deleting would be safe -- or why it would not.
                 reason: str | None = None
                 safe = ""
+                full_head: State | None = None
                 if storage:
                     reason = "branch is storage; deleting reclaims its data"
                 else:
                     try:
-                        head = self._content(
-                            m.kind, backend.fingerprint(m.locator, ref)
-                        )
+                        full_head = backend.fingerprint(m.locator, ref)
+                        head = self._content(m.kind, full_head)
                         if base_head is None:
                             base_head = self._content(
                                 m.kind, backend.fingerprint(m.locator, None)
@@ -1671,7 +1801,7 @@ class Repo:
                             m.kind,
                             target=ref,
                             detail=f"{origin}; {safe}",
-                            params={"locator": m.locator},
+                            params={"locator": m.locator, "head": full_head},
                         )
                     )
                 elif force:
@@ -1682,7 +1812,11 @@ class Repo:
                             m.kind,
                             target=ref,
                             detail=f"{origin}; FORCED although it {reason}",
-                            params={"locator": m.locator, "forced": True},
+                            params={
+                                "locator": m.locator,
+                                "forced": True,
+                                "head": full_head,
+                            },
                         )
                     )
                 else:
@@ -1714,6 +1848,7 @@ class Repo:
         report = GcReport(dry_run=False, plan=plan)
         errors: dict[str, Exception] = {}
         forgot = False
+        pre = {"workspace": self.workspace.to_toml()}
         for a in plan.actions:
             try:
                 if a.op == "unpin":
@@ -1738,6 +1873,16 @@ class Repo:
                 errors[f"{a.op} {a.target}"] = exc
         if forgot:
             write_workspace(self.root, self.workspace)
+        if plan.writes:
+            self._log_op(
+                "gc",
+                plan=plan,
+                result={
+                    **_report_dict(report),
+                    "failed": {k: str(v) for k, v in errors.items()},
+                },
+                pre=pre,
+            )
         if errors:
             raise MultiObjectError("gc failed for some actions", errors)
         return report
@@ -2021,6 +2166,10 @@ class Repo:
 
         message = str(plan.context.get("message") or "tether promote")
         by_key = {a.key: a for a in writes}
+        pre = {
+            "workspace": self.workspace.to_toml(),
+            "base_states": {a.key: a.params.get("base_state") for a in writes},
+        }
 
         def run_one(key: str) -> tuple[str, State]:
             a = by_key[key]
@@ -2056,6 +2205,16 @@ class Repo:
                 touched = True
         if touched:
             write_workspace(self.root, self.workspace)
+        if results or errors:
+            self._log_op(
+                "promote",
+                plan=plan,
+                result={
+                    **_report_dict(report),
+                    "failed": {k: str(v) for k, v in errors.items()},
+                },
+                pre=pre,
+            )
         if errors:
             raise MultiObjectError("promote failed for some objects", errors)
         return report
@@ -2197,9 +2356,13 @@ class Repo:
             key, _, why = note.partition(": ")
             if why == "unchanged":
                 report.unchanged.append(key)
+        pre = {
+            "objects": self._manifest_texts(a.key for a in plan.actions),
+            "workspace": self.workspace.to_toml(),
+        }
         for a in plan.actions:
             if a.op == "add":
-                self.add(
+                self._add(
                     a.key,
                     a.kind,
                     dict(a.params["locator"]),
@@ -2222,9 +2385,11 @@ class Repo:
                     self._forget_working_state(a.key)
                 report.updated.append(a.key)
             elif a.op == "remove":
-                self.remove(a.key)
+                self._remove(a.key)
                 report.removed.append(a.key)
         write_workspace(self.root, self.workspace)
+        if plan.actions:
+            self._log_op("import", plan=plan, result=_report_dict(report), pre=pre)
         return report
 
     def import_objects(

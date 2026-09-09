@@ -46,7 +46,8 @@ cli:
       desc: Pin state into commits and fork writable branches.
       contents: [commit, new, open, promote]
     - title: Maintenance
-      contents: [gc]
+      desc: Reclaim native refs, and see or reverse what tether did.
+      contents: [gc, ops]
     - title: Registries
       desc: "Experimental: derive SQL tables from history, push them to Postgres, or import the object set from a registry."
       contents: [export, publish, import]
@@ -73,6 +74,11 @@ reference:
         - PromoteReport
         - DiffEntry
         - TETHER_REV_ENV
+    - title: Operation log
+      desc: What tether did to the stores, per workspace; what undo works from.
+      contents:
+        - OpEntry
+        - oplog
     - title: Plans
       desc: >-
         What a store-writing command would do, as data. `Repo.plan_*` returns a

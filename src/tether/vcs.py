@@ -24,7 +24,7 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from tether.errors import VcsError
 
@@ -364,6 +364,14 @@ class VcsAdapter(Protocol):
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
 
+    def position(self) -> dict[str, Any]:
+        """Where the working copy is, as data `goto` can return to.
+
+        Always has ``kind`` and ``id`` (jj: the working-copy change id; git:
+        the HEAD commit) and ``commit``; jj adds ``parent`` and ``empty``, git
+        adds ``branch`` (``None`` when detached).
+        """
+
     def new(self, rev: str | None) -> None:
         """Move the working copy so the next ``commit`` lands on top of ``rev``.
 
@@ -622,6 +630,26 @@ class JjAdapter:
         self._jj("commit", "-m", message, *relpaths)
         return self.resolve("@-")
 
+    def position(self) -> dict[str, Any]:
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            'change_id ++ "\\n" ++ commit_id ++ "\\n" ++ if(empty, "1", "0") ++ "\\n"'
+            ' ++ parents.map(|c| c.commit_id()).join(",")',
+        )
+        fields = [*out.stdout.rstrip("\n").split("\n"), "", "", "", ""]
+        change, commit, empty, parents = fields[:4]
+        return {
+            "kind": "jj",
+            "id": change,
+            "commit": commit,
+            "parent": parents.split(",")[0] if parents else None,
+            "empty": empty == "1",
+        }
+
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
 
@@ -702,6 +730,18 @@ class GitAdapter:
         self._git("add", "--", *relpaths)
         self._git("commit", "-m", message, "--", *relpaths)
         return self.current_rev()
+
+    def position(self) -> dict[str, Any]:
+        # An unborn branch (no commits yet) has a symbolic HEAD but no commit.
+        head = self._git("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+        commit = head.stdout.strip() or None
+        branch = self._git("symbolic-ref", "--short", "-q", "HEAD", check=False)
+        return {
+            "kind": "git",
+            "id": commit,
+            "commit": commit,
+            "branch": branch.stdout.strip() or None,
+        }
 
     def new(self, rev: str | None) -> None:
         if rev is None:
