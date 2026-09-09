@@ -129,6 +129,7 @@ tether gc --no-dry-run
 tether gc --prune-workspaces --no-dry-run   # dead workspaces' tether.ws.* branches whose head is pinned (live jj workspaces / git worktrees are kept); --force-prune for the rest
 tether restore db/metrics --from main~2     # reset one object's working branch to an older commit's pin; nothing else moves
 tether abandon REV --gc                     # drop dataset commits and release the pins only they referenced
+tether forget-workspace                     # done with this checkout: delete its branches (safely), its state, and forget the jj workspace / git worktree
 tether ops                                  # what tether did to the stores, newest first
 tether undo                                 # reverse the newest entry where the store allows it (a commit -> uncommitted; a new -> branches gone)
 tether repair                               # recreate pins / branches the manifests promise but a store lost

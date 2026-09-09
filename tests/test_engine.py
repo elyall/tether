@@ -1411,3 +1411,78 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     repo.add("late", "memory", {"system": _mem_object(repo, "tmp") and system})
     plan = repo.plan_restore(["late"], c1)
     assert plan.actions[0].op == "refuse" and "not registered" in plan.actions[0].detail
+
+
+def _second_checkout(repo: Repo, vcs_root: Path, other_root: Path) -> Repo:
+    import subprocess
+
+    if repo.vcs.kind == "jj":
+        subprocess.run(
+            ["jj", "workspace", "add", str(other_root)],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(other_root)],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    return Repo.find(other_root)
+
+
+def test_forget_workspace_deletes_its_branches_files_and_checkout(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(eager=True)
+    mine = repo.workspace.working_refs["db"]
+
+    other_root = tmp_path / "other-checkout"
+    other = _second_checkout(repo, vcs_root, other_root)
+    other.new(eager=True)
+    theirs = other.workspace.working_refs["db"]
+    other_id = other.workspace.workspace_id
+    assert other_id in repo.live_workspace_ids()
+    ws_file = other_root / ".tether" / "workspace.toml"
+    assert ws_file.exists()
+
+    # Forget the other checkout from here: branch (idle at base: safe), files, VCS.
+    plan = repo.plan_forget_workspace(other_id)
+    ops = {a.op for a in plan.actions}
+    assert {"delete-branch", "delete-file", "forget-vcs-workspace"} <= ops
+    (br,) = [a for a in plan.actions if a.op == "delete-branch"]
+    assert br.target == theirs and "being forgotten" in br.detail
+    report = repo.apply_forget_workspace(plan)
+    assert not report.failed, report.failed
+    assert report.deleted_working_refs == {"db": [theirs]}
+    assert theirs not in store.system(system).branches
+    assert mine in store.system(system).branches  # not ours to touch
+    assert not ws_file.exists()
+    assert report.vcs and other_id not in repo.live_workspace_ids()
+    assert not any(
+        r.resolve() == other_root.resolve() for r in repo.vcs.workspace_roots()
+    )
+    assert repo.ops()[0].command == "forget-workspace" and not repo.ops()[0].undoable
+
+    # A branch with unpinned data is kept unless forced.
+    store.write(system, mine, {"v": "scratch"})
+    plan = repo.plan_forget_workspace()  # the current workspace
+    (kept,) = [a for a in plan.actions if a.op == "keep-branch"]
+    assert kept.target == mine
+    report = repo.forget_workspace(force_prune=True)
+    assert report.deleted_working_refs == {"db": [mine]}
+    assert mine not in store.system(system).branches
+    assert not (vcs_root / ".tether" / "workspace.toml").exists()
+    # The main checkout stays; the next command here is a fresh workspace.
+    fresh = Repo.find(vcs_root)
+    assert (
+        fresh.workspace.workspace_id != repo.workspace.workspace_id
+        or not repo.workspace.working_refs
+    )
+    assert fresh.workspace.working_refs == {}

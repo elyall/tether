@@ -53,6 +53,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
   `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
   place because pins are branches with children) are new.
+- **`tether forget-workspace [ID]`** (`plan_forget_workspace` /
+  `apply_forget_workspace` / `forget_workspace`): `jj workspace forget` /
+  `git worktree remove` plus tether's half -- that workspace's working
+  branches deleted under the `gc --prune-workspaces` rule (`--force-prune`
+  for data-holding ones), its `workspace.toml` and `ops.jsonl` removed, the
+  VCS checkout forgotten. `VcsAdapter.forget_workspace(root)` is new.
 - **`tether restore KEY... --from REV`** (`plan_restore` / `apply_restore` /
   `restore`): the per-object `jj restore --from` -- reset one object's working
   branch to what `REV` pinned, leaving the other branches, the manifests, and

@@ -24,6 +24,7 @@ tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
 tether gc [--dry-run | --no-dry-run] [--prune-workspaces [--keep-workspace ID]... [--force-prune]] [--plan FILE | --from-plan FILE]
 tether abandon REV... [--gc]
+tether forget-workspace [WORKSPACE_ID] [--force-prune] [--dry-run | --plan FILE | --from-plan FILE]
 tether ops [-n N]
 tether undo [OP_ID | --to OP_ID] [--discard]
 tether repair [--all-history] [--dry-run | --plan FILE | --from-plan FILE]
@@ -163,7 +164,7 @@ plan: commit (2 write(s))
 ```
 
 Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `track` (new);
-`fork`, `refuse` (restore); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
+`fork`, `refuse` (restore); `delete-branch`, `keep-branch`, `delete-file`, `forget-vcs-workspace` (forget-workspace); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
 `add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
 (repair); `rename-pin`, `rename-branch`, `rewrite-history` (upgrade);
@@ -203,6 +204,20 @@ VCS's own rebase would conflict on them). Nothing is released unless `--gc`;
 current branch and the tree clean; a conflict outside `.tether/` aborts. Not
 undoable by tether -- `jj undo` / the reflog bring the commits back, `repair`
 the pins.
+
+## `forget-workspace`
+
+`jj workspace forget` / `git worktree remove` and tether's half in one step.
+`tether forget-workspace [ID]` (default: this workspace) deletes that
+workspace's working branches under the `gc --prune-workspaces` rule -- head
+pinned or equal to the base is deleted, anything holding unpinned data is kept
+unless `--force-prune` -- removes its `workspace.toml` and `ops.jsonl` when
+its checkout is live, and has the VCS stop tracking the checkout (jj leaves
+the directory; git removes a clean non-main worktree and leaves the main
+one). Forgetting the *current* workspace means the next tether command here
+starts a fresh one; under jj the directory has no working copy until `jj undo`
+or a new `jj workspace add`, exactly as after `jj workspace forget`. Plan/apply;
+not undoable.
 
 ## `ops`, `undo`, `repair`
 
@@ -370,6 +385,7 @@ per-table counts.
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names]}` |
 | `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
+| `forget-workspace` | `{"workspace": id8, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "removed_files": [paths], "vcs": str or null, "failed": {target: reason}}`; with `--dry-run`: the plan |
 | `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by"}]`, newest first |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
 | `undo --to` | `{"to": op id, "undone": [{"op", "command", "undo_id", "restored", "irreversible", "skipped"}], "stopped_at": op id or null, "reason"}` |

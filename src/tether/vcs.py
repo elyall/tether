@@ -364,6 +364,12 @@ class VcsAdapter(Protocol):
         to keep the working branches of workspaces that still exist.
         """
 
+    def forget_workspace(self, root: Path) -> str | None:
+        """Stop tracking the checkout at ``root``: ``jj workspace forget`` by
+        name, or ``git worktree remove`` (a clean, non-main worktree). Returns
+        a one-line description of what was done, or ``None`` when the VCS has
+        nothing to forget there (git's main worktree; an unknown path)."""
+
     def dirty(self, relpaths: list[str]) -> bool:
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
@@ -686,6 +692,30 @@ class JjAdapter:
                 roots.append(Path(root.stdout.strip()))
         return roots or [self.root]
 
+    def forget_workspace(self, root: Path) -> str | None:
+        names = self._jj(
+            "workspace", "list", "--ignore-working-copy", "-T", 'name ++ "\\n"'
+        ).stdout.split()
+        target = root.resolve()
+        for name in names:
+            ws_root = self._jj(
+                "workspace",
+                "root",
+                "--ignore-working-copy",
+                "--name",
+                name,
+                check=False,
+            )
+            if (
+                ws_root.returncode == 0
+                and Path(ws_root.stdout.strip()).resolve() == target
+            ):
+                self._jj("workspace", "forget", name)
+                return (
+                    f"jj workspace {name!r} forgotten (its directory is left in place)"
+                )
+        return None
+
     def dirty(self, relpaths: list[str]) -> bool:
         out = self._jj("diff", "--summary", "-r", "@", *relpaths)
         return bool(out.stdout.strip())
@@ -913,6 +943,16 @@ class GitAdapter:
             if line.startswith("worktree ")
         ]
         return roots or [self.root]
+
+    def forget_workspace(self, root: Path) -> str | None:
+        roots = self.workspace_roots()
+        target = root.resolve()
+        if not roots or roots[0].resolve() == target:
+            return None  # the main worktree cannot be removed
+        if not any(r.resolve() == target for r in roots):
+            return None
+        self._git("worktree", "remove", str(target))
+        return f"git worktree {target} removed"
 
     def dirty(self, relpaths: list[str]) -> bool:
         out = self._git("status", "--porcelain", "--", *relpaths)

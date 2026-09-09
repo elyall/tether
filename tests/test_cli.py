@@ -700,3 +700,30 @@ def test_cli_restore(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert f"db -> {wref}" in r.output and store.resolve(system, wref) == s1
     r = runner.invoke(app, ["status", "--json"])
     assert json.loads(r.output)["stale"] is False
+
+
+def test_cli_forget_workspace(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
+    r = runner.invoke(app, ["new", "--eager", "--json"])
+    wref = json.loads(r.output)["working_refs"]["db"]
+    ws8 = Repo.find(vcs_root).workspace.workspace_id[:8]
+    r = runner.invoke(app, ["forget-workspace", "--dry-run"])
+    assert r.exit_code == 0 and "delete-branch" in r.output and wref in r.output
+    assert wref in store.system(system).branches
+    r = runner.invoke(app, ["forget-workspace", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["workspace"] == ws8 and payload["deleted_working_refs"] == {
+        "db": [wref]
+    }
+    assert any(p.endswith("workspace.toml") for p in payload["removed_files"])
+    assert wref not in store.system(system).branches

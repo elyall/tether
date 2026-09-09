@@ -85,6 +85,7 @@ __all__ = [
     "ConfigError",
     "DiffEntry",
     "ExportBundle",
+    "ForgetWorkspaceReport",
     "GcReport",
     "ImmutableObjectModified",
     "ImportReport",

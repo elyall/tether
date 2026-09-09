@@ -229,7 +229,11 @@ whatever it wrote. By default `gc` never deletes a branch: it releases tether's
 *refs* (tags) and leaves data reclamation to each system, so a branch you
 forgot about is never the reason data disappears.
 
-`--prune-workspaces` opts in. It lists the `tether.ws.*` branches in each
+When you know which checkout you are done with, `tether forget-workspace [ID]`
+does the same evaluation for that one workspace right away, removes its state
+files, and forgets the jj workspace / removes the git worktree in the same
+step. `--prune-workspaces` is the sweep for everything that was left behind:
+it opts in. It lists the `tether.ws.*` branches in each
 system, skips the branches of every *live* checkout -- tether finds the jj
 workspaces (`jj workspace list` / `jj workspace root --name`) or git worktrees
 of the repository and reads their `.tether/workspace.toml` -- plus any id on

@@ -235,6 +235,30 @@ class RepairReport:
 
 
 @dataclass
+class ForgetWorkspaceReport:
+    """What `Repo.apply_forget_workspace` did.
+
+    Attributes:
+        workspace: The 8-char workspace id that was forgotten.
+        deleted_working_refs: Key -> branches deleted.
+        kept_working_refs: Key -> branches kept (unpinned data; `--force-prune`).
+        removed_files: Per-workspace files removed (`workspace.toml`, `ops.jsonl`).
+        vcs: What the VCS did (`jj workspace forget` / `git worktree remove`),
+            if anything.
+        failed: Target -> why a step failed.
+        plan: The plan that was applied.
+    """
+
+    workspace: str = ""
+    deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    kept_working_refs: dict[str, list[str]] = field(default_factory=dict)
+    removed_files: list[str] = field(default_factory=list)
+    vcs: str | None = None
+    failed: dict[str, str] = field(default_factory=dict)
+    plan: Plan | None = None
+
+
+@dataclass
 class AbandonReport:
     """What `Repo.abandon` did.
 
@@ -1860,6 +1884,8 @@ class Repo:
         key_for: Callable[[ObjectBackend, dict], str],
         keep_workspaces: set[str],
         force: bool,
+        *,
+        only_workspace: str | None = None,
     ) -> None:
         """Add `delete-branch` / `keep-branch` actions for stray `tether.ws.*` branches.
 
@@ -1868,6 +1894,8 @@ class Repo:
         branch's head (nothing was written). Anything else -- unpinned writes,
         a state that is only *recorded* (`pin = "record"`), or a backend whose
         branches are the storage itself -- is kept unless ``force``.
+        ``only_workspace`` evaluates exactly that workspace's branches (all of
+        them, live or not) and no others -- `forget-workspace` uses it.
         """
         mine = self.workspace.workspace_id[:8]
         keep_ids = {w[:8] for w in keep_workspaces} | {mine}
@@ -1910,7 +1938,11 @@ class Repo:
                 if working_ref_dataset(ref) != self.config.dataset_id:
                     foreign += 1  # another dataset's workspace; not ours to judge
                     continue
-                if ws == mine:
+                if only_workspace is not None:
+                    if ws != only_workspace:
+                        continue
+                    origin = f"workspace {ws} (being forgotten)"
+                elif ws == mine:
                     if ref in in_use:
                         continue
                     origin = "this workspace's branch; no object uses it"
@@ -2541,6 +2573,133 @@ class Repo:
         """Re-fork `keys` from the pins at `rev` (see `plan_restore`)."""
         return self.apply_restore(
             self.plan_restore(keys, rev, discard=discard), verify=False
+        )
+
+    # -- forget-workspace ------------------------------------------------ #
+    def _workspace_root(self, workspace_id8: str) -> Path | None:
+        """Where the checkout with that tether workspace id lives, if it is live."""
+        rel = self._dataset_rel()
+        for root in self.vcs.workspace_roots():
+            path = workspace_path(root / rel)
+            if not path.is_file():
+                continue
+            with contextlib.suppress(Exception):
+                if read_workspace(root / rel).workspace_id[:8] == workspace_id8:
+                    return (root / rel).resolve()
+        return None
+
+    def plan_forget_workspace(
+        self, workspace_id: str | None = None, *, force_prune: bool = False
+    ) -> Plan:
+        """Compute what forgetting a workspace would do (default: this one).
+
+        `jj workspace forget` / `git worktree remove` and the tether half in
+        one: that workspace's working branches are deleted under the
+        `gc --prune-workspaces` rule (head pinned or equal to the base;
+        `force_prune` for the rest), its `workspace.toml` and `ops.jsonl` are
+        removed when its checkout is known, and the VCS stops tracking the
+        checkout. Forgetting the current workspace leaves the directory in
+        place; the next tether command there starts a fresh workspace.
+
+        Args:
+            workspace_id: Full or 8-char id (see `tether ops` / `status`);
+                default the current workspace.
+            force_prune: Delete branches even if they hold unpinned data.
+        """
+        target = (workspace_id or self.workspace.workspace_id)[:8]
+        plan = Plan(
+            command="forget-workspace",
+            context={
+                "workspace": target,
+                "force_prune": force_prune,
+                "current": target == self.workspace.workspace_id[:8],
+            },
+        )
+
+        def key_for(backend: ObjectBackend, locator: dict) -> str:
+            ident = backend.identity(locator)
+            return f"{backend.kind}|{_m.canonical_bytes(ident).decode()}"
+
+        manifests: list[ObjectManifest] = list(self.objects.values())
+        for _rev, objects in self._iter_history_objects():
+            manifests.extend(objects.values())
+        self._plan_prune_workspaces(
+            plan, manifests, key_for, set(), force_prune, only_workspace=target
+        )
+        root = self._workspace_root(target)
+        if root is not None:
+            plan.context["root"] = str(root)
+            for name in (_m.WORKSPACE_FILENAME, _m.UNTRACKED_FILES[1]):
+                path = _m.tether_path(root) / name
+                if path.exists():
+                    plan.actions.append(
+                        Action(
+                            "delete-file",
+                            target=str(path),
+                            detail="per-workspace state",
+                        )
+                    )
+            detail = (
+                "jj workspace forget / git worktree remove (git's main worktree stays)"
+            )
+            if plan.context["current"]:
+                detail += (
+                    "; this checkout then has no working copy until `jj undo` "
+                    "or a new `jj workspace add`"
+                )
+            plan.actions.append(
+                Action("forget-vcs-workspace", target=str(root), detail=detail)
+            )
+        else:
+            plan.notes.append(
+                f"workspace {target}: no live checkout found; only its branches "
+                "are considered"
+            )
+        if not any(a.op in ("delete-branch", "keep-branch") for a in plan.actions):
+            plan.notes.append(f"workspace {target}: no working branches in any store")
+        return plan
+
+    def apply_forget_workspace(self, plan: Plan) -> ForgetWorkspaceReport:
+        """Execute a plan from `plan_forget_workspace`; failures are reported."""
+        if plan.command != "forget-workspace":
+            raise ConfigError(f"expected a forget-workspace plan, got {plan.command!r}")
+        report = ForgetWorkspaceReport(
+            workspace=str(plan.context["workspace"]), plan=plan
+        )
+        # Log first: forgetting the current workspace removes its own log.
+        self._log_op(
+            "forget-workspace",
+            plan=plan,
+            result={"workspace": report.workspace},
+            pre={"workspace": self.workspace.to_toml()},
+        )
+        for a in plan.actions:
+            try:
+                if a.op == "delete-branch":
+                    self.backend_for(a.kind).delete_working_ref(
+                        dict(a.params["locator"]), a.target
+                    )
+                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "keep-branch":
+                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
+                elif a.op == "delete-file":
+                    Path(a.target).unlink(missing_ok=True)
+                    report.removed_files.append(a.target)
+                elif a.op == "forget-vcs-workspace":
+                    report.vcs = self.vcs.forget_workspace(Path(a.target))
+            except (TetherError, OSError) as exc:
+                report.failed[f"{a.op} {a.target}"] = str(exc)
+        if plan.context.get("current"):
+            # This workspace no longer exists as such; drop its in-memory state.
+            self.workspace = read_workspace(self.root)
+        return report
+
+    def forget_workspace(
+        self, workspace_id: str | None = None, *, force_prune: bool = False
+    ) -> ForgetWorkspaceReport:
+        """Forget a workspace (see `plan_forget_workspace`)."""
+        return self.apply_forget_workspace(
+            self.plan_forget_workspace(workspace_id, force_prune=force_prune)
         )
 
     # -- abandon --------------------------------------------------------- #

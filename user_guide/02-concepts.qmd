@@ -33,6 +33,7 @@ tether did to the *stores* to get there -- goes in tether's own
 | `jj squash --into main` | **promote**: move each system's base branch to the fork -- fast-forward if the base is unchanged since the fork point, native merge where one exists, refuse otherwise |
 | `jj abandon` | **abandon**: the VCS drops the commits (later manifests kept as they were) and the `gc` plan for what that freed is shown or applied |
 | `jj restore --from REV FILE` | **restore**: reset one object's working branch to what `REV` pinned; the manifests and the other branches stay |
+| `jj workspace forget` | **forget-workspace**: the VCS forgets the checkout and that workspace's working branches are deleted (safety-checked) in one step |
 | `jj squash` | the VCS's own; what history no longer names, `gc` releases |
 | `jj op log` / `jj undo` | **ops** / **undo**: tether's own log of what each command did to the stores, and the reversal of an entry where the store still allows it; **repair** rebuilds what a manifest promises |
 | -- | **export** / **publish** (history as SQL tables) and **import** (the object set from a registry query) |
