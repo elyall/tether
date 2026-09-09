@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a8] - 2026-09-09
+
 ### Added
 
 - **Operation log.** Every command that writes to a store appends an entry to
