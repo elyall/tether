@@ -72,21 +72,47 @@ def _blake(*parts: bytes, size: int = 32) -> str:
     return h.hexdigest()
 
 
-def compute_pin_id(kind: str, identity: Locator, state: State) -> str:
-    """Content-address a pin from ``(kind, locator identity, state)``.
+DATASET_ID_LEN = 8
 
-    The 16-hex-char (64-bit) result is stable across processes and machines:
-    identical state on the same object produces the same pin id, so
-    re-committing an unchanged object is a no-op and identical states dedupe to
-    one pin. Callers pass the *content* state (see
-    :func:`tether.backends.base.content_state`).
+
+def new_dataset_id() -> str:
+    """A fresh 8-hex dataset id (the namespace for a dataset's native refs)."""
+    return uuid.uuid4().hex[:DATASET_ID_LEN]
+
+
+def is_dataset_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == DATASET_ID_LEN
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def compute_pin_id(kind: str, identity: Locator, state: State, dataset_id: str) -> str:
+    """Content-address a pin: ``<dataset8>.<hash16>``.
+
+    The hash covers ``(kind, locator identity, state)`` and is stable across
+    processes and machines, so re-committing an unchanged object is a no-op and
+    identical states dedupe to one pin *within a dataset*. The dataset id in
+    front is the namespace: several datasets can pin the same store and each
+    one's ``gc`` only ever sees its own pins. Callers pass the *content* state
+    (see :func:`tether.backends.base.content_state`).
     """
-    return _blake(
+    digest = _blake(
         canonical_bytes(kind),
         canonical_bytes(identity),
         canonical_bytes(state),
         size=16,
     )[:16]
+    return f"{dataset_id[:DATASET_ID_LEN]}.{digest}"
+
+
+def pin_dataset(pin_id: str) -> str | None:
+    """The dataset id a pin id belongs to, or ``None`` if it is not one of ours."""
+    ds, sep, rest = pin_id.partition(".")
+    if sep and is_dataset_id(ds) and rest and "." not in rest:
+        return ds
+    return None
 
 
 def ref_for_pin(pin_id: str) -> str:
@@ -119,23 +145,41 @@ def slugify_key(key: str) -> str:
 WORKING_REF_PREFIX = f"{REF_PREFIX}ws."
 
 
-def working_ref_name(workspace_id: str, key: str) -> str:
-    """Per-workspace working-branch name so workspaces -- and keys -- never collide.
+def working_ref_name(dataset_id: str, workspace_id: str, key: str) -> str:
+    """Working-branch name; datasets, workspaces, and keys never collide.
 
-    ``tether.ws.<workspace8>.<slug>-<key6>``: the slug keeps the name readable,
-    the 6-hex key digest keeps ``zarr/imaging`` and ``zarr-imaging`` apart.
+    ``tether.ws.<dataset8>.<workspace8>.<slug>-<key6>``: the dataset id is the
+    namespace ``gc`` stays inside, the slug keeps the name readable, the 6-hex
+    key digest keeps ``zarr/imaging`` and ``zarr-imaging`` apart.
     """
     digest = _blake(canonical_bytes(key), size=8)[:6]
-    return f"{WORKING_REF_PREFIX}{workspace_id[:8]}.{slugify_key(key)}-{digest}"
+    return (
+        f"{WORKING_REF_PREFIX}{dataset_id[:DATASET_ID_LEN]}.{workspace_id[:8]}."
+        f"{slugify_key(key)}-{digest}"
+    )
+
+
+def _working_ref_parts(ref: str) -> tuple[str, str] | None:
+    if not ref.startswith(WORKING_REF_PREFIX):
+        return None
+    rest = ref[len(WORKING_REF_PREFIX) :]
+    ds, _, rest = rest.partition(".")
+    ws, _, _ = rest.partition(".")
+    if not is_dataset_id(ds) or not ws:
+        return None
+    return ds, ws
+
+
+def working_ref_dataset(ref: str) -> str | None:
+    """The dataset id embedded in a working ref name, if it is one."""
+    parts = _working_ref_parts(ref)
+    return parts[0] if parts else None
 
 
 def working_ref_workspace(ref: str) -> str | None:
     """The 8-char workspace id embedded in a working ref name, if it is one."""
-    if not ref.startswith(WORKING_REF_PREFIX):
-        return None
-    rest = ref[len(WORKING_REF_PREFIX) :]
-    ws, _, _ = rest.partition(".")
-    return ws or None
+    parts = _working_ref_parts(ref)
+    return parts[1] if parts else None
 
 
 def _drop_nulls(obj: Any) -> Any:
@@ -294,6 +338,11 @@ class RepoConfig:
     """Committed repository configuration."""
 
     version: int = CONFIG_VERSION
+    dataset_id: str = field(default_factory=new_dataset_id)
+    """`[dataset] id`: 8 hex chars naming this dataset in every store it pins.
+    Pins are `tether.<id>.<hash>`, working branches `tether.ws.<id>.<ws>...`;
+    `gc` only touches refs in this namespace. Committed, so all clones share
+    it."""
     snapshot_auto: bool = True
     verify_on_status: bool = False
     new_auto_fork: bool = False
@@ -311,6 +360,7 @@ class RepoConfig:
         tether_tbl = tomlkit.table()
         tether_tbl["version"] = self.version
         doc["tether"] = tether_tbl
+        doc["dataset"] = {"id": self.dataset_id}
         doc["snapshot"] = {"auto": self.snapshot_auto}
         doc["verify"] = {"on_status": self.verify_on_status}
         doc["new"] = {"auto_fork": self.new_auto_fork, "fork": self.new_fork}
@@ -335,8 +385,18 @@ class RepoConfig:
         fork = str(new.get("fork", "lazy"))
         if fork not in ("lazy", "eager"):
             raise ConfigError(f"invalid [new] fork: {fork!r} (lazy or eager)")
+        dataset_id = (data.get("dataset") or {}).get("id")
+        if not is_dataset_id(dataset_id):
+            raise ConfigError(
+                "tether.toml has no valid [dataset] id (8 hex chars). It namespaces "
+                "this dataset's pins and working branches in every store; add\n"
+                f'  [dataset]\n  id = "{new_dataset_id()}"\n'
+                "(pins and branches made before it was set are not recognised: "
+                "re-commit and `new`)"
+            )
         return cls(
             version=int(tether_tbl.get("version", CONFIG_VERSION)),
+            dataset_id=str(dataset_id),
             snapshot_auto=bool(snapshot.get("auto", True)),
             verify_on_status=bool(verify.get("on_status", False)),
             new_auto_fork=bool(new.get("auto_fork", False)),

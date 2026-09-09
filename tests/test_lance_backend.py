@@ -54,7 +54,7 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
 
     state = b.fingerprint(loc, None)
     assert state == {"branch": "main", "version": 1}
-    pid = compute_pin_id("lance", b.identity(loc), state)
+    pid = compute_pin_id("lance", b.identity(loc), state, "d5d5d5d5")
     pin = b.pin(loc, state, pid)
     assert pin.ref == ref_for_pin(pid)
     assert b.pin(loc, state, pid) == pin  # idempotent
@@ -62,7 +62,7 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
         b.pin(loc, {"branch": "main", "version": 0}, pid)
 
     # A fresh fork reports the parent's address, so a no-op commit is a no-op.
-    name = working_ref_name("ws0123abcd", "tables/x")
+    name = working_ref_name("d5d5d5d5", "ws0123abcd", "tables/x")
     wref = b.fork(loc, pin, name)
     assert wref == name
     assert b.fingerprint(loc, wref) == state
@@ -76,7 +76,7 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     assert b.fingerprint(loc, None) == state
 
     # Pin the fork's state: the tag names (branch, version) on the fork.
-    pid2 = compute_pin_id("lance", b.identity(loc), forked)
+    pid2 = compute_pin_id("lance", b.identity(loc), forked, "d5d5d5d5")
     pin2 = b.pin(loc, forked, pid2)
     ro = b.open(loc, pin2, read_only=True)
     assert isinstance(ro, LanceHandle) and ro.read_only and ro.tag == pin2.ref

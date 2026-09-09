@@ -289,11 +289,11 @@ def test_dolt_dirty_branch_and_handles(fake: tuple[DoltBackend, FakeDolt]) -> No
     dirty = b.fingerprint(loc, None)
     assert dirty == {"commit": clean["commit"], "dirty": True}
     with pytest.raises(BackendError):
-        b.pin(loc, dirty, compute_pin_id("dolt", b.identity(loc), dirty))
+        b.pin(loc, dirty, compute_pin_id("dolt", b.identity(loc), dirty, "d5d5d5d5"))
 
     db.commit("main", "add rows")
     state = b.fingerprint(loc, None)
-    pid = compute_pin_id("dolt", b.identity(loc), state)
+    pid = compute_pin_id("dolt", b.identity(loc), state, "d5d5d5d5")
     pin = b.pin(loc, state, pid)
     assert pin.ref == ref_for_pin(pid)
     assert b.pin(loc, state, pid) == pin  # idempotent

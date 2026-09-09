@@ -131,8 +131,15 @@ def init(
         repo = Repo.init(path)
     except TetherError as exc:
         _fail(exc)
-    typer.echo(f"initialized tether dataset at {repo.root}")
-    _emit({"root": str(repo.root)}, as_json=json_out)
+    typer.echo(
+        f"initialized tether dataset at {repo.root} (dataset id "
+        f"{repo.config.dataset_id}: its pins and working branches are "
+        f"tether.{repo.config.dataset_id}.* / tether.ws.{repo.config.dataset_id}.*)"
+    )
+    _emit(
+        {"root": str(repo.root), "dataset_id": repo.config.dataset_id},
+        as_json=json_out,
+    )
 
 
 @app.command()

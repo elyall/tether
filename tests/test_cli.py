@@ -243,9 +243,12 @@ def test_cli_plans_dry_run_and_from_plan(
 
     # gc: dry run by default, plan file, prune other workspaces.
     branches = store.system(system).branches
-    branches["tether.ws.deadbeef.db"] = branches["main"]  # no writes: safe
-    branches["tether.ws.0badf00d.db"] = branches["main"]
-    store.write(system, "tether.ws.0badf00d.db", {"v": 7})  # has data: kept
+    ds = Repo.find(vcs_root).config.dataset_id
+    branches[f"tether.ws.{ds}.deadbeef.db"] = branches["main"]  # no writes: safe
+    branches[f"tether.ws.{ds}.0badf00d.db"] = branches["main"]
+    store.write(system, f"tether.ws.{ds}.0badf00d.db", {"v": 7})  # has data: kept
+    # Another dataset's branch in the same store: never gc's business.
+    branches["tether.ws.ffffffff.deadbeef.db"] = branches["main"]
     r = runner.invoke(app, ["gc"])
     assert r.exit_code == 0, r.output
     assert "deadbeef" not in r.output  # not without --prune-workspaces
@@ -254,22 +257,23 @@ def test_cli_plans_dry_run_and_from_plan(
     gc_plan = vcs_root / "gc.json"
     r = runner.invoke(app, ["gc", "--prune-workspaces", "--plan", str(gc_plan)])
     assert r.exit_code == 0, r.output
-    assert "delete-branch" in r.output and "tether.ws.deadbeef.db" in r.output
-    assert "keep-branch" in r.output and "tether.ws.0badf00d.db" in r.output
-    assert "tether.ws.deadbeef.db" in branches  # plan only
+    assert "delete-branch" in r.output and f"tether.ws.{ds}.deadbeef.db" in r.output
+    assert "keep-branch" in r.output and f"tether.ws.{ds}.0badf00d.db" in r.output
+    assert f"tether.ws.{ds}.deadbeef.db" in branches  # plan only
     r = runner.invoke(app, ["gc", "--from-plan", str(gc_plan), "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["deleted_working_refs"] == {"db": ["tether.ws.deadbeef.db"]}
-    assert payload["kept_working_refs"] == {"db": ["tether.ws.0badf00d.db"]}
-    assert "tether.ws.deadbeef.db" not in branches
-    assert "tether.ws.0badf00d.db" in branches
+    assert payload["deleted_working_refs"] == {"db": [f"tether.ws.{ds}.deadbeef.db"]}
+    assert payload["kept_working_refs"] == {"db": [f"tether.ws.{ds}.0badf00d.db"]}
+    assert f"tether.ws.{ds}.deadbeef.db" not in branches
+    assert f"tether.ws.{ds}.0badf00d.db" in branches
+    assert "tether.ws.ffffffff.deadbeef.db" in branches  # foreign, untouched
     assert wref in branches  # ours survives
     r = runner.invoke(
         app, ["gc", "--prune-workspaces", "--force-prune", "--no-dry-run"]
     )
     assert r.exit_code == 0, r.output
-    assert "tether.ws.0badf00d.db" not in branches
+    assert f"tether.ws.{ds}.0badf00d.db" not in branches
     assert wref in branches
 
 

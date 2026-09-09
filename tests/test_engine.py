@@ -117,17 +117,23 @@ def test_gc_removes_orphan_pin(vcs_root: Path) -> None:
     backend = repo.backend_for("memory")
     locator = {"system": system}
 
-    # An orphan native pin that no manifest references.
+    # An orphan native pin in this dataset's namespace that no manifest
+    # references, and one from another dataset sharing the store.
     sid = default_store().system(system).branches["main"]
-    backend.pin(locator, {"snapshot_id": sid}, "orphan0badid")
-    assert "orphan0badid" in backend.list_pins(locator)
+    orphan = f"{repo.config.dataset_id}.0000000000badbad"
+    backend.pin(locator, {"snapshot_id": sid}, orphan)
+    backend.pin(locator, {"snapshot_id": sid}, "ffffffff.0000000000badbad")
+    assert {orphan, "ffffffff.0000000000badbad"} <= backend.list_pins(locator)
 
     dry = repo.gc(dry_run=True)
-    assert "orphan0badid" in dry.unpinned.get("memory", [])
-    assert "orphan0badid" in backend.list_pins(locator)  # dry-run kept it
+    assert dry.unpinned.get("memory", []) == [orphan]
+    assert dry.plan is not None
+    assert any("1 pin(s) of other datasets left alone" in n for n in dry.plan.notes)
+    assert orphan in backend.list_pins(locator)  # dry-run kept it
 
     repo.gc(dry_run=False)
-    assert "orphan0badid" not in backend.list_pins(locator)
+    assert orphan not in backend.list_pins(locator)
+    assert "ffffffff.0000000000badbad" in backend.list_pins(locator)  # not ours
 
 
 def _someone_else_commits(repo: Repo, key: str, state: dict) -> None:
@@ -585,11 +591,13 @@ def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> N
     s3 = store.write(system, "main", {"v": 3})  # main moved on; s3 is not pinned
 
     # Stray branches of dead workspaces, in every situation the rule covers.
-    branches["tether.ws.aaaa0001.db"] = s3  # equals base head: safe
-    branches["tether.ws.aaaa0002.db"] = s1  # pinned by the first commit: safe
-    branches["tether.ws.aaaa0003.db"] = s2
-    store.write(system, "tether.ws.aaaa0003.db", {"v": 99})  # unpinned writes: keep
-    branches["tether.ws.cafef00d.db"] = s2  # live workspace: never considered
+    ds = repo.config.dataset_id
+    branches[f"tether.ws.{ds}.aaaa0001.db"] = s3  # equals base head: safe
+    branches[f"tether.ws.{ds}.aaaa0002.db"] = s1  # pinned by the first commit: safe
+    branches[f"tether.ws.{ds}.aaaa0003.db"] = s2
+    store.write(system, f"tether.ws.{ds}.aaaa0003.db", {"v": 99})  # unpinned: keep
+    branches[f"tether.ws.{ds}.cafef00d.db"] = s2  # live workspace: never considered
+    branches["tether.ws.ffffffff.aaaa0001.db"] = s3  # another dataset's: not ours
     branches["feature-x"] = s2  # not a tether branch: never considered
 
     # Default gc never touches branches.
@@ -598,32 +606,34 @@ def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> N
 
     plan = repo.plan_gc(prune_workspaces=True, keep_workspaces={"cafef00d"})
     by_ref = {a.target: a for a in plan.actions if a.op.endswith("-branch")}
-    assert by_ref["tether.ws.aaaa0001.db"].op == "delete-branch"
-    assert "equals the base branch" in by_ref["tether.ws.aaaa0001.db"].detail
-    assert by_ref["tether.ws.aaaa0002.db"].op == "delete-branch"
-    assert "head is pinned" in by_ref["tether.ws.aaaa0002.db"].detail
-    assert by_ref["tether.ws.aaaa0003.db"].op == "keep-branch"
-    assert "unpinned writes" in by_ref["tether.ws.aaaa0003.db"].detail
-    assert "tether.ws.cafef00d.db" not in by_ref and "feature-x" not in by_ref
+    assert by_ref[f"tether.ws.{ds}.aaaa0001.db"].op == "delete-branch"
+    assert "equals the base branch" in by_ref[f"tether.ws.{ds}.aaaa0001.db"].detail
+    assert by_ref[f"tether.ws.{ds}.aaaa0002.db"].op == "delete-branch"
+    assert "head is pinned" in by_ref[f"tether.ws.{ds}.aaaa0002.db"].detail
+    assert by_ref[f"tether.ws.{ds}.aaaa0003.db"].op == "keep-branch"
+    assert "unpinned writes" in by_ref[f"tether.ws.{ds}.aaaa0003.db"].detail
+    assert f"tether.ws.{ds}.cafef00d.db" not in by_ref and "feature-x" not in by_ref
     assert mine not in by_ref  # in use by this workspace
     assert len(plan.writes) == 2  # keep-branch is not a write
 
     report = repo.gc(dry_run=False, prune_workspaces=True, keep_workspaces={"cafef00d"})
-    assert "tether.ws.aaaa0001.db" not in branches
-    assert "tether.ws.aaaa0002.db" not in branches
-    assert "tether.ws.aaaa0003.db" in branches  # kept: has data
-    assert "tether.ws.cafef00d.db" in branches and "feature-x" in branches
+    assert f"tether.ws.{ds}.aaaa0001.db" not in branches
+    assert f"tether.ws.{ds}.aaaa0002.db" not in branches
+    assert f"tether.ws.{ds}.aaaa0003.db" in branches  # kept: has data
+    assert f"tether.ws.{ds}.cafef00d.db" in branches and "feature-x" in branches
+    assert "tether.ws.ffffffff.aaaa0001.db" in branches  # foreign: untouched
     assert mine in branches
-    assert report.kept_working_refs == {"db": ["tether.ws.aaaa0003.db"]}
+    assert report.kept_working_refs == {"db": [f"tether.ws.{ds}.aaaa0003.db"]}
 
     # --force-prune deletes the one with data too, and says so.
     plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
-    (forced,) = [a for a in plan.actions if a.target == "tether.ws.aaaa0003.db"]
+    (forced,) = [a for a in plan.actions if a.target == f"tether.ws.{ds}.aaaa0003.db"]
     assert forced.op == "delete-branch" and forced.params["forced"] is True
     assert "FORCED" in forced.detail
     repo.apply_gc(plan)
-    assert "tether.ws.aaaa0003.db" not in branches
-    assert "tether.ws.cafef00d.db" not in branches  # no keep list this time
+    assert f"tether.ws.{ds}.aaaa0003.db" not in branches
+    assert f"tether.ws.{ds}.cafef00d.db" not in branches  # no keep list this time
+    assert "tether.ws.ffffffff.aaaa0001.db" in branches  # even --force-prune
     assert mine in branches
 
 
@@ -647,10 +657,11 @@ def test_gc_keeps_pinless_recorded_states_and_storage_branches(
     store.write(system, "main", {"v": 2})
     repo.commit("update")  # records s2; main head is s2
     branches = store.system(system).branches
-    branches["tether.ws.aaaa0001.db"] = s1  # the only thing keeping s1 alive
+    ds = repo.config.dataset_id
+    branches[f"tether.ws.{ds}.aaaa0001.db"] = s1  # the only thing keeping s1 alive
 
     plan = repo.plan_gc(prune_workspaces=True)
-    (a,) = [x for x in plan.actions if x.target == "tether.ws.aaaa0001.db"]
+    (a,) = [x for x in plan.actions if x.target == f"tether.ws.{ds}.aaaa0001.db"]
     assert a.op == "keep-branch" and "pin-less recorded state" in a.detail
 
     # A backend whose branches *are* the storage is never pruned without force.
@@ -658,11 +669,13 @@ def test_gc_keeps_pinless_recorded_states_and_storage_branches(
     monkeypatch.setattr(
         backend, "capabilities", backend.capabilities | Capability.BRANCH_IS_STORAGE
     )
-    branches["tether.ws.aaaa0002.db"] = branches["main"]  # would otherwise be safe
+    branches[f"tether.ws.{ds}.aaaa0002.db"] = branches[
+        "main"
+    ]  # would otherwise be safe
     plan = repo.plan_gc(prune_workspaces=True)
     ops = {x.target: x for x in plan.actions if x.op.endswith("-branch")}
-    assert ops["tether.ws.aaaa0002.db"].op == "keep-branch"
-    assert "branch is storage" in ops["tether.ws.aaaa0002.db"].detail
+    assert ops[f"tether.ws.{ds}.aaaa0002.db"].op == "keep-branch"
+    assert "branch is storage" in ops[f"tether.ws.{ds}.aaaa0002.db"].detail
     plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
     assert all(
         x.op == "delete-branch" for x in plan.actions if x.op.endswith("-branch")
@@ -777,12 +790,11 @@ def test_prune_keeps_live_workspaces_automatically(
     }
 
     # A branch from a workspace that no longer exists, at the base head (safe).
-    store.system(system).branches["tether.ws.deadbeef.db-000000"] = store.system(
-        system
-    ).branches["main"]
+    stray = f"tether.ws.{repo.config.dataset_id}.deadbeef.db-000000"
+    store.system(system).branches[stray] = store.system(system).branches["main"]
     plan = repo.plan_gc(prune_workspaces=True)
     ops = {a.target: a.op for a in plan.actions if a.op.endswith("-branch")}
-    assert ops == {"tether.ws.deadbeef.db-000000": "delete-branch"}
+    assert ops == {stray: "delete-branch"}
     assert theirs not in ops and mine not in ops  # both live, no --keep-workspace
     assert plan.context["live_workspaces"] == sorted(
         w[:8] for w in (repo.workspace.workspace_id, other.workspace.workspace_id)
@@ -828,3 +840,60 @@ def test_partial_fork_records_what_succeeded(
     repo.new(eager=True)
     assert set(repo.workspace.working_refs) == {"ok", "bad"}
     assert not repo.is_stale()
+
+
+def test_two_datasets_sharing_a_store_do_not_gc_each_other(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """Dataset A's gc must not see dataset B's pins or working branches."""
+    import subprocess
+
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    subprocess.run(["git", "init", "-q", str(other_root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(other_root), "config", "user.email", "t@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(other_root), "config", "user.name", "t"], check=True
+    )
+
+    a = Repo.init(vcs_root)
+    b = Repo.init(other_root)
+    assert a.config.dataset_id != b.config.dataset_id
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    for repo in (a, b):
+        repo.add("db", "memory", {"system": system, "branch": "main"})
+    store.write(system, "main", {"v": 1})
+    a.commit("a: v1")
+    store.write(system, "main", {"v": 2})
+    b.commit("b: v2")  # a different state, so a different pin
+    b.new(eager=True)
+    b_ref = b.workspace.working_refs["db"]
+    b_pin = b.objects["db"].pin
+    a_pin = a.objects["db"].pin
+    assert a_pin is not None and b_pin is not None and a_pin.id != b_pin.id
+    assert a_pin.id.startswith(a.config.dataset_id + ".")
+    assert b_pin.id.startswith(b.config.dataset_id + ".")
+    assert b_ref.startswith(f"tether.ws.{b.config.dataset_id}.")
+
+    # From A's point of view B's pin and branch are unreferenced strays -- and
+    # off limits. Even --force-prune stays inside A's namespace.
+    plan = a.plan_gc(prune_workspaces=True, force_prune=True)
+    targets = {x.target for x in plan.actions}
+    assert not any(b_pin.id in t or t == b_ref for t in targets), targets
+    assert any("of other datasets left alone" in n for n in plan.notes)
+    a.gc(dry_run=False, prune_workspaces=True, force_prune=True)
+    backend = a.backend_for("memory")
+    assert b_pin.id in backend.list_pins({"system": system})
+    assert b_ref in store.system(system).branches
+    # ... and the same state pinned by both datasets is two refs, one each.
+    store.write(system, "main", {"v": 3})
+    a.commit("a: v3")
+    b.commit("b: v3")
+    a3, b3 = a.objects["db"].pin, b.objects["db"].pin
+    assert a3 is not None and b3 is not None and a3.id != b3.id
+    assert {a3.id, b3.id} <= backend.list_pins({"system": system})

@@ -58,12 +58,14 @@ from tether.manifest import (
     listing_name,
     listings_dir,
     manifest_hash,
+    pin_dataset,
     read_config,
     read_listing,
     read_objects,
     read_workspace,
     ref_for_pin,
     remove_object,
+    working_ref_dataset,
     working_ref_name,
     working_ref_workspace,
     workspace_path,
@@ -357,6 +359,12 @@ class Repo:
             backend = build_backend(kind, self.config.backends.get(kind, {}))
             self._backends[kind] = backend
         return backend
+
+    def _working_ref_for(self, key: str) -> str:
+        """The working-branch name this workspace uses for `key`."""
+        return working_ref_name(
+            self.config.dataset_id, self.workspace.workspace_id, key
+        )
 
     def _working_ref(self, key: str) -> str | None:
         return self.workspace.working_refs.get(key)
@@ -760,7 +768,10 @@ class Repo:
                 )
             elif needs_pin:
                 pin_id = compute_pin_id(
-                    m.kind, backend.identity(m.locator), self._content_of(m.kind, state)
+                    m.kind,
+                    backend.identity(m.locator),
+                    self._content_of(m.kind, state),
+                    self.config.dataset_id,
                 )
                 plan.actions.append(
                     Action(
@@ -997,7 +1008,7 @@ class Repo:
                     f"{key}: nothing committed yet; fork after first commit"
                 )
                 continue
-            name = working_ref_name(self.workspace.workspace_id, key)
+            name = self._working_ref_for(key)
             if m.pin is not None:
                 source = {"pin": m.pin.to_dict()}
                 detail = f"from pin {m.pin.ref}"
@@ -1172,8 +1183,8 @@ class Repo:
 
         Equivalent to `apply_new(plan_new(...))`. For every `FORK`-capable
         object, `track` policy uses the locator's branch; otherwise a branch
-        named `working_ref_name(workspace_id, key)` is forked from the pin --
-        by default *lazily*, on the first writable `open` (see `plan_new`), or
+        named `working_ref_name(dataset_id, workspace_id, key)` is forked from the
+        pin -- by default *lazily*, on the first writable `open` (see `plan_new`), or
         during `new` with `eager`. `pin = "record"` objects always fork now,
         from their recorded state. Objects with no committed state yet are
         skipped. Forks run concurrently.
@@ -1487,8 +1498,16 @@ class Repo:
                 continue
             checked_systems.add(sys_key)
             live = backend.list_pins(m.locator)
+            # Only this dataset's namespace: pins of other datasets sharing
+            # the store (or refs that are not tether pins) are never touched.
+            mine = {p for p in live if pin_dataset(p) == self.config.dataset_id}
+            foreign = len(live) - len(mine)
+            if foreign:
+                plan.notes.append(
+                    f"{m.key}: {foreign} pin(s) of other datasets left alone"
+                )
             keep = referenced.get(sys_key, set())
-            for pid in sorted(live - keep):
+            for pid in sorted(mine - keep):
                 plan.actions.append(
                     Action(
                         "unpin",
@@ -1598,9 +1617,13 @@ class Repo:
             systems_seen.add(sys_key)
             storage = Capability.BRANCH_IS_STORAGE in eff
             base_head: State | None = None
+            foreign = 0
             for ref in sorted(backend.list_working_refs(m.locator)):
                 ws = working_ref_workspace(ref)
                 if ws is None:
+                    continue
+                if working_ref_dataset(ref) != self.config.dataset_id:
+                    foreign += 1  # another dataset's workspace; not ours to judge
                     continue
                 if ws == mine:
                     if ref in in_use:
@@ -1672,6 +1695,11 @@ class Repo:
                             detail=f"{origin}; kept: {reason} (--force-prune deletes)",
                         )
                     )
+
+            if foreign:
+                plan.notes.append(
+                    f"{key}: {foreign} working branch(es) of other datasets left alone"
+                )
 
     def apply_gc(self, plan: Plan) -> GcReport:
         """Execute a plan from `plan_gc`.

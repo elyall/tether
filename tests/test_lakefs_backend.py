@@ -273,11 +273,11 @@ def test_lakefs_dirty_branch_is_reported_and_refused(
     dirty = b.fingerprint(loc, None)
     assert dirty["dirty"] is True and dirty["commit_id"] == clean["commit_id"]
     with pytest.raises(BackendError):
-        b.pin(loc, dirty, compute_pin_id("lakefs", b.identity(loc), dirty))
+        b.pin(loc, dirty, compute_pin_id("lakefs", b.identity(loc), dirty, "d5d5d5d5"))
 
     f(loc).branch("main").commit("add a")
     state = b.fingerprint(loc, None)
-    pid = compute_pin_id("lakefs", b.identity(loc), state)
+    pid = compute_pin_id("lakefs", b.identity(loc), state, "d5d5d5d5")
     pin = b.pin(loc, state, pid)
     assert pin.ref == ref_for_pin(pid)
     with pytest.raises(BackendError):  # ref taken by a different commit

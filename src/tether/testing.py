@@ -27,6 +27,9 @@ from tether.manifest import (
 
 __all__ = ["BackendHarness", "run_conformance"]
 
+CONFORMANCE_DATASET = "c0fe5a1e"
+"""Dataset id the conformance suite pins under (any 8 hex chars would do)."""
+
 
 @runtime_checkable
 class BackendHarness(Protocol):
@@ -95,8 +98,8 @@ def _identity_checks(h: BackendHarness, loc: Locator, state: dict) -> None:
     assert isinstance(ident, dict) and ident, "identity must be a non-empty dict"
     content = content_state(b, state)
     assert content is not None
-    pid1 = compute_pin_id(b.kind, ident, content)
-    pid2 = compute_pin_id(b.kind, b.identity(loc), content)
+    pid1 = compute_pin_id(b.kind, ident, content, CONFORMANCE_DATASET)
+    pid2 = compute_pin_id(b.kind, b.identity(loc), content, CONFORMANCE_DATASET)
     assert pid1 == pid2, "pin id must be deterministic"
 
 
@@ -106,7 +109,7 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
     # full state, volatile address keys included.
     content = content_state(b, state)
     assert content is not None
-    pid = compute_pin_id(b.kind, b.identity(loc), content)
+    pid = compute_pin_id(b.kind, b.identity(loc), content, CONFORMANCE_DATASET)
     pin = b.pin(loc, state, pid)
     assert pin.ref.startswith(ref_for_pin("")), "pin ref must carry the prefix"
     assert pid in b.list_pins(loc), "list_pins must include a fresh pin"
@@ -123,7 +126,7 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
 def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None:
     b = h.backend
     pin = b.pin(loc, state, pid)
-    name = working_ref_name("ws012345", "conformance/obj")
+    name = working_ref_name(CONFORMANCE_DATASET, "ws012345", "conformance/obj")
     wref = b.fork(loc, pin, name)
     assert isinstance(wref, str) and wref, "fork must return a working ref"
     forked = b.fingerprint(loc, wref)
@@ -146,7 +149,7 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     b.delete_working_ref(loc, wref)
     assert wref not in b.list_working_refs(loc), "deleted working ref still listed"
     # Pin-less fork: straight from the recorded state (policy.pin = "record").
-    name2 = working_ref_name("ws012345", "conformance/pinless")
+    name2 = working_ref_name(CONFORMANCE_DATASET, "ws012345", "conformance/pinless")
     wref2 = b.fork(loc, state, name2)
     assert b.fingerprint(loc, wref2) == state, "fork from state must start there"
     b.delete_working_ref(loc, wref2)

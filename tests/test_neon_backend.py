@@ -253,8 +253,8 @@ def test_lsn_motion_without_writes_is_not_a_change(
             content_state(backend, after),
         )
         assert c_before is not None and c_after is not None
-        assert compute_pin_id("neon", ident, c_before) == compute_pin_id(
-            "neon", ident, c_after
+        assert compute_pin_id("neon", ident, c_before, "d5d5d5d5") == compute_pin_id(
+            "neon", ident, c_after, "d5d5d5d5"
         )
         monkeypatch.setattr(backend, "_probe", lambda uri: ("0/16B5000", "743"))
         moved = backend.fingerprint(LOCATOR, None)

@@ -11,6 +11,7 @@ from tether.manifest import (
     compute_pin_id,
     key_to_relpath,
     manifest_hash,
+    pin_dataset,
     ref_for_pin,
     relpath_to_key,
     slugify_key,
@@ -62,25 +63,42 @@ def test_workspace_round_trip() -> None:
 
 
 def test_pin_id_deterministic_and_state_sensitive() -> None:
-    a = compute_pin_id("icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "1"})
-    b = compute_pin_id("icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "1"})
-    c = compute_pin_id("icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "2"})
-    assert a == b and a != c and len(a) == 16
+    a = compute_pin_id(
+        "icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "1"}, "0a1b2c3d"
+    )
+    b = compute_pin_id(
+        "icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "1"}, "0a1b2c3d"
+    )
+    c = compute_pin_id(
+        "icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "2"}, "0a1b2c3d"
+    )
+    d = compute_pin_id(
+        "icechunk", {"uri": "s3://b/x"}, {"snapshot_id": "1"}, "ffffffff"
+    )
+    assert a == b and a != c and a != d
+    assert a.startswith("0a1b2c3d.") and len(a) == 8 + 1 + 16
+    assert pin_dataset(a) == "0a1b2c3d" and pin_dataset(d) == "ffffffff"
+    assert pin_dataset("ws.0a1b2c3d.x") is None and pin_dataset("abc") is None
 
 
 def test_ref_and_slug_helpers() -> None:
-    from tether.manifest import working_ref_workspace
+    from tether.manifest import working_ref_dataset, working_ref_workspace
 
     assert ref_for_pin("abc") == "tether.abc"
     assert slugify_key("zarr/imaging") == "zarr-imaging"
-    name = working_ref_name("abcd1234efgh", "zarr/imaging")
-    assert name.startswith("tether.ws.abcd1234.zarr-imaging-")
-    assert "." not in name.removeprefix("tether.ws.abcd1234.")
+    name = working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr/imaging")
+    assert name.startswith("tether.ws.0a1b2c3d.abcd1234.zarr-imaging-")
+    assert "." not in name.removeprefix("tether.ws.0a1b2c3d.abcd1234.")
     assert working_ref_workspace(name) == "abcd1234"
+    assert working_ref_dataset(name) == "0a1b2c3d"
+    assert working_ref_dataset("tether.ws.not-hex.abcd1234.zarr-x") is None
+    assert working_ref_workspace("feature-x") is None
     # Keys that slugify identically still get distinct branches.
-    assert name != working_ref_name("abcd1234efgh", "zarr-imaging")
+    assert name != working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr-imaging")
     assert slugify_key("zarr/imaging") == slugify_key("zarr-imaging")
-    assert working_ref_name("abcd1234efgh", "zarr/imaging") == name  # deterministic
+    assert working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr/imaging") == name
+    # Another dataset, same workspace id and key: a different branch.
+    assert working_ref_name("ffffffff", "abcd1234efgh", "zarr/imaging") != name
 
 
 def test_key_path_mapping() -> None:
