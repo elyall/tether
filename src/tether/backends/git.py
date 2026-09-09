@@ -145,21 +145,43 @@ class GitBackend(ObjectBackend):
             )
         remote = locator.get("remote")
         if remote:
-            self._run(locator, "push", str(remote), f"refs/tags/{ref}", check=False)
+            # The pin is only durable once it is on the remote. A push that
+            # fails must fail the pin -- and not leave a local tag that would
+            # make the two diverge silently.
+            try:
+                self._run(locator, "push", str(remote), f"refs/tags/{ref}")
+            except BackendError as exc:
+                if not existing:
+                    self._run(locator, "tag", "-d", ref, check=False)
+                raise BackendError(
+                    f"pin {ref} was not pushed to {remote}: {exc}", kind="git"
+                ) from exc
         return Pin(id=pin_id, ref=ref)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
-        self._run(locator, "tag", "-d", pin.ref, check=False)
         remote = locator.get("remote")
         if remote:
-            self._run(
-                locator,
-                "push",
-                str(remote),
-                "--delete",
-                f"refs/tags/{pin.ref}",
-                check=False,
+            # Remote first: if the remote still has the tag the pin still
+            # exists, and gc must hear about it rather than believe it gone.
+            out = subprocess.run(
+                [
+                    self._git,
+                    "-C",
+                    str(self._path(locator)),
+                    "push",
+                    str(remote),
+                    "--delete",
+                    f"refs/tags/{pin.ref}",
+                ],
+                capture_output=True,
+                text=True,
             )
+            if out.returncode != 0 and "remote ref does not exist" not in out.stderr:
+                raise BackendError(
+                    f"pin {pin.ref} was not deleted on {remote}: {out.stderr.strip()}",
+                    kind="git",
+                )
+        self._run(locator, "tag", "-d", pin.ref, check=False)
 
     def list_pins(self, locator: Locator) -> set[str]:
         prefix = ref_for_pin("")

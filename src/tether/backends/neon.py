@@ -177,11 +177,13 @@ class NeonBackend(ObjectBackend):
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
+        # `role` is how you connect, not what you pin: a branch at an LSN is
+        # the same snapshot whichever role reads it, so it must not change
+        # pin ids. `database` stays: it names what the object *is*.
         return {
             "project_id": self._project(locator),
             "branch": self._source_branch(locator),
             "database": locator.get("database"),
-            "role": locator.get("role"),
         }
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:

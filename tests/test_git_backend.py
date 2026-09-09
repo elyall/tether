@@ -3,6 +3,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from tether.backends.git import GitBackend
+from tether.errors import BackendError
 from tether.handles import GitHandle
 from tether.repo import Repo
 
@@ -126,3 +130,42 @@ def test_dirty_belongs_to_the_checked_out_ref_only(vcs_root: Path) -> None:
     assert other["dirty"] is False and other["sha"] == sha0
     # change_id is an address, not content: the same sha pins identically.
     assert "change_id" not in (content_state(b, other) or {})
+
+
+def test_pin_fails_when_the_remote_push_fails(tmp_path: Path) -> None:
+    """A pin with a remote is only a pin once it is on the remote."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@e.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "one"], check=True)
+    b = GitBackend()
+
+    # A remote that does not exist: the push fails, so the pin fails and no
+    # local tag is left behind to diverge from it.
+    bad = {"path": str(repo), "remote": str(tmp_path / "nowhere.git")}
+    state = b.fingerprint(bad, None)
+    with pytest.raises(BackendError, match="was not pushed"):
+        b.pin(bad, state, "d5d5d5d5.0000000000000001")
+    assert b.list_pins(bad) == set()
+
+    # A real (bare) remote: pin pushes, unpin deletes there first.
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    good = {"path": str(repo), "remote": str(bare)}
+    pin = b.pin(good, state, "d5d5d5d5.0000000000000002")
+    remote_tags = subprocess.run(
+        ["git", "-C", str(bare), "tag", "--list"], capture_output=True, text=True
+    ).stdout.split()
+    assert pin.ref in remote_tags
+    b.unpin(good, pin)
+    remote_tags = subprocess.run(
+        ["git", "-C", str(bare), "tag", "--list"], capture_output=True, text=True
+    ).stdout.split()
+    assert pin.ref not in remote_tags and pin.id not in b.list_pins(good)
+    b.unpin(good, pin)  # already gone everywhere: still fine

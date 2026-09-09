@@ -100,7 +100,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | --- | --- |
 | Locator | `project_id` (required), `branch` (default `main`), `database`, `role` (used for connection URIs) |
 | Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2) |
-| Identity | `{project_id, branch, database, role}` |
+| Identity | `{project_id, branch, database}` -- `role` is how you connect, not what you pin, so changing it does not change pin ids |
 | State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
 | Fork | a child branch of the pin. Re-forking an existing working branch restores it onto the source (Neon branch restore, always -- a branch's `parent_id` says where it was created, not where its head is). Once a pin has been taken on the working branch that pin is its child and Neon will not restore it in place, so the fork lands on a sibling (`<name>.2`, `.3`, ...) and the old branch stays as the pins' parent; the engine records the returned name. `open` writable creates a `read_write` endpoint lazily; time-travel reads (`open` at a recorded state) ensure a `read_only` one |
@@ -120,7 +120,7 @@ jj repositories work through their `.git`.
 | Config | `git_path`, `jj_path` |
 | Identity | `{path}` (resolved absolute) |
 | State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available, volatile so the same sha pins identically with or without jj |
-| Pin | lightweight tag `tether.<id>` at the sha (pushed to `remote` if set) |
+| Pin | lightweight tag `tether.<id>` at the sha. With `remote` set the pin is pushed and is only a pin once the push succeeds: a failed push fails the `pin` and removes the local tag; `unpin` deletes on the remote first and fails if that fails, so local and remote never diverge silently |
 | Fork | branch `name` at the tag's sha (`branch -f` if it exists) |
 | Handle | `GitHandle(path, sha, worktree)` |
 | Diff | `files`: `git diff --name-status -M` with `--numstat` line counts (`+a -d`) |
@@ -158,7 +158,7 @@ jj repositories work through their `.git`.
 | Locator | `uri` (positional), `branch` (default `main`) |
 | Config | `storage_options = {...}` passed to `lance.dataset` |
 | Identity | `{uri}` |
-| State | `branch`, `version` (Lance version numbers are branch-scoped) |
+| State | `branch`, `version` (Lance version numbers are branch-scoped; `--at N` therefore means version `N` of the locator's `branch` -- it is a *base* coordinate and is never consulted once a working branch exists; use a tag to name a version on another branch) |
 | Pin | `tags.create("tether.<id>", (branch, version))`; tagged versions are exempt from `cleanup_old_versions()` |
 | Fork | `create_branch(name, tag)`. Lance refuses to delete a branch a tag references, so a pinned working branch outlives its workspace and a re-fork under the same name picks `name.2`, `name.3`, ... |
 | Handle | `LanceHandle(uri, dataset, version, branch, tag)`; append with `lance.write_dataset(table, handle.dataset, mode="append")` |
@@ -173,7 +173,7 @@ jj repositories work through their `.git`.
 | --- | --- |
 | Locator | `repository` (required; `--repository`), `branch` (default `main`), `prefix` (scopes the handle URI and the diff; pins are repository-wide) |
 | Config | keyword arguments for `lakefs.Client` (e.g. `host`); by default the SDK reads `LAKECTL_*` / `~/.lakectl.yaml` |
-| Identity | `{repository}` |
+| Identity | `{repository}` -- deliberately not `prefix`: a lakeFS commit is repository-wide, so two objects with different prefixes on the same branch describe the same commit and share one pin (and their forks are separate branches by key regardless) |
 | State | `commit_id` of the branch head, plus `dirty = true` when the staging area has uncommitted changes (refused at pin time) |
 | Pin | tag `tether.<id>` at the commit |
 | Fork | branch `name` from the tag (recreated if it exists at another commit) |

@@ -132,6 +132,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `add`, an `import`); before, that `commit` was a silent no-op.
 - The `memory` backend refuses to pin a snapshot that no longer exists, as
   real stores do.
+- git pins with a `remote` fail when the push fails (and remove the local
+  tag), and `unpin` deletes on the remote first and fails if that fails, so
+  the local and remote tags never diverge silently. Before, both pushes ran
+  with `check=False`.
+- Neon's identity no longer includes `role` (a connection parameter, not part
+  of what is pinned); changing the role no longer changes pin ids.
+- Neon API errors surface as `BackendError` with Neon's message instead of a
+  raw HTTP exception.
 - Iceberg's `metadata_location` is a `VOLATILE_KEY`: it was part of the state
   until 0.1.0a7 and still appears in old manifests, so it must not affect
   content identity (the upgrade hashes old states through `content_state`).
