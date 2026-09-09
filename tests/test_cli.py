@@ -503,3 +503,55 @@ def test_cli_ops(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     payload = json.loads(r.output)
     assert len(payload) == 1 and payload[0]["command"] == "commit"
     assert payload[0]["result"]["pinned"]["db"] and payload[0]["pre"]["objects"]["db"]
+
+
+def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+    r = runner.invoke(app, ["new", "--eager", "--json"])
+    assert r.exit_code == 0, r.output
+    wref = json.loads(r.output)["working_refs"]["db"]
+    assert wref in store.system(system).branches
+
+    r = runner.invoke(app, ["undo"])
+    assert r.exit_code == 0, r.output
+    assert "undid" in r.output and "(new" in r.output and f"deleted {wref}" in r.output
+    assert wref not in store.system(system).branches
+
+    r = runner.invoke(app, ["undo", "--json"])  # the commit: uncommit
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["command"] == "commit" and payload["irreversible"] == []
+    r = runner.invoke(app, ["ops"])
+    lines = r.output.strip().splitlines()
+    assert [ln.split()[2] for ln in lines] == ["undo", "undo", "new", "commit", "add"]
+    assert lines[2].endswith(f"(undone by {lines[1].split()[0]})")  # new
+    assert lines[3].endswith(f"(undone by {lines[0].split()[0]})")  # commit
+
+    r = runner.invoke(app, ["undo", "nope0000dead"])
+    assert r.exit_code == 1 and "no operation" in r.output
+    # A partial undo exits 2 and says what could not be reversed.
+    assert runner.invoke(app, ["commit", "-m", "again"]).exit_code == 0
+    backend = Repo.find(vcs_root).backend_for("memory")
+    ds = Repo.find(vcs_root).config.dataset_id
+    backend.pin(
+        {"system": system},
+        {"snapshot_id": store.system(system).branches["main"]},
+        f"{ds}.0000000000badbad",
+    )
+    stray = f"tether.ws.{ds}.deadbeef.db-000000"
+    store.system(system).branches[stray] = store.system(system).branches["main"]
+    r = runner.invoke(app, ["gc", "--no-dry-run", "--prune-workspaces"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["undo"])
+    assert r.exit_code == 2, r.output
+    assert "IRREVERSIBLE" in r.output and "pin(s) deleted" in r.output
+    assert stray in store.system(system).branches

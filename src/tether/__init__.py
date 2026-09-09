@@ -68,6 +68,7 @@ from tether.repo import (
     PromoteReport,
     Repo,
     StatusReport,
+    UndoReport,
 )
 
 __all__ = [
@@ -100,6 +101,7 @@ __all__ = [
     "StaleWorkingCopyError",
     "StatusReport",
     "TetherError",
+    "UndoReport",
     "UnpinnedStateError",
     "VcsError",
     "WorkspaceState",

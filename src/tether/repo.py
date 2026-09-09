@@ -75,7 +75,7 @@ from tether.manifest import (
     write_object,
     write_workspace,
 )
-from tether.oplog import OpEntry, append_op, read_ops
+from tether.oplog import OpEntry, append_op, mark_undone, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
@@ -213,6 +213,29 @@ class PromoteReport:
     conflicts: dict[str, list[str]] = field(default_factory=dict)
     """Key -> conflicting units reported by a merge that was rolled back."""
     plan: Plan | None = None
+
+
+@dataclass
+class UndoReport:
+    """What `Repo.undo` reversed, could not reverse, and left alone.
+
+    Attributes:
+        op: The operation that was undone.
+        undo_id: Id of the `undo` entry appended to the op log.
+        restored: What was put back (one line each).
+        irreversible: What the stores no longer allow to be put back.
+        skipped: Parts that no longer applied (e.g. the working copy had moved).
+    """
+
+    op: OpEntry
+    undo_id: str = ""
+    restored: list[str] = field(default_factory=list)
+    irreversible: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.irreversible
 
 
 @dataclass
@@ -953,7 +976,10 @@ class Repo:
                     )
                     write_listing(self.root, name, text)
 
-        if vcs and outcomes:
+        # Commit when something was pinned, and also when the manifests are
+        # already dirty in the working tree (an undone commit, an `add`, an
+        # `import`): the dataset commit is what makes them history.
+        if vcs and (outcomes or self.vcs.dirty(self._vcs_paths())):
             result.vcs_commit = self.vcs.commit(self._vcs_paths(), message)
 
         # What this workspace just committed is, by definition, not stale.
@@ -963,7 +989,7 @@ class Repo:
             if k in self.workspace.working_refs or k in self.workspace.pending_forks
         )
         write_workspace(self.root, self.workspace)
-        if outcomes:
+        if outcomes or result.vcs_commit:
             self._log_op(
                 "commit",
                 plan=plan,
@@ -2284,6 +2310,313 @@ class Repo:
         """
         plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
         return self.apply_promote(plan, verify=False)
+
+    # -- undo ------------------------------------------------------------ #
+    def undo(self, op_id: str | None = None, *, discard: bool = False) -> UndoReport:
+        """Reverse an operation from the op log, where the stores still allow it.
+
+        Defaults to the newest entry that can be undone (not an `undo` or
+        `repair`, not already undone). What "reverse" means per command:
+
+        - `commit`: uncommit. The dataset commit becomes working-tree changes
+          again (jj `squash --into @`, git `reset --soft`) if it is still the
+          working copy's parent; the pins it made stay, still referenced by
+          the working-tree manifests. Committed with `vcs=False`: the
+          manifests are restored from before.
+        - `new` / `fork`: branches the op created are deleted; branches it
+          reset are re-pointed to their recorded heads where the backend can
+          fork from a state; `workspace.toml` is restored; the VCS working
+          copy returns to where it was if it has not moved since. A branch
+          that gained writes since the op is refused unless `discard`.
+        - `gc`: deleted branches are recreated from their recorded heads
+          where the backend can; deleted listings come back from the VCS;
+          the workspace is restored. Deleted pins are *irreversible* --
+          `repair` recreates them once a manifest references them again.
+        - `import` / `add` / `remove`: manifests and workspace restored.
+        - `promote`: refused; the base heads before the move are printed
+          for a manual reset (backends only fast-forward).
+
+        The undo is logged and the target marked `undone_by`. If nothing
+        could be reversed the call raises instead.
+
+        Args:
+            op_id: Which entry; default the newest undoable one.
+            discard: Delete or reset branches even if they gained writes.
+
+        Raises:
+            TetherError: Nothing to undo, an unknown id, a branch with writes
+                (without `discard`), or an operation that cannot be reversed.
+        """
+        entries = self.ops()
+        if op_id is None:
+            target = next((e for e in entries if e.undoable), None)
+            if target is None:
+                raise TetherError("nothing to undo")
+        else:
+            target = next((e for e in entries if e.id == op_id), None)
+            if target is None:
+                raise TetherError(f"no operation {op_id!r} in this workspace's log")
+            if target.undone_by:
+                raise TetherError(f"{op_id} was already undone by {target.undone_by}")
+            if target.undoes is not None or target.command in ("undo", "repair"):
+                raise TetherError(f"cannot undo a {target.command}; re-run instead")
+
+        report = UndoReport(op=target)
+        handler = {
+            "commit": self._undo_commit,
+            "new": self._undo_new,
+            "fork": self._undo_fork,
+            "gc": self._undo_gc,
+            "promote": self._undo_promote,
+            "import": self._undo_manifests,
+            "add": self._undo_manifests,
+            "remove": self._undo_manifests,
+        }.get(target.command)
+        if handler is None:
+            raise TetherError(f"cannot undo a {target.command}")
+        handler(target, report, discard)
+        if not report.restored and report.irreversible:
+            raise TetherError(
+                f"cannot undo {target.id} ({target.command}):\n"
+                + "\n".join(f"  {line}" for line in report.irreversible)
+            )
+        entry = self._log_op(
+            "undo",
+            result={
+                "summary": f"{target.command} {target.summary()}",
+                "restored": list(report.restored),
+                "irreversible": list(report.irreversible),
+                "skipped": list(report.skipped),
+            },
+            undoes=target.id,
+        )
+        report.undo_id = entry.id
+        mark_undone(self.root, target.id, entry.id)
+        return report
+
+    def _reload(self) -> None:
+        self.objects = read_objects(self.root)
+        self.workspace = read_workspace(self.root)
+
+    def _restore_workspace(self, entry: OpEntry, report: UndoReport) -> None:
+        text = entry.pre.get("workspace")
+        if text is None:
+            return
+        _m.workspace_path(self.root).write_text(str(text), encoding="utf-8")
+        self.workspace = read_workspace(self.root)
+        report.restored.append("workspace.toml restored")
+
+    def _restore_manifests(self, texts: Mapping[str, Any], report: UndoReport) -> None:
+        for key, text in sorted(texts.items()):
+            if text is None:
+                remove_object(self.root, key)
+                report.restored.append(f"{key}: manifest removed again")
+            else:
+                _m.object_path(self.root, key).parent.mkdir(parents=True, exist_ok=True)
+                _m.object_path(self.root, key).write_text(str(text), encoding="utf-8")
+                report.restored.append(f"{key}: manifest restored")
+        self.objects = read_objects(self.root)
+
+    def _branch_has_new_writes(self, key: str, ref: str) -> State | None:
+        """The head of `ref` if it moved past what this workspace knows; else None."""
+        m = self.objects.get(key)
+        if m is None:
+            return None
+        backend = self.backend_for(m.kind)
+        try:
+            head = backend.fingerprint(m.locator, ref)
+        except TetherError:
+            return None  # branch gone; nothing to lose
+        known = [
+            self.workspace.base_states.get(key),
+            self.workspace.fork_points.get(key),
+            m.state,
+        ]
+        if any(self._same(m.kind, head, k) for k in known if k is not None):
+            return None
+        return head
+
+    def _undo_branches(
+        self,
+        entry: OpEntry,
+        report: UndoReport,
+        discard: bool,
+        *,
+        created: Mapping[str, str],
+        reset: Mapping[str, str],
+    ) -> None:
+        """Delete branches an op created; re-point the ones it reset."""
+        # Refuse before touching anything if a branch gained writes since.
+        if not discard:
+            dirty = []
+            for key, ref in {**created, **reset}.items():
+                head = self._branch_has_new_writes(key, ref)
+                if head is not None:
+                    dirty.append(
+                        f"{key}: {ref} has writes since ({_short_state(head)})"
+                    )
+            if dirty:
+                raise TetherError(
+                    "refusing to undo: branches gained writes; commit them or pass "
+                    "--discard\n" + "\n".join(f"  {d}" for d in dirty)
+                )
+        heads = entry.pre.get("heads") or {}
+        for key, ref in sorted(created.items()):
+            m = self.objects.get(key)
+            if m is None:
+                report.skipped.append(f"{key}: object no longer registered; {ref} left")
+                continue
+            try:
+                self.backend_for(m.kind).delete_working_ref(m.locator, ref)
+                report.restored.append(f"{key}: deleted {ref}")
+            except TetherError as exc:
+                report.irreversible.append(f"{key}: could not delete {ref}: {exc}")
+        for key, ref in sorted(reset.items()):
+            m = self.objects.get(key)
+            head = heads.get(key)
+            if m is None:
+                report.skipped.append(f"{key}: object no longer registered; {ref} left")
+                continue
+            backend = self.backend_for(m.kind)
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            if head is None or Capability.ADDRESSABLE not in eff:
+                report.irreversible.append(
+                    f"{key}: {ref} was reset and its previous head "
+                    f"{'is unknown' if head is None else 'cannot be re-pointed to'}"
+                )
+                continue
+            try:
+                backend.fork(m.locator, dict(head), ref)
+                report.restored.append(f"{key}: {ref} back at {_short_state(head)}")
+            except TetherError as exc:
+                report.irreversible.append(
+                    f"{key}: {ref} could not go back to {_short_state(head)}: {exc}"
+                )
+
+    def _undo_commit(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
+        commit = entry.result.get("vcs_commit")
+        if commit:
+            if not self.vcs.uncommit(str(commit)):
+                report.irreversible.append(
+                    f"commit {str(commit)[:12]} is no longer the working copy's "
+                    "parent; uncommit it with jj/git first"
+                )
+                return
+            report.restored.append(
+                f"uncommitted {str(commit)[:12]}; its manifests are working-tree "
+                "changes again (pins kept)"
+            )
+            self.objects = read_objects(self.root)
+            return
+        # Committed with vcs=False: only the manifests were written.
+        self._restore_manifests(entry.pre.get("objects") or {}, report)
+        self._restore_workspace(entry, report)
+
+    def _undo_new(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
+        r = entry.result
+        refs = r.get("working_refs") or {}
+        self._undo_branches(
+            entry,
+            report,
+            discard,
+            created={k: refs[k] for k in r.get("created") or [] if k in refs},
+            reset={k: refs[k] for k in r.get("reset") or [] if k in refs},
+        )
+        self._restore_workspace(entry, report)
+        before, after = entry.pre.get("vcs"), r.get("vcs")
+        plan_ctx = (entry.plan or {}).get("context") or {}
+        if plan_ctx.get("rev") and before and after:
+            if self.vcs.position().get("id") == after.get("id"):
+                self.vcs.goto(before)
+                self.objects = read_objects(self.root)
+                report.restored.append("VCS working copy back where it was")
+            else:
+                report.skipped.append(
+                    "VCS working copy has moved since; not returning it"
+                )
+
+    def _undo_fork(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
+        key, ref = str(entry.result.get("key")), str(entry.result.get("ref"))
+        existed = key in (entry.pre.get("heads") or {})
+        self._undo_branches(
+            entry,
+            report,
+            discard,
+            created={} if existed else {key: ref},
+            reset={key: ref} if existed else {},
+        )
+        self._restore_workspace(entry, report)
+
+    def _undo_gc(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
+        plan = Plan.from_dict(entry.plan) if entry.plan else Plan(command="gc")
+        r = entry.result
+        deleted = {
+            ref
+            for refs in (r.get("deleted_working_refs") or {}).values()
+            for ref in refs
+        }
+        for a in plan.actions:
+            if a.op == "delete-branch" and a.target in deleted:
+                head = a.params.get("head")
+                backend = self.backend_for(a.kind)
+                locator = dict(a.params["locator"])
+                if head is None:
+                    report.irreversible.append(
+                        f"{a.target}: deleted; its head was not recorded"
+                    )
+                    continue
+                if Capability.ADDRESSABLE not in backend.capabilities:
+                    report.irreversible.append(
+                        f"{a.target}: deleted; {a.kind} cannot recreate a branch "
+                        "from a state"
+                    )
+                    continue
+                try:
+                    backend.fork(locator, dict(head), a.target)
+                    report.restored.append(
+                        f"{a.target}: recreated at {_short_state(head)}"
+                    )
+                except TetherError as exc:
+                    report.irreversible.append(
+                        f"{a.target}: could not recreate at {_short_state(head)}: {exc}"
+                    )
+        n_pins = sum(len(v) for v in (r.get("unpinned") or {}).values())
+        if n_pins:
+            report.irreversible.append(
+                f"{n_pins} pin(s) deleted; if a manifest references them again, "
+                "`tether repair` recreates them while the state is still reachable"
+            )
+        for name in r.get("deleted_listings") or []:
+            rel = self._listing_relpath(name)
+            text = self.vcs.read_file_at("@-" if self.vcs.kind == "jj" else "HEAD", rel)
+            if text is None:
+                report.irreversible.append(f"listing {name}: not in the VCS either")
+                continue
+            (listings_dir(self.root) / name).parent.mkdir(parents=True, exist_ok=True)
+            (listings_dir(self.root) / name).write_text(text, encoding="utf-8")
+            report.restored.append(f"listing {name}: restored from the VCS")
+        self._restore_workspace(entry, report)
+
+    def _undo_promote(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
+        before = entry.pre.get("base_states") or {}
+        moved = {
+            **(entry.result.get("fast_forwarded") or {}),
+            **(entry.result.get("merged") or {}),
+        }
+        for key in sorted(moved):
+            report.irreversible.append(
+                f"{key}: base branch moved {_short_state(before.get(key))} -> "
+                f"{_short_state(moved[key])}; tether only fast-forwards base "
+                "branches, reset it in the store yourself"
+            )
+        if not moved:
+            report.skipped.append("promote moved nothing")
+
+    def _undo_manifests(
+        self, entry: OpEntry, report: UndoReport, discard: bool
+    ) -> None:
+        self._restore_manifests(entry.pre.get("objects") or {}, report)
+        self._restore_workspace(entry, report)
 
     # -- export (manifests -> tables) ------------------------------------ #
     def export(

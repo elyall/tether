@@ -361,6 +361,10 @@ class VcsAdapter(Protocol):
         to keep the working branches of workspaces that still exist.
         """
 
+    def dirty(self, relpaths: list[str]) -> bool:
+        """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
+        vs its parent; git: index or worktree vs ``HEAD``)."""
+
     def commit(self, relpaths: list[str], message: str) -> str:
         """Commit the given paths with ``message``; return the new commit id."""
 
@@ -370,6 +374,24 @@ class VcsAdapter(Protocol):
         Always has ``kind`` and ``id`` (jj: the working-copy change id; git:
         the HEAD commit) and ``commit``; jj adds ``parent`` and ``empty``, git
         adds ``branch`` (``None`` when detached).
+        """
+
+    def goto(self, position: dict[str, Any]) -> None:
+        """Return the working copy to a ``position()`` taken earlier.
+
+        jj: edit the change if it still exists, or start a fresh empty change
+        on its parent when the recorded working copy was empty (jj abandons
+        those when the working copy moves away). git: switch to the branch,
+        or detach at the commit.
+        """
+
+    def uncommit(self, commit: str) -> bool:
+        """Turn ``commit`` back into working-copy changes if it is still the
+        working copy's parent (jj) / ``HEAD`` (git); ``False`` if it is not.
+
+        jj: ``jj squash --from COMMIT --into @``; git: ``git reset --soft``.
+        The tree is unchanged either way -- the commit's edits stay in the
+        working copy as uncommitted changes.
         """
 
     def new(self, rev: str | None) -> None:
@@ -623,6 +645,10 @@ class JjAdapter:
                 roots.append(Path(root.stdout.strip()))
         return roots or [self.root]
 
+    def dirty(self, relpaths: list[str]) -> bool:
+        out = self._jj("diff", "--summary", "-r", "@", *relpaths)
+        return bool(out.stdout.strip())
+
     def commit(self, relpaths: list[str], message: str) -> str:
         # jj auto-snapshots the working copy; scope the commit to our paths so
         # unrelated working-copy edits stay put. `jj commit` finalizes the
@@ -649,6 +675,25 @@ class JjAdapter:
             "parent": parents.split(",")[0] if parents else None,
             "empty": empty == "1",
         }
+
+    def goto(self, position: dict[str, Any]) -> None:
+        if position.get("kind") != "jj":
+            raise VcsError("position was not recorded by jj")
+        if position.get("empty") and position.get("parent"):
+            self._jj("new", str(position["parent"]))
+            return
+        self._jj("edit", str(position["id"]))
+
+    def uncommit(self, commit: str) -> bool:
+        parents = self._jj(
+            "log", "--no-graph", "-r", "@-", "-T", 'commit_id ++ "\\n"'
+        ).stdout.split()
+        if parents != [commit]:
+            return False
+        # Move the commit's changes into @ (which keeps its own, empty,
+        # description); the emptied source is abandoned by jj.
+        self._jj("squash", "--from", commit, "--into", "@", "-u")
+        return True
 
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
@@ -726,6 +771,10 @@ class GitAdapter:
         ]
         return roots or [self.root]
 
+    def dirty(self, relpaths: list[str]) -> bool:
+        out = self._git("status", "--porcelain", "--", *relpaths)
+        return bool(out.stdout.strip())
+
     def commit(self, relpaths: list[str], message: str) -> str:
         self._git("add", "--", *relpaths)
         self._git("commit", "-m", message, "--", *relpaths)
@@ -742,6 +791,28 @@ class GitAdapter:
             "commit": commit,
             "branch": branch.stdout.strip() or None,
         }
+
+    def goto(self, position: dict[str, Any]) -> None:
+        if position.get("kind") != "git":
+            raise VcsError("position was not recorded by git")
+        if position.get("branch"):
+            self._git("switch", str(position["branch"]))
+        elif position.get("commit"):
+            self._git("switch", "--detach", str(position["commit"]))
+
+    def uncommit(self, commit: str) -> bool:
+        head = self._git("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+        if head.stdout.strip() != commit:
+            return False
+        parent = self._git(
+            "rev-parse", "--verify", "--quiet", f"{commit}^", check=False
+        )
+        if parent.returncode == 0 and parent.stdout.strip():
+            self._git("reset", "--soft", parent.stdout.strip())
+        else:
+            # A root commit: leave the branch unborn with the tree in place.
+            self._git("update-ref", "-d", "HEAD")
+        return True
 
     def new(self, rev: str | None) -> None:
         if rev is None:

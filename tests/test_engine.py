@@ -1006,3 +1006,207 @@ def test_new_refuses_to_discard_unpinned_writes(vcs_root: Path) -> None:
     assert "discarding its writes" in fork.detail and plan.context["discard"]
     repo.apply_new(plan, verify=False)
     assert store.resolve(system, wref) == s_writes
+
+
+# --------------------------------------------------------------------------- #
+# undo
+# --------------------------------------------------------------------------- #
+def _undoable(repo: Repo) -> list[str]:
+    return [e.command for e in repo.ops() if e.undoable]
+
+
+def test_undo_commit_uncommits_and_keeps_pins(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    parent = "@-" if repo.vcs.kind == "jj" else "HEAD"
+    before = repo.vcs.resolve(parent)  # the baseline dataset commit
+    store.write(system, "main", {"v": 2})
+    result = repo.commit("second")
+    assert result.vcs_commit is not None
+    pin = repo.objects["db"].pin
+    assert pin is not None
+    backend = repo.backend_for("memory")
+
+    report = repo.undo()
+    assert report.op.command == "commit" and report.complete
+    assert any("uncommitted" in line for line in report.restored)
+    # The dataset commit is gone from the VCS; the manifest change is back in
+    # the working tree, so the pin is still referenced and still exists.
+    assert repo.vcs.resolve(parent) == before
+    assert repo.objects["db"].pin == pin
+    assert pin.id in backend.list_pins({"system": system})
+    assert not repo.is_stale()
+    ops = repo.ops()
+    assert ops[0].command == "undo" and ops[0].undoes == ops[1].id
+    assert ops[1].undone_by == ops[0].id and not ops[1].undoable
+    # Undoing an undo is refused; committing again just re-records the pin.
+    with pytest.raises(TetherError, match="cannot undo"):
+        repo.undo(ops[0].id)
+    again = repo.commit("second, again")
+    assert repo.objects["db"].pin == pin and again.vcs_commit
+    # An older commit that is no longer the parent cannot be uncommitted.
+    older = next(
+        e
+        for e in repo.ops()
+        if e.command == "commit"
+        and e.undoable
+        and e.result["vcs_commit"] != again.vcs_commit
+    )
+    with pytest.raises(TetherError, match="no longer the working copy's parent"):
+        repo.undo(older.id)
+
+
+def test_undo_new_deletes_created_branches_and_restores_the_workspace(
+    vcs_root: Path,
+) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    ws_before = repo.workspace.to_toml()
+
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    assert wref in store.system(system).branches
+    report = repo.undo()
+    assert report.op.command == "new" and report.complete
+    assert wref not in store.system(system).branches
+    assert repo.workspace.to_toml() == ws_before
+    assert "db" not in repo.workspace.working_refs
+
+    # A branch that gained writes since the new is not deleted silently.
+    repo.new(eager=True)
+    store.write(system, wref, {"v": "scratch"})
+    with pytest.raises(TetherError, match="gained writes"):
+        repo.undo()
+    assert wref in store.system(system).branches
+    report = repo.undo(discard=True)
+    assert report.complete and wref not in store.system(system).branches
+
+    # Lazy: the fork op (materialize) is undone the same way.
+    repo.new()
+    assert "db" in repo.workspace.pending_forks
+    repo.open("db", read_only=False)
+    assert repo.ops()[0].command == "fork" and wref in store.system(system).branches
+    report = repo.undo()
+    assert report.complete and wref not in store.system(system).branches
+    assert (
+        "db" in repo.workspace.pending_forks and "db" not in repo.workspace.working_refs
+    )
+
+
+def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
+    vcs_root: Path,
+) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    c1 = repo.vcs.current_rev() if repo.vcs.kind == "git" else repo.vcs.resolve("@-")
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    s_work = store.write(system, wref, {"v": "work"})
+    repo.commit("work")  # pins the branch head; the branch is the only copy
+    pos_after_commit = repo.vcs.position()
+
+    # new REV moves the working copy and resets the branch onto the old pin.
+    repo.new(c1, eager=True)
+    assert store.resolve(system, wref) != s_work
+    entry = repo.ops()[0]
+    assert entry.command == "new" and entry.result["reset"] == ["db"]
+    assert entry.pre["heads"]["db"] == {"snapshot_id": s_work}
+
+    report = repo.undo()
+    assert report.complete, report
+    assert store.resolve(system, wref) == s_work  # head re-pointed
+    # Working copy back: git returns to the branch/commit; jj cannot revive the
+    # abandoned empty change, so it opens a fresh one on the same parent.
+    if repo.vcs.kind == "git":
+        assert repo.vcs.position()["id"] == pos_after_commit["id"]
+    else:
+        assert repo.vcs.position()["parent"] == pos_after_commit["parent"]
+    assert repo.workspace.working_refs["db"] == wref
+    assert not repo.is_stale()
+
+
+def test_undo_gc_recreates_branches_but_not_pins(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    backend = repo.backend_for("memory")
+    locator = {"system": system}
+    sid = store.system(system).branches["main"]
+    orphan = f"{repo.config.dataset_id}.0000000000badbad"
+    backend.pin(locator, {"snapshot_id": sid}, orphan)
+    stray = f"tether.ws.{repo.config.dataset_id}.deadbeef.db-000000"
+    store.system(system).branches[stray] = sid  # equals base head: deletable
+
+    repo.gc(dry_run=False, prune_workspaces=True)
+    assert (
+        orphan not in backend.list_pins(locator)
+        and stray not in store.system(system).branches
+    )
+    report = repo.undo()
+    assert not report.complete
+    assert stray in store.system(system).branches  # branch back from its head
+    assert any("recreated" in line for line in report.restored)
+    assert any(
+        "pin(s) deleted" in line and "repair" in line for line in report.irreversible
+    )
+    assert orphan not in backend.list_pins(locator)  # honestly gone
+    assert repo.ops()[0].command == "undo" and repo.ops()[1].undone_by
+
+
+def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+
+    # add / remove / import restore the manifests they rewrote.
+    repo.add("other", "memory", {"system": system, "branch": "main"})
+    report = repo.undo()
+    assert report.op.command == "add" and "other" not in repo.objects
+    manifest = repo.objects["db"]
+    repo.remove("db")
+    assert "db" not in repo.objects
+    repo.undo()
+    assert repo.objects["db"] == manifest
+    specs, _ = __import__(
+        "tether.registry", fromlist=["specs_from_rows"]
+    ).specs_from_rows(
+        [
+            {
+                "key": "db",
+                "kind": "memory",
+                "locator_json": {"system": system, "branch": "main"},
+                "policy_write": "track",
+            }
+        ],
+        repo.config.defaults,
+    )
+    repo.apply_import(repo.plan_import(specs))
+    assert repo.objects["db"].policy.write == "track"
+    repo.undo()
+    assert repo.objects["db"] == manifest
+
+    # promote cannot be undone; the previous head is reported.
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 2})
+    repo.commit("work")
+    repo.promote(["db"])
+    with pytest.raises(TetherError, match="only fast-forwards") as exc:
+        repo.undo()
+    assert "db: base branch moved" in str(exc.value)
+    assert repo.ops()[0].command == "promote" and repo.ops()[0].undone_by is None
+
+    # Nothing left that can be undone -> loud.
+    for e in repo.ops():
+        if e.undoable and e.command != "promote":
+            repo.undo(e.id)
+    with pytest.raises(TetherError, match=r"nothing to undo|only fast-forwards"):
+        repo.undo()

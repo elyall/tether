@@ -729,6 +729,57 @@ def ops(
 
 
 @app.command()
+def undo(
+    op_id: str | None = typer.Argument(
+        None, help="Operation id from `tether ops`; default: the newest undoable one."
+    ),
+    discard: bool = typer.Option(
+        False,
+        "--discard",
+        help="Delete or reset branches even if they gained writes since the operation.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Reverse an operation where the stores still allow it.
+
+    commit: uncommit (manifests become working-tree changes; pins stay).
+    new/fork: delete the branches it created, re-point the ones it reset,
+    restore workspace.toml and the VCS working copy. gc: recreate deleted
+    branches and listings; deleted pins are irreversible (see `repair`).
+    import/add/remove: restore the manifests. promote: refused, with the
+    previous base heads printed. Exit code 2 when part of the operation could
+    not be reversed; the rest was.
+    """
+    repo = _repo()
+    try:
+        report = repo.undo(op_id, discard=discard)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "undone": report.op.id,
+                "command": report.op.command,
+                "undo_id": report.undo_id,
+                "restored": report.restored,
+                "irreversible": report.irreversible,
+                "skipped": report.skipped,
+            },
+            as_json=True,
+        )
+    else:
+        typer.echo(f"undid {report.op.id} ({report.op.command}: {report.op.summary()})")
+        for line in report.restored:
+            typer.echo(f"  restored   {line}")
+        for line in report.skipped:
+            typer.echo(f"  skipped    {line}")
+        for line in report.irreversible:
+            typer.secho(f"  IRREVERSIBLE {line}", err=True)
+    if not report.complete:
+        raise typer.Exit(2)
+
+
+@app.command()
 def gc(
     dry_run: bool = typer.Option(
         True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."
