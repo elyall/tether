@@ -216,6 +216,23 @@ class PromoteReport:
 
 
 @dataclass
+class RepairReport:
+    """What `Repo.repair` rebuilt.
+
+    Attributes:
+        repinned: Object key -> pin id recreated from the manifest's state.
+        reforked: Object key -> working branch recreated from the manifest.
+        failed: Target -> why it could not be rebuilt (state no longer reachable).
+        plan: The plan that was applied.
+    """
+
+    repinned: dict[str, str] = field(default_factory=dict)
+    reforked: dict[str, str] = field(default_factory=dict)
+    failed: dict[str, str] = field(default_factory=dict)
+    plan: Plan | None = None
+
+
+@dataclass
 class UndoReport:
     """What `Repo.undo` reversed, could not reverse, and left alone.
 
@@ -2617,6 +2634,127 @@ class Repo:
     ) -> None:
         self._restore_manifests(entry.pre.get("objects") or {}, report)
         self._restore_workspace(entry, report)
+
+    # -- repair ---------------------------------------------------------- #
+    def plan_repair(self, *, all_history: bool = False) -> Plan:
+        """Compute what `repair` would rebuild without writing anywhere.
+
+        A manifest is a promise: "this pin exists and names this state". When
+        the pin is gone -- a `gc` that was undone, another dataset's cleanup
+        before namespaces, a ref deleted by hand -- the promise can be kept
+        again as long as the state is still reachable in the store: `repin`
+        recreates the native ref from the recorded state. Likewise `refork`
+        recreates a working branch this workspace expects but the store no
+        longer has. Pins that exist but point elsewhere (`DRIFTED`) are left
+        alone and noted; that is a different problem.
+
+        Args:
+            all_history: Also check the pins of every manifest in VCS history,
+                not just the working tree's.
+        """
+        plan = Plan(command="repair", context={"all_history": all_history})
+        targets: dict[str, ObjectManifest] = {}
+        for key, m in self.objects.items():
+            if m.pin is not None and m.state is not None:
+                targets[key] = m
+        if all_history:
+            for rev, objects in self._iter_history_objects():
+                for key, m in objects.items():
+                    if m.pin is not None and m.state is not None:
+                        targets.setdefault(f"{key}@{rev[:12]}", m)
+        seen: set[str] = set()
+        for label, report in self._verify_manifests(targets, deep=False).items():
+            m = targets[label]
+            assert m.pin is not None
+            sig = f"{m.kind}:{m.pin.id}"
+            if sig in seen:
+                continue
+            seen.add(sig)
+            if report.status is VerifyStatus.MISSING:
+                plan.actions.append(
+                    Action(
+                        "repin",
+                        label,
+                        m.kind,
+                        target=m.pin.ref,
+                        detail=f"pin missing ({report.message}); recreate at "
+                        f"{_short_state(m.state)}",
+                        params={
+                            "locator": m.locator,
+                            "state": m.state,
+                            "pin_id": m.pin.id,
+                        },
+                    )
+                )
+            elif report.status is VerifyStatus.DRIFTED:
+                plan.notes.append(
+                    f"{label}: pin drifted, not touched ({report.message})"
+                )
+
+        for key, ref in sorted(self.workspace.working_refs.items()):
+            m = self.objects.get(key)
+            if m is None or m.policy.write == "track" or m.state is None:
+                continue
+            backend = self.backend_for(m.kind)
+            if Capability.FORK not in effective_capabilities(
+                backend, m.locator, m.policy
+            ):
+                continue
+            if ref in backend.list_working_refs(m.locator):
+                continue
+            plan.actions.append(
+                Action(
+                    "refork",
+                    key,
+                    m.kind,
+                    target=ref,
+                    detail="working branch missing; recreate from the manifest "
+                    f"({'pin ' + m.pin.ref if m.pin else _short_state(m.state)})",
+                    params={"locator": m.locator},
+                )
+            )
+        if plan.is_empty:
+            plan.notes.append("nothing to repair")
+        return plan
+
+    def apply_repair(self, plan: Plan) -> RepairReport:
+        """Execute a plan from `plan_repair`; failures are reported, not raised."""
+        if plan.command != "repair":
+            raise ConfigError(f"expected a repair plan, got {plan.command!r}")
+        report = RepairReport(plan=plan)
+        pre = {"workspace": self.workspace.to_toml()}
+        for a in plan.actions:
+            try:
+                if a.op == "repin":
+                    backend = self.backend_for(a.kind)
+                    backend.pin(
+                        dict(a.params["locator"]),
+                        dict(a.params["state"]),
+                        str(a.params["pin_id"]),
+                    )
+                    report.repinned[a.key] = str(a.params["pin_id"])
+                elif a.op == "refork":
+                    m = self.objects[a.key]
+                    ref = self._fork_from_manifest(m, a.target)
+                    self.workspace.working_refs[a.key] = ref
+                    if m.state is not None:
+                        self.workspace.fork_points[a.key] = dict(m.state)
+                    self._mark_base_states([a.key])
+                    report.reforked[a.key] = ref
+            except TetherError as exc:
+                report.failed[f"{a.op} {a.target}"] = str(exc)
+        if report.reforked:
+            write_workspace(self.root, self.workspace)
+        if plan.writes:
+            self._log_op("repair", plan=plan, result=_report_dict(report), pre=pre)
+        return report
+
+    def repair(self, *, all_history: bool = False) -> RepairReport:
+        """Recreate missing pins and working branches from the manifests.
+
+        Equivalent to `apply_repair(plan_repair(...))`.
+        """
+        return self.apply_repair(self.plan_repair(all_history=all_history))
 
     # -- export (manifests -> tables) ------------------------------------ #
     def export(

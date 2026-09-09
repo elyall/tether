@@ -25,9 +25,10 @@ class Action:
     """One store-writing step in a `Plan`."""
 
     op: str
-    """`pin`, `record`, `fork`, `defer-fork`, `track`, `unpin`, `delete-branch`,
-    `keep-branch`, `forget-working-ref`, `delete-listing`, `add`, `update`,
-    `remove`, `upsert`, or `vcs-commit`."""
+    """`pin`, `record`, `fork`, `defer-fork`, `track`, `refuse`, `unpin`,
+    `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`,
+    `fast-forward`, `merge`, `add`, `update`, `remove`, `upsert`, `repin`,
+    `refork`, or `vcs-commit`."""
     key: str = ""
     """Object key the action concerns (empty for repository-level steps)."""
     kind: str = ""
@@ -66,7 +67,7 @@ class Plan:
     """The actions a command would perform, plus the inputs they depend on."""
 
     command: str
-    """`commit`, `new`, or `gc`."""
+    """`commit`, `new`, `gc`, `promote`, `import`, `publish`, or `repair`."""
     actions: list[Action] = field(default_factory=list)
     """Store-writing steps, in execution order."""
     context: dict[str, Any] = field(default_factory=dict)

@@ -555,3 +555,31 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 2, r.output
     assert "IRREVERSIBLE" in r.output and "pin(s) deleted" in r.output
     assert stray in store.system(system).branches
+
+
+def test_cli_repair(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store = default_store()
+    store.system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+    pin = Repo.find(vcs_root).objects["db"].pin
+    assert pin is not None
+    r = runner.invoke(app, ["repair", "--dry-run"])
+    assert r.exit_code == 0 and "nothing to repair" in r.output
+
+    del store.system(system).tags[pin.ref]
+    r = runner.invoke(app, ["verify", "--json"])
+    assert r.exit_code != 0 or "missing" in r.output.lower()
+    r = runner.invoke(app, ["repair", "--dry-run"])
+    assert r.exit_code == 0 and "repin" in r.output and pin.ref in r.output
+    assert pin.ref not in store.system(system).tags  # dry run
+    r = runner.invoke(app, ["repair", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["repinned"] == {"db": pin.id}
+    assert pin.ref in store.system(system).tags

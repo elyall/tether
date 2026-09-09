@@ -780,6 +780,69 @@ def undo(
 
 
 @app.command()
+def repair(
+    all_history: bool = typer.Option(
+        False, "--all-history", help="Also check the pins of every commit in history."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be rebuilt; write nothing."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None,
+        "--from-plan",
+        help="Apply a plan saved with --plan instead of replanning.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Recreate missing pins and working branches from the manifests.
+
+    A manifest promises "this pin names this state". If the native ref is gone
+    (an undone `gc`, a ref deleted by hand) but the state is still reachable in
+    the store, `repair` recreates it; a working branch this workspace expects
+    but the store lost is forked again from the manifest. Pins that exist but
+    point elsewhere are reported, not overwritten. Exit code 2 if something
+    could not be rebuilt.
+    """
+    repo = _repo()
+    try:
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "repair")
+        else:
+            plan = repo.plan_repair(all_history=all_history)
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                return
+        report = repo.apply_repair(plan)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "repinned": report.repinned,
+                "reforked": report.reforked,
+                "failed": report.failed,
+                "notes": plan.notes,
+            },
+            as_json=True,
+        )
+    else:
+        for key, pid in sorted(report.repinned.items()):
+            typer.echo(f"repinned  {key} -> {pid}")
+        for key, ref in sorted(report.reforked.items()):
+            typer.echo(f"reforked  {key} -> {ref}")
+        for note in plan.notes:
+            typer.echo(f"note      {note}")
+        for target, why in sorted(report.failed.items()):
+            typer.secho(f"FAILED    {target}: {why}", err=True)
+    if report.failed:
+        raise typer.Exit(2)
+
+
+@app.command()
 def gc(
     dry_run: bool = typer.Option(
         True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."

@@ -47,7 +47,7 @@ cli:
       contents: [commit, new, open, promote]
     - title: Maintenance
       desc: Reclaim native refs, and see or reverse what tether did.
-      contents: [gc, ops, undo]
+      contents: [gc, ops, undo, repair]
     - title: Registries
       desc: "Experimental: derive SQL tables from history, push them to Postgres, or import the object set from a registry."
       contents: [export, publish, import]
@@ -73,6 +73,7 @@ reference:
         - GcReport
         - PromoteReport
         - UndoReport
+        - RepairReport
         - DiffEntry
         - TETHER_REV_ENV
     - title: Operation log

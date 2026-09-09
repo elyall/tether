@@ -1210,3 +1210,55 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
             repo.undo(e.id)
     with pytest.raises(TetherError, match=r"nothing to undo|only fast-forwards"):
         repo.undo()
+
+
+def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    sys_ = store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    repo.commit("v1")
+    pin1 = repo.objects["db"].pin
+    s2 = store.write(system, "main", {"v": 2})
+    repo.commit("v2")
+    pin2 = repo.objects["db"].pin
+    assert pin1 is not None and pin2 is not None
+    repo.new(eager=True)
+    wref = repo.workspace.working_refs["db"]
+
+    plan = repo.plan_repair()
+    assert plan.is_empty and "nothing to repair" in plan.notes
+
+    # Someone deleted the current pin and the working branch by hand.
+    del sys_.tags[pin2.ref]
+    del sys_.branches[wref]
+    plan = repo.plan_repair()
+    assert [(a.op, a.target) for a in plan.actions] == [
+        ("repin", pin2.ref),
+        ("refork", wref),
+    ]
+    report = repo.apply_repair(plan)
+    assert report.repinned == {"db": pin2.id} and report.reforked == {"db": wref}
+    assert sys_.tags[pin2.ref] == s2 and sys_.branches[wref] == s2
+    assert not report.failed and repo.ops()[0].command == "repair"
+    assert not repo.is_stale()
+
+    # The older commit's pin is only checked with --all-history; a pin whose
+    # state is gone cannot come back and is reported, not raised.
+    del sys_.tags[pin1.ref]
+    assert repo.plan_repair().is_empty
+    plan = repo.plan_repair(all_history=True)
+    assert [a.op for a in plan.actions] == ["repin"] and plan.actions[
+        0
+    ].target == pin1.ref
+    del sys_.snapshots[s1]
+    report = repo.apply_repair(plan)
+    assert not report.repinned and list(report.failed) == [f"repin {pin1.ref}"]
+    assert "no longer exists" in report.failed[f"repin {pin1.ref}"]
+
+    # A pin that exists but points elsewhere is noted, never overwritten.
+    sys_.tags[pin2.ref] = s1 if s1 in sys_.snapshots else sys_.branches["main"]
+    sys_.tags[pin2.ref] = store.write(system, "main", {"v": "elsewhere"})
+    plan = repo.plan_repair()
+    assert plan.is_empty and any("drifted" in n for n in plan.notes)

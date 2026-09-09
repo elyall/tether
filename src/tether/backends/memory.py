@@ -163,6 +163,10 @@ class MemoryBackend(ObjectBackend):
         sys = self.store.system(name)
         ref = ref_for_pin(pin_id)
         sid = str(state["snapshot_id"])
+        if sid not in sys.snapshots:
+            raise BackendError(
+                f"snapshot {sid} no longer exists", key=name, kind="memory"
+            )
         existing = sys.tags.get(ref)
         if existing is not None and existing != sid:
             raise BackendError(
