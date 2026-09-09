@@ -133,8 +133,10 @@ store -- the plan it applied, what it did (`result`), and what it replaced
 (`pre`: the workspace state and VCS position before a `new`, the heads of
 branches it reset, the manifests an `import` rewrote, the base heads a
 `promote` moved from). `tether ops` reads it; `tether undo` reverses entries
-from it and appends its own, marking the target `undone_by`. Deleting the
-file loses nothing but the ability to undo what came before.
+from it and appends its own entry plus a one-line *mark*
+(`{"undone": ID, "by": UNDO_ID}`) -- the file is only ever appended to, so an
+interruption loses at most the line being written. Deleting the file loses
+nothing but the ability to undo what came before.
 
 ## Environment variables
 

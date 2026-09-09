@@ -10,7 +10,10 @@ half-applied operation is visible rather than silent.
 
 Like jj's own operation log it is per working copy and never shared:
 ``.tether/ops.jsonl``, ignored by the VCS, one JSON object per line, append
-only (an undo appends a new entry and marks its target ``undone_by``).
+only. Two kinds of line: an entry (has ``"command"``) and a mark
+(``{"undone": <id>, "by": <undo id>}``), which is how an undo records that it
+reversed an earlier entry without rewriting the file -- a crash between two
+appends loses at most the line being written, never the log.
 """
 
 from __future__ import annotations
@@ -200,15 +203,27 @@ class OpEntry:
 
 
 def read_ops(root: Path) -> list[OpEntry]:
-    """Every entry, oldest first (a missing or empty log is an empty list)."""
+    """Every entry, oldest first, with undo marks applied (missing log: empty)."""
     path = ops_path(root)
     if not path.is_file():
         return []
     entries: list[OpEntry] = []
+    marks: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
-            entries.append(OpEntry.from_dict(json.loads(line)))
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a torn final line from an interrupted append
+        if "command" in obj:
+            entries.append(OpEntry.from_dict(obj))
+        elif "undone" in obj:
+            marks[str(obj["undone"])] = str(obj.get("by", ""))
+    for e in entries:
+        if e.id in marks:
+            e.undone_by = marks[e.id] or None
     return entries
 
 
@@ -220,15 +235,8 @@ def append_op(root: Path, entry: OpEntry) -> None:
 
 
 def mark_undone(root: Path, op_id: str, by: str) -> None:
-    """Record that `op_id` was reversed by the undo entry `by`."""
-    entries = read_ops(root)
-    for e in entries:
-        if e.id == op_id:
-            e.undone_by = by
+    """Record that `op_id` was reversed by the undo entry `by` (an appended mark)."""
     path = ops_path(root)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(
-        "".join(json.dumps(e.to_dict(), default=str) + "\n" for e in entries),
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"undone": op_id, "by": by}) + "\n")

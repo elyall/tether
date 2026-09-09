@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branches `gc` deleted). `tether ops` and `Repo.ops()` read it;
   `tether.oplog` is the module. `Repo` re-asserts the `.tether/.gitignore`
   rules on open so jj never snapshots the log.
+- The op log is strictly append-only: an undo appends a mark line
+  (`{"undone": ID, "by": UNDO_ID}`) instead of rewriting the file, and a torn
+  final line from an interrupted write is skipped on read.
 - **`tether undo [ID]`** (`Repo.undo`) reverses an op-log entry where the
   store still allows it, and says what it could not: a `commit` is
   uncommitted (jj `squash --into @`, git `reset --soft`; the manifests become
