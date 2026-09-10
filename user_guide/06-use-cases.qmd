@@ -155,16 +155,79 @@ the winner, and leave nothing of the loser behind.*
 
 Each candidate gets its own checkout of the repository -- a jj workspace or a
 git worktree -- and with it its own tether workspace, so the two never share a
-branch in any system:
+branch in any system. Left is A, right is B; each column is one shell.
+
+**Set up.** B's checkout is created from A's; each then decides its own forks.
+
+:::: {.columns}
+::: {.column width="49%"}
+**A** -- `analysis/`, workspace `7c1e0a4d`
 
 ```bash
-jj workspace add ../analysis-b         # git: git worktree add ../analysis-b -b b
-cd ../analysis-b && tether new main    # forks named tether.ws.0a1b2c3d.3e9b2c71.*
-cd ../analysis   && tether new main    # forks named tether.ws.0a1b2c3d.7c1e0a4d.*
+jj workspace add ../analysis-b    # git: git worktree add ../analysis-b -b b
+tether new main
 ```
 
-Both jobs run; both commit (`jj bookmark set a` / `b` on their dataset
-commits, or the git branches). Compare them as datasets, not as directories:
+```
+working refs set up
+  ...  -> tether.ws.0a1b2c3d.7c1e0a4d.*
+```
+:::
+::: {.column width="2%"}
+:::
+::: {.column width="49%"}
+**B** -- `analysis-b/`, workspace `3e9b2c71`
+
+```bash
+cd ../analysis-b
+tether new main
+```
+
+```
+working refs set up
+  ...  -> tether.ws.0a1b2c3d.3e9b2c71.*
+```
+:::
+::::
+
+**Run and commit.** Each job writes through its own handles; each `commit`
+pins its own branches and lands a dataset commit in the VCS; a bookmark names
+it (in jj the dataset commit is `@-`, the parent of the fresh working copy).
+
+:::: {.columns}
+::: {.column width="49%"}
+```bash
+python label.py --candidate a
+tether commit -m "Labels: candidate A"
+jj bookmark set a -r @-           # git: git branch a
+```
+
+```
+  pinned zarr/imaging -> tether.0a1b2c3d.b7e1...
+  pinned db/metrics -> tether.0a1b2c3d.44c0...
+  pinned features -> tether.0a1b2c3d.2d9f...
+committed 5a1e9c0d7b2f
+```
+:::
+::: {.column width="2%"}
+:::
+::: {.column width="49%"}
+```bash
+python label.py --candidate b
+tether commit -m "Labels: candidate B"
+jj bookmark set b -r @-           # git: already on branch b
+```
+
+```
+  pinned zarr/imaging -> tether.0a1b2c3d.9c3a...
+  pinned db/metrics -> tether.0a1b2c3d.e08b...
+  pinned features -> tether.0a1b2c3d.71d4...
+committed c4d82f1a6e93
+```
+:::
+::::
+
+**Compare** -- from either checkout, as datasets rather than directories:
 
 ```bash
 tether diff a b --content
@@ -176,54 +239,75 @@ tether diff a b --content
                     ...
    modified  db/metrics  [1 table changed]
                     modified  public.metrics  +1200 rows, -1200 rows
+   modified  features  [3 fragments added, 3 removed]
 ```
 
-A wins. From A's checkout:
+**Land A.** Two halves, both from A: `promote` moves each system's base
+branch onto A's fork (a fast-forward: `main` had not moved since the fork),
+and the VCS bookmark moves `main` onto A's dataset commit.
 
+:::: {.columns}
+::: {.column width="49%"}
 ```bash
-tether promote                # fast-forward: main had not moved since A forked
-```
-
-Now B's checkout is *stale* for those objects -- B forked from a state the
-dataset no longer says is current -- and tether says so before B can write:
-
-```bash
-cd ../analysis-b && tether status
+tether promote
+jj bookmark move main --to a      # git: git switch main && git merge --ff-only a
 ```
 
 ```
-dataset 3ba1c07e55d2 (STALE: zarr/imaging, features, code)
-  ...
+  fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK...'}
+  fast-forwarded features -> {'branch': 'main', 'version': 42}
+  refused        db/metrics: Neon cannot promote a child branch into its parent; ...
 ```
+:::
+::: {.column width="2%"}
+:::
+::: {.column width="49%"}
+B is untouched by this. If B later moves its checkout onto the new `main`
+(`jj new main`), `tether status` reports `STALE: zarr/imaging, features`:
+B's forks were taken from pins the dataset no longer names, and a writable
+`open` is refused until `tether new` re-decides them (which itself refuses
+while B holds uncommitted writes).
+:::
+::::
 
-Retire B in the order that keeps every step safe. Forget the workspace
-*first*: its branch heads are pinned by B's commit, so deleting them loses
-nothing.
+**Retire B**, in the order that keeps every step safe -- both commands from
+A's checkout, since B's is about to stop being one. Forget the workspace
+*first*: B's branch heads are pinned by B's commit, so deleting them loses
+nothing. Then drop B's dataset commit and release the pins only it referenced.
 
+:::: {.columns}
+::: {.column width="49%"}
 ```bash
 tether forget-workspace 3e9b2c71
+tether abandon b --gc
 ```
 
 ```
 forgot workspace 3e9b2c71
   deleted  zarr/imaging: tether.ws.0a1b2c3d.3e9b2c71.zarr-imaging-3fa1c0
   deleted  features: tether.ws.0a1b2c3d.3e9b2c71.features-9b2e4f
-  deleted  code: tether.ws.0a1b2c3d.3e9b2c71.code-2f8a1c
   kept     db/metrics: tether.ws.0a1b2c3d.3e9b2c71.db-metrics-77e21d (holds data; --force-prune)
   removed  /.../analysis-b/.tether/workspace.toml
   vcs      jj workspace 'analysis-b' forgotten (its directory is left in place)
+abandoned c4d82f1a6e93
+unpinned 3 pin(s)
+  icechunk: 0a1b2c3d.9c3a...
+  neon: 0a1b2c3d.e08b...
+  lance: 0a1b2c3d.71d4...
 ```
+:::
+::: {.column width="2%"}
+:::
+::: {.column width="49%"}
+Nothing left to run here. The directory can be deleted (`git worktree
+remove` already did, for git).
 
-Then drop B's dataset commit and release the pins only it referenced:
-
-```bash
-tether abandon b --gc
-```
-
-Had you abandoned first, the branches would have been holding writes no pin
-covered any more, and `forget-workspace` would have kept them all without
-`--force-prune`. Neon's branch is kept either way: it *is* the storage, so
-tether never deletes it without being told (`--force-prune`).
+Had A abandoned *before* forgetting, B's branches would have been holding
+writes no pin covered any more, and `forget-workspace` would have kept them
+all without `--force-prune`. Neon's branch is kept either way: it *is* the
+storage, so tether never deletes it without being told.
+:::
+::::
 
 Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-auto_fork),
 [Reclaiming Storage](05-reclaiming-storage.qmd).
