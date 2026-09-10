@@ -602,12 +602,12 @@ def test_cli_upgrade(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = runner.invoke(app, ["upgrade", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["from_version"] == 1 and payload["to_version"] == 2
+    assert payload["from_version"] == 1 and payload["to_version"] == 3
     assert f"tether.{pin1}" in payload["renamed_pins"] and payload["vcs_commit"]
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["upgrade"])
-    assert r.exit_code == 0 and "already at version 2" in r.output
+    assert r.exit_code == 0 and "already at version 3" in r.output
 
 
 def test_cli_abandon(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

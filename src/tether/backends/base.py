@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from tether.errors import CapabilityError
@@ -298,6 +299,16 @@ class ObjectBackend(Protocol):
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
+
+    def configure_cache(self, cache_dir: Path) -> None:
+        """Tell the backend where it may keep per-workspace scratch state.
+
+        Called by the engine after construction with ``.tether/cache/``
+        (untracked). Backends that remember expensive results between runs --
+        the ``file`` backend keeps a stat -> content-hash cache there -- store
+        them under this directory; everything else ignores the call.
+        """
+        return None
 
     def working_ref_blockers(self, locator: Locator, ref: str) -> str | None:
         """Why ``ref`` cannot be deleted right now, or ``None`` if it can.

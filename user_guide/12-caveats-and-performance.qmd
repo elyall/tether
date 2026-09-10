@@ -135,8 +135,13 @@ read. History *rewrites* (`upgrade`, `abandon`) only read and transform the
 commits that touch the dataset directory; under jj the rest are rebased, under
 git the answer is cached per subtree id.
 
-**Fingerprints are metadata-only.** Local trees use `os.scandir` (~4 us per
-file); a remote object is one `HEAD`; a prefix is one paged `LIST`.
+**Fingerprints are metadata-only, except the first local one.** A remote
+object is one `HEAD`; a prefix is one paged `LIST`; the etag is the store's
+content hash. Local files are sha256-hashed so that timestamps do not count as
+change, with the hash cached by `(size, mtime_ns, inode)` under
+`.tether/cache/`: the first fingerprint of a tree reads every byte (~1.5-3 GB/s
+per core, eight files at a time, so disk-bound on NVMe), every later one is an
+`os.scandir` walk (~4-20 us per file) plus the files whose stat changed.
 
 **Content diffs are metadata-only too.** Each backend reads manifests, logs,
 or catalog tables -- never data -- so `diff --content` costs about one

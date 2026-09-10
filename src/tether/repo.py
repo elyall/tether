@@ -537,6 +537,7 @@ class Repo:
         backend = self._backends.get(kind)
         if backend is None:
             backend = build_backend(kind, self.config.backends.get(kind, {}))
+            backend.configure_cache(_m.tether_path(self.root) / _m.CACHE_DIR)
             self._backends[kind] = backend
         return backend
 

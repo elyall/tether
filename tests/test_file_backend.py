@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -75,7 +76,7 @@ def test_directory_listing_and_diff(tmp_path: Path) -> None:
     assert l1 is not None
     rows = [json.loads(line) for line in l1.splitlines()]
     assert [r["p"] for r in rows] == ["grow.bin", "keep.bin", "sub/gone.bin"]
-    assert rows[0]["s"] == 2 and rows[0]["k"].startswith("2:")
+    assert rows[0]["s"] == 2 and rows[0]["k"] == hashlib.sha256(b"12").hexdigest()
 
     (d / "grow.bin").write_bytes(b"1234567")
     (d / "sub" / "gone.bin").unlink()
@@ -103,7 +104,7 @@ def test_directory_listing_and_diff(tmp_path: Path) -> None:
     fresh = FileBackend()
     assert fresh.listing(loc, s1) is None  # stale state, not reproducible
     assert fresh.listing(loc, s2) == l2
-    assert b.listing(loc, {"type": "file", "size": 1, "mtime_ns": 1}) is None
+    assert b.listing(loc, {"type": "file", "size": 1, "sha256": "00"}) is None
 
 
 def test_single_object_diff(tmp_path: Path) -> None:
@@ -116,7 +117,7 @@ def test_single_object_diff(tmp_path: Path) -> None:
     s2 = b.fingerprint(loc, None)
     diff = b.diff(loc, s1, s2)
     assert diff.unit == "objects" and diff.modified == 1
-    assert diff.entries[0].detail.startswith("size +6 B, mtime_ns ")
+    assert diff.entries[0].detail.startswith("size +6 B, sha256 ")
     remote = b.diff(
         {"uri": "s3://b/k"},
         {"type": "object", "size": 1, "etag": "a", "version_id": "v1"},
@@ -257,3 +258,60 @@ class RemoteObjectHarness:
 def test_remote_file_conformance(backend: tuple[FileBackend, _MemoryStores]) -> None:
     b, stores = backend
     run_conformance(RemoteObjectHarness(b, stores))
+
+
+def test_local_states_are_content_hashes_not_mtimes(tmp_path: Path) -> None:
+    import hashlib
+    import os
+
+    b = FileBackend()
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"1234")
+    s1 = b.fingerprint({"uri": str(f)}, None)
+    assert s1 == {
+        "type": "file",
+        "size": 4,
+        "sha256": hashlib.sha256(b"1234").hexdigest(),
+    }
+    # touch / cp -p-less copies / checkouts change mtime, not content.
+    os.utime(f, ns=(1, 1))
+    assert b.fingerprint({"uri": str(f)}, None) == s1
+    f.write_bytes(b"1235")  # same size, new bytes
+    assert b.fingerprint({"uri": str(f)}, None)["sha256"] != s1["sha256"]
+
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "a").write_bytes(b"aa")
+    s_dir = b.fingerprint({"uri": str(d)}, None)
+    os.utime(d / "a", ns=(5, 5))
+    assert b.fingerprint({"uri": str(d)}, None) == s_dir  # digest is over hashes
+    (d / "a").write_bytes(b"ab")
+    assert b.fingerprint({"uri": str(d)}, None)["digest"] != s_dir["digest"]
+
+
+def test_hash_cache_rereads_only_changed_files(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    b = FileBackend()
+    b.configure_cache(cache_dir)
+    d = tmp_path / "data"
+    d.mkdir()
+    for i in range(5):
+        (d / f"{i}.bin").write_bytes(bytes([i]) * 10)
+    loc = {"uri": str(d)}
+    s1 = b.fingerprint(loc, None)
+    assert b._hashes.hashed == 5
+    assert (cache_dir / "file-hashes.json").is_file()
+
+    # Nothing changed: no file is read.
+    assert b.fingerprint(loc, None) == s1 and b._hashes.hashed == 5
+    # One file rewritten: one read.
+    (d / "2.bin").write_bytes(b"new")
+    s2 = b.fingerprint(loc, None)
+    assert s2["digest"] != s1["digest"] and b._hashes.hashed == 6
+    # A fresh backend on the same workspace inherits the cache from disk.
+    b2 = FileBackend()
+    b2.configure_cache(cache_dir)
+    assert b2.fingerprint(loc, None) == s2 and b2._hashes.hashed == 0
+    # Without a cache dir the cache is per process only.
+    b3 = FileBackend()
+    assert b3.fingerprint(loc, None) == s2 and b3._hashes.hashed == 5

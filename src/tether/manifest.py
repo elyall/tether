@@ -36,7 +36,7 @@ WORKSPACE_FILENAME = "workspace.toml"
 GITIGNORE_FILENAME = ".gitignore"
 
 REF_PREFIX = "tether."
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
 older datasets forward one migration at a time (see `tether.migrations`)."""
 
@@ -572,7 +572,8 @@ def find_dataset_root(start: Path) -> Path | None:
     return None
 
 
-UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl")
+CACHE_DIR = "cache"
+UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl", CACHE_DIR)
 """Per-workspace files under ``.tether/`` that must never be committed."""
 
 

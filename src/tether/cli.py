@@ -1136,6 +1136,7 @@ def upgrade(
                 "renamed_pins": report.renamed_pins,
                 "renamed_branches": report.renamed_branches,
                 "rewritten_commits": report.rewritten_commits,
+                "refingerprinted": report.refingerprinted,
                 "failed": report.failed,
                 "vcs_commit": report.vcs_commit,
             },
@@ -1155,6 +1156,8 @@ def upgrade(
                 f"  rewrote {len(report.rewritten_commits)} commit(s); other clones "
                 "must re-sync"
             )
+        for key in report.refingerprinted:
+            typer.echo(f"  rehashed {key}")
         if report.vcs_commit:
             typer.echo(f"  commit  {report.vcs_commit[:12]}")
         for target, why in sorted(report.failed.items()):

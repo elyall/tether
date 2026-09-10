@@ -102,13 +102,13 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Locator | `uri` (positional; `path` accepted). A trailing `/` (or empty key) means a prefix. `region` overrides the store region. |
 | Config | `storage_options = {...}` passed to `obstore.store.from_url` (region, endpoint, account name -- non-secret options). Credentials come from the environment / instance metadata. |
 | Identity | `{uri}` |
-| State | local file: `type=file, size, mtime_ns`; local dir: `type=dir, count, size, digest`; remote object: `type=object, size, etag[, version_id]`; prefix: `type=prefix, count, size, digest` (one paged `LIST`, etag+size per key) |
+| State | local file: `type=file, size, sha256`; local dir: `type=dir, count, size, digest` (digest over per-file sha256s); remote object: `type=object, size, etag[, version_id]`; prefix: `type=prefix, count, size, digest` (one paged `LIST`, etag+size per key). Local hashes are cached by `(size, mtime_ns, inode)` in `.tether/cache/file-hashes.json`, so only files whose stat changed are re-read |
 | Tier | Observed by default. `--file versioned` on a single object makes it Addressable via `version_id` (S3 version id / GCS generation / Azure version id; requires versioning on the bucket/container). Prefixes are always Observed. |
 | Pin / fork | none |
 | Handle | `FileHandle(uri, version_id)` -- always read-only |
 | Listing | directories and prefixes hand the engine a per-file JSONL listing (`{"p": path, "k": token, "s": size}`) that is stored under `.tether/listings/` |
-| Diff | `files`: per-path added/removed/modified with size deltas from two stored listings; falls back to a count/size summary when a listing is missing; single objects report changed size/etag/mtime/version |
-| Notes | `--file immutable` (default) turns any drift into an `ImmutableObjectModified` error at `status`. Local walks use `os.scandir`; symlinked directories are not followed. |
+| Diff | `files`: per-path added/removed/modified with size deltas from two stored listings; falls back to a count/size summary when a listing is missing; single objects report changed size/etag/sha256/version |
+| Notes | `--file immutable` (default) turns any drift into an `ImmutableObjectModified` error at `status` -- and drift means the *bytes* changed, not the timestamp. Local walks use `os.scandir`; symlinked directories are not followed. The first fingerprint of a large tree reads every file (sha256 at ~1.5-3 GB/s per core, up to 8 files at a time); later ones read only what changed. |
 
 ## `icechunk` -- Icechunk repositories
 

@@ -54,7 +54,8 @@ class UpgradeReport:
         renamed_pins: Old native ref -> new native ref, per store.
         renamed_branches: Old working branch -> new working branch.
         rewritten_commits: Old commit id -> new commit id (history rewrite).
-        failed: Target -> why a store rename did not happen.
+        refingerprinted: Objects whose manifest state was recomputed (v3).
+        failed: Target -> why a step did not happen.
         vcs_commit: The commit that records the upgraded working tree.
         plan: The plan that was applied.
     """
@@ -64,6 +65,7 @@ class UpgradeReport:
     renamed_pins: dict[str, str] = field(default_factory=dict)
     renamed_branches: dict[str, str] = field(default_factory=dict)
     rewritten_commits: dict[str, str] = field(default_factory=dict)
+    refingerprinted: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     vcs_commit: str | None = None
     plan: Plan | None = None
@@ -348,12 +350,103 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     write_config(repo.root, repo.config)
 
 
+# --------------------------------------------------------------------------- #
+# v3: local file states are content hashes
+# --------------------------------------------------------------------------- #
+def _local_file_objects(repo: Repo) -> list[ObjectManifest]:
+    """Working-tree `file` objects on local disk with a committed state."""
+    return [
+        m
+        for m in repo.objects.values()
+        if m.kind == "file"
+        and m.state is not None
+        and m.state.get("type") in ("file", "dir")
+    ]
+
+
+def _plan_v3(repo: Repo, plan: Plan) -> None:
+    for m in _local_file_objects(repo):
+        assert m.state is not None
+        if m.state.get("type") == "file" and "sha256" in m.state:
+            plan.notes.append(f"{m.key}: already content-hashed")
+            continue
+        what = "file" if m.state.get("type") == "file" else "directory"
+        plan.actions.append(
+            Action(
+                "refingerprint",
+                m.key,
+                m.kind,
+                target=str(m.locator.get("uri") or m.locator.get("path", "")),
+                detail=f"re-read the {what} and record its content hash in place of "
+                "the mtime-based state (reads every byte once; the stat cache "
+                "remembers it)",
+                params={"migration": 3},
+            )
+        )
+    if not plan.actions or not any(
+        a.params.get("migration") == 3 for a in plan.actions
+    ):
+        plan.notes.append("v3: no local file objects to re-fingerprint")
+    plan.actions.append(
+        Action(
+            "vcs-commit",
+            target="tether upgrade: v2 -> v3 (content-hashed file states)",
+            detail="manifests of local file objects get {size, sha256} states; "
+            "history keeps the old form (it recorded what the bytes were then, "
+            "not what they are now)",
+            params={"migration": 3},
+        )
+    )
+
+
+def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
+    from tether.manifest import listing_name, write_config, write_listing, write_object
+
+    backend = repo.backend_for("file")
+    for a in plan.actions:
+        if a.op != "refingerprint" or a.params.get("migration") != 3:
+            continue
+        m = repo.objects[a.key]
+        try:
+            state = backend.fingerprint(m.locator, None)
+        except TetherError as exc:
+            report.failed[f"refingerprint {a.key}"] = str(exc)
+            continue
+        updated = dataclasses.replace(m, state=state)
+        write_object(repo.root, updated)
+        repo.objects[a.key] = updated
+        text = backend.listing(m.locator, state)
+        if text is not None:
+            content = content_state(backend, state)
+            assert content is not None
+            write_listing(
+                repo.root,
+                listing_name(m.kind, backend.identity(m.locator), content),
+                text,
+            )
+        report.refingerprinted.append(a.key)
+    if report.failed:
+        raise TetherError(
+            "upgrade stopped: could not re-fingerprint "
+            + ", ".join(sorted(k.split(" ", 1)[1] for k in report.failed))
+            + " (the paths must exist and be readable); fix and re-run `tether upgrade`"
+        )
+    repo.config.version = 3
+    write_config(repo.root, repo.config)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version=2,
         title="Namespace native refs by dataset id",
         plan=_plan_v2,
         apply=_apply_v2,
+    ),
+    Migration(
+        version=3,
+        title="Content-hash local file states",
+        plan=_plan_v3,
+        apply=_apply_v3,
     ),
 ]
 """Every migration, oldest first. Append here when the format changes."""

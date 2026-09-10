@@ -22,6 +22,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what they guarantee, and the guide that explains the mechanics. The README
   lists them. Later guides are renumbered (`07-cli` ... `11-extending`).
 
+### Changed
+
+- Local files are fingerprinted by **content hash**, not mtime. A file's state
+  is `{size, sha256}` and a directory's digest is over its files' sha256s, so
+  `touch`, `cp`, a fresh checkout, or an rsync no longer read as drift (an
+  error under the default `immutable` policy) or mint a new state. Hashes are
+  cached by `(size, mtime_ns, inode)` in the untracked
+  `.tether/cache/file-hashes.json` -- the git/DVC pattern -- so the first
+  fingerprint of a tree reads every file and later ones read only what
+  changed. `ObjectBackend.configure_cache(dir)` is the hook the engine calls
+  so a backend can keep such scratch state. Listing tokens for local
+  directories are sha256s (were `size:mtime_ns`). **Breaking**: manifests
+  from earlier alphas hold mtime-based states that would read as drift -- an
+  error under the default `immutable` policy -- so `[tether] version` is now
+  3 and `tether upgrade` (v3 migration) re-fingerprints every local `file`
+  object in the working tree and rewrites its manifest; remote objects and
+  history are untouched.
+
 ### Fixed
 
 - `ForgetWorkspaceReport` was listed in `tether.__all__` but never imported,

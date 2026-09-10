@@ -298,6 +298,12 @@ plan: upgrade (5 write(s))
                           dataset id: 0a1b2c3d
 ```
 
+The migrations so far: **v2** gave the dataset an id and namespaced every pin
+and working branch with it; **v3** re-fingerprints local `file` objects so
+their recorded state is a content hash rather than a size and mtime (it reads
+every file once; the stat cache remembers the answer), which is what keeps a
+byte-identical file from failing the `immutable` check after the upgrade.
+
 When a migration changes how native refs are named (v2 did: pins and working
 branches gained the dataset id), it renames them in every store *and*
 rewrites every historical manifest to the new names, because `gc` subtracts

@@ -8,9 +8,13 @@ bucket/container with ``--file versioned`` (the recorded ``version_id`` -- an S3
 version id, GCS generation, or Azure version id -- can be read back later). It
 never creates or forks refs.
 
-Fingerprints are metadata-only: a local walk (``os.scandir`` + ``stat``), one
-``HEAD`` for a remote object, or one paged ``LIST`` for a prefix (etag + size per
-object, no per-object round-trips).
+Remote fingerprints are metadata-only -- one ``HEAD`` for an object, one paged
+``LIST`` for a prefix (etag + size per object, no per-object round-trips) -- and
+the etag is the store's own content hash. Local fingerprints are content hashes
+too (sha256 per file), so ``touch``, ``cp``, a fresh checkout, or an rsync do
+not read as changes: a stat cache under the workspace's ``.tether/cache/``
+(``size``, ``mtime_ns``, inode -> hash) means only files whose stat changed are
+re-read, the way git and DVC avoid rehashing.
 
 A directory/prefix state is only a digest, so on its own it cannot be diffed.
 The backend therefore hands the engine a per-file *listing* (JSON lines, sorted
@@ -79,8 +83,98 @@ def _strip_etag(etag: object) -> str:
 
 
 # A listing row: path -> (token, size). ``token`` is what "same content" means
-# for the entry: ``size:mtime_ns`` locally, the etag remotely.
+# for the entry: the sha256 locally, the etag remotely.
 ListingRows = dict[str, tuple[str, int]]
+
+_HASH_CHUNK = 4 * 1024 * 1024
+_HASH_WORKERS = 8
+
+
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb", buffering=0) as fh:
+        while chunk := fh.read(_HASH_CHUNK):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class _HashCache:
+    """Path -> (size, mtime_ns, inode, sha256), persisted as JSON when given a file.
+
+    A hit requires all three stat fields to match; a miss hashes the file and
+    records it. Without a path (a backend built outside a dataset) the cache
+    lives for the process only.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._entries: dict[str, list[Any]] | None = None
+        self._dirty = False
+        self.hashed = 0  # files read since construction (tests, diagnostics)
+
+    def _load(self) -> dict[str, list[Any]]:
+        if self._entries is None:
+            self._entries = {}
+            if self._path is not None and self._path.is_file():
+                try:
+                    self._entries = json.loads(self._path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    self._entries = {}
+        return self._entries
+
+    def lookup(self, path: Path, st: os.stat_result) -> str | None:
+        hit = self._load().get(str(path))
+        if (
+            hit
+            and hit[0] == st.st_size
+            and hit[1] == st.st_mtime_ns
+            and hit[2] == st.st_ino
+        ):
+            return str(hit[3])
+        return None
+
+    def record(self, path: Path, st: os.stat_result, digest: str) -> None:
+        self._load()[str(path)] = [st.st_size, st.st_mtime_ns, st.st_ino, digest]
+        self._dirty = True
+
+    def hashes(self, files: list[tuple[Path, os.stat_result]]) -> dict[Path, str]:
+        """Content hash per file, reading only the ones the cache cannot answer."""
+        out: dict[Path, str] = {}
+        misses: list[tuple[Path, os.stat_result]] = []
+        for path, st in files:
+            known = self.lookup(path, st)
+            if known is None:
+                misses.append((path, st))
+            else:
+                out[path] = known
+        if misses:
+            self.hashed += len(misses)
+            if len(misses) == 1:
+                path, st = misses[0]
+                digest = _hash_file(path)
+                self.record(path, st, digest)
+                out[path] = digest
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=_HASH_WORKERS) as pool:
+                    digests = list(pool.map(lambda m: _hash_file(m[0]), misses))
+                for (path, st), digest in zip(misses, digests, strict=True):
+                    self.record(path, st, digest)
+                    out[path] = digest
+        self.save()
+        return out
+
+    def save(self) -> None:
+        if not self._dirty or self._path is None or self._entries is None:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_name(f".{self._path.name}.tmp")
+        tmp.write_text(
+            json.dumps(self._entries, separators=(",", ":")), encoding="utf-8"
+        )
+        tmp.replace(self._path)
+        self._dirty = False
 
 
 def _dump_listing(rows: ListingRows) -> str:
@@ -119,7 +213,11 @@ def _walk_files(root: Path) -> list[tuple[str, int, int]]:
     ~7x cheaper per entry than ``Path.rglob`` + ``stat``. Symlinked directories
     are not followed (matching ``rglob``); symlinked files are stat'ed through.
     """
-    out: list[tuple[str, int, int]] = []
+    return [(rel, st.st_size, st.st_mtime_ns) for rel, st in _walk_stats(root)]
+
+
+def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
+    out: list[tuple[str, os.stat_result]] = []
     stack = [root]
     while stack:
         current = stack.pop()
@@ -128,9 +226,8 @@ def _walk_files(root: Path) -> list[tuple[str, int, int]]:
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(Path(entry.path))
                 elif entry.is_file():
-                    st = entry.stat()
                     rel = Path(entry.path).relative_to(root).as_posix()
-                    out.append((rel, st.st_size, st.st_mtime_ns))
+                    out.append((rel, entry.stat()))
     return out
 
 
@@ -148,6 +245,10 @@ class FileBackend(ObjectBackend):
         self._config = config or {}
         self._stores: dict[str, Any] = {}
         self._listings: OrderedDict[str, ListingRows] = OrderedDict()
+        self._hashes = _HashCache(None)
+
+    def configure_cache(self, cache_dir: Path) -> None:
+        self._hashes = _HashCache(cache_dir / "file-hashes.json")
 
     # -- capability refinement ------------------------------------------ #
     def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
@@ -224,20 +325,22 @@ class FileBackend(ObjectBackend):
         if not path.exists():
             raise BackendError(f"path does not exist: {path}", kind="file")
         if path.is_dir():
-            entries = _walk_files(path)
+            entries = _walk_stats(path)
+            hashes = self._hashes.hashes([(path / rel, st) for rel, st in entries])
             rows: ListingRows = {
-                rel: (f"{size}:{mtime}", size) for rel, size, mtime in entries
+                rel: (hashes[path / rel], st.st_size) for rel, st in entries
             }
             digest = _digest_pairs([(p, tok) for p, (tok, _) in rows.items()])
             self._remember(digest, rows)
             return {
                 "type": "dir",
                 "count": len(entries),
-                "size": sum(size for _, size, _ in entries),
+                "size": sum(st.st_size for _, st in entries),
                 "digest": digest,
             }
         st = path.stat()
-        return {"type": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        digest = self._hashes.hashes([(path, st)])[path]
+        return {"type": "file", "size": st.st_size, "sha256": digest}
 
     def _fingerprint_remote(self, store: Any, key: str) -> State:
         obs = self._obstore()
@@ -360,16 +463,17 @@ class FileBackend(ObjectBackend):
         for field_name, label in (
             ("size", "size"),
             ("etag", "etag"),
-            ("mtime_ns", "mtime_ns"),
+            ("sha256", "sha256"),
             ("version_id", "version"),
         ):
             va, vb = a.get(field_name), b.get(field_name)
             if va != vb:
-                shown = (
-                    _human(int(vb) - int(va))
-                    if field_name == "size" and va is not None and vb is not None
-                    else f"{va} -> {vb}"
-                )
+                if field_name == "size" and va is not None and vb is not None:
+                    shown = _human(int(vb) - int(va))
+                elif field_name == "sha256":
+                    shown = f"{str(va)[:12]} -> {str(vb)[:12]}"
+                else:
+                    shown = f"{va} -> {vb}"
                 details.append(f"{label} {shown}")
         out.add(str(self._uri(locator)), "modified", ", ".join(details))
         return out

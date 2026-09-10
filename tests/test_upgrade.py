@@ -117,7 +117,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     plan = repo.plan_upgrade()
     ops = sorted((a.op, a.target) for a in plan.actions)
     ds = plan.context["dataset_id"]
-    assert plan.context["from"] == 1 and plan.context["to"] == 2
+    assert plan.context["from"] == 1 and plan.context["to"] == 3
     assert [a.op for a in plan.actions].count("rename-pin") == 2
     assert [a.op for a in plan.actions].count("rename-branch") == 2
     # jj's working-copy commit carries the manifests too (rewritten in place).
@@ -137,7 +137,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     report = repo.apply_upgrade(plan)
     assert not report.failed, report.failed
-    assert report.from_version == 1 and report.to_version == 2
+    assert report.from_version == 1 and report.to_version == 3
     assert report.vcs_commit
     assert len(report.rewritten_commits) == 2  # the working copy is not "rewritten"
     assert set(report.renamed_pins) == {f"tether.{pin1}", f"tether.{pin2}"}
@@ -160,7 +160,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     # The dataset opens normally now, at version 2 with the planned id.
     repo = Repo.find(vcs_root)
-    assert repo.config.version == 2 and repo.config.dataset_id == ds
+    assert repo.config.version == 3 and repo.config.dataset_id == ds
     assert read_config(vcs_root).dataset_id == ds
     assert repo.objects["db"].pin is not None
     assert repo.objects["db"].pin.ref == new2
@@ -193,7 +193,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     # Logged, not undoable, and a second upgrade has nothing to do.
     assert repo.ops()[0].command == "upgrade" and not repo.ops()[0].undoable
     again = repo.plan_upgrade()
-    assert again.is_empty and any("already at version 2" in n for n in again.notes)
+    assert again.is_empty and any("already at version 3" in n for n in again.notes)
     with pytest.raises(StalePlanError):
         repo.apply_upgrade(plan)  # made for version 1
 
@@ -252,8 +252,149 @@ def test_upgrade_stops_before_rewriting_history_when_a_rename_fails(
     assert plan2.context["dataset_id"] == plan.context["dataset_id"]  # same namespace
     assert any(f"pin tether.{pin1} is not in the store" in n for n in plan2.notes)
     report = repo.apply_upgrade(plan2)
-    assert not report.failed and report.to_version == 2
+    assert not report.failed and report.to_version == 3
     assert f"tether.{pin2}" not in sys_.tags
     assert set(report.renamed_pins) == {f"tether.{pin2}"}  # pin1 was done last time
     repo = Repo.find(vcs_root)
     assert all(r.status.value == "ok" for r in repo.verify(all_history=True).values())
+
+
+V2_CONFIG = """[tether]
+version = 2
+
+[dataset]
+id = "0a1b2c3d"
+
+[snapshot]
+auto = false
+
+[verify]
+on_status = false
+
+[new]
+auto_fork = false
+fork = "lazy"
+
+[defaults]
+write = "fork"
+file = "immutable"
+pin = "native"
+"""
+
+
+def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
+    """a8 recorded local files by mtime; the hash-based fingerprint must not read
+    an untouched file as an immutable-object change after upgrading."""
+    import hashlib
+    import json
+
+    from tether.manifest import listing_name, write_listing
+
+    data = vcs_root / "data"
+    data.mkdir()
+    (data / "a.bin").write_bytes(b"aaaa")
+    single = vcs_root / "single.bin"
+    single.write_bytes(b"1234")
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text("/workspace.toml\n/ops.jsonl\n")
+    (vcs_root / "tether.toml").write_text(V2_CONFIG)
+    st = single.stat()
+    write_object(
+        vcs_root,
+        ObjectManifest(
+            key="raw/single",
+            kind="file",
+            locator={"uri": str(single)},
+            policy=Policy(),
+            state={"type": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+            recoverable=False,
+        ),
+    )
+    a_st = (data / "a.bin").stat()
+    old_rows = {"a.bin": (f"{a_st.st_size}:{a_st.st_mtime_ns}", a_st.st_size)}
+    old_listing = "".join(
+        json.dumps({"p": p_, "k": k, "s": s_}, separators=(",", ":")) + "\n"
+        for p_, (k, s_) in old_rows.items()
+    )
+    old_digest = "0" * 32  # what a7 would have computed from the mtime tokens
+    write_object(
+        vcs_root,
+        ObjectManifest(
+            key="raw/dir",
+            kind="file",
+            locator={"uri": str(data)},
+            policy=Policy(),
+            state={"type": "dir", "count": 1, "size": 4, "digest": old_digest},
+            recoverable=False,
+        ),
+    )
+    write_listing(
+        vcs_root,
+        listing_name(
+            "file",
+            {"uri": str(data)},
+            {"type": "dir", "count": 1, "size": 4, "digest": old_digest},
+        ),
+        old_listing,
+    )
+    # A remote object keeps its etag state untouched by the migration.
+    write_object(
+        vcs_root,
+        ObjectManifest(
+            key="raw/remote",
+            kind="file",
+            locator={"uri": "s3://bucket/k"},
+            policy=Policy(),
+            state={"type": "object", "size": 1, "etag": "e"},
+            recoverable=False,
+        ),
+    )
+    vcs = detect_vcs(vcs_root)
+    vcs.commit(
+        [".tether/objects", ".tether/.gitignore", ".tether/listings", "tether.toml"],
+        "v2: files by mtime",
+    )
+
+    with pytest.raises(ConfigError, match="tether upgrade"):
+        Repo.find(vcs_root)
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan = repo.plan_upgrade()
+    assert plan.context["from"] == 2 and plan.context["to"] == 3
+    ops = [(a.op, a.key) for a in plan.actions]
+    assert ("refingerprint", "raw/single") in ops and (
+        "refingerprint",
+        "raw/dir",
+    ) in ops
+    assert not any(k == "raw/remote" for _op, k in ops)
+    assert not any(
+        a.op in ("rename-pin", "rename-branch", "rewrite-history") for a in plan.actions
+    )
+
+    report = repo.apply_upgrade(plan)
+    assert not report.failed and report.to_version == 3
+    assert sorted(report.refingerprinted) == ["raw/dir", "raw/single"]
+    assert report.vcs_commit
+
+    repo = Repo.find(vcs_root)
+    single_state = repo.objects["raw/single"].state
+    assert single_state == {
+        "type": "file",
+        "size": 4,
+        "sha256": hashlib.sha256(b"1234").hexdigest(),
+    }
+    dir_state = repo.objects["raw/dir"].state
+    assert dir_state is not None and dir_state["digest"] != old_digest
+    assert repo.objects["raw/remote"].state == {
+        "type": "object",
+        "size": 1,
+        "etag": "e",
+    }
+    # The thing the migration exists for: an untouched immutable file is clean
+    # even after its mtime moves (the remote object is skipped: no network here).
+    import os
+
+    os.utime(single, ns=(1, 1))
+    backend = repo.backend_for("file")
+    assert backend.fingerprint({"uri": str(single)}, None) == single_state
+    assert backend.fingerprint({"uri": str(data)}, None) == dir_state
+    assert repo.plan_upgrade().is_empty
