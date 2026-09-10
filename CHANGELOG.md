@@ -24,6 +24,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The write policy `track` is now `direct`** (`--write direct`,
+  `[defaults] write = "direct"`, `policy_write = "direct"` in registries): writes
+  land on the base branch instead of a forked working branch. Same behaviour,
+  new word -- `track` is about to mean something else (see follow/freeze).
+  The v3 migration (`tether upgrade`) rewrites `write = "track"` in the
+  working-tree manifests alongside the content-hash re-fingerprint. Manifests
+  in history keep the old spelling and stay readable.
 - **`tether status` is local by default.** It shows the last snapshot of each
   object's state with its age (`states as fingerprinted 2h ago; --snapshot to
   refresh`) and contacts nothing, so it is cheap enough to run as often as

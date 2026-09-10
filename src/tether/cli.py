@@ -202,7 +202,7 @@ def add(
         "fork",
         "--write",
         help="fork: `new` forks a per-workspace branch off the pin; "
-        "track: the working ref stays the base branch.",
+        "direct: writes land on the base branch itself (no working branch).",
     ),
     file: str = typer.Option(
         "immutable",
@@ -1177,6 +1177,7 @@ def upgrade(
                 "renamed_branches": report.renamed_branches,
                 "rewritten_commits": report.rewritten_commits,
                 "refingerprinted": report.refingerprinted,
+                "rewritten_manifests": report.rewritten_manifests,
                 "failed": report.failed,
                 "vcs_commit": report.vcs_commit,
             },
@@ -1198,6 +1199,8 @@ def upgrade(
             )
         for key in report.refingerprinted:
             typer.echo(f"  rehashed {key}")
+        for key in report.rewritten_manifests:
+            typer.echo(f"  rewrote  {key}")
         if report.vcs_commit:
             typer.echo(f"  commit  {report.vcs_commit[:12]}")
         for target, why in sorted(report.failed.items()):

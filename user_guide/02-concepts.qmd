@@ -164,7 +164,7 @@ new`'d to another revision -- the fork no longer starts where the dataset says
 it does: that object is *stale*. `status` names the stale objects and writable
 `open` refuses with `StaleWorkingCopyError` until you `tether new` again. It is
 per object and per workspace: your own commits never make you stale,
-registering or removing *other* objects changes nothing, and `track` objects
+registering or removing *other* objects changes nothing, and `direct` objects
 (which write to the base branch) are never stale. This is jj's
 stale-working-copy check applied to external branches.
 

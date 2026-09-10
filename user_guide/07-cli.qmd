@@ -9,7 +9,7 @@ codes, and environment.
 
 ```
 tether init [PATH]
-tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write fork|track] [--file immutable|versioned] [--pin native|record]
+tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write fork|direct] [--file immutable|versioned] [--pin native|record]
 tether remove KEY
 tether status [--snapshot | --no-snapshot]
 tether snapshot
@@ -87,7 +87,7 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | `--at ID` / `--pick` | `at` | detached base: snapshot id / version / commit / tag (all but file, neon); `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
 
-Policy options: `--write fork|track` (fork a per-workspace branch on `new`, or
+Policy options: `--write fork|direct` (fork a per-workspace branch on `new`, or
 stay on the base branch), `--file immutable|versioned` (`file` only: treat drift
 as an error, or record object-store version ids), `--pin native|record` (any
 backend: create a native ref per commit, or record the state only and fork
@@ -135,7 +135,7 @@ fingerprint regardless -- they must see the real state.
 ## What `new` does
 
 Reads the manifests at `REV` and, per Forkable object, records a working ref:
-the base branch for `write = "track"`, otherwise
+the base branch for `write = "direct"`, otherwise
 `tether.ws.<dataset>.<workspace>.<key-slug>-<key-hash>`.
 By default (`[new] fork = "lazy"`) that branch is *not created yet* -- the plan
 shows `defer-fork` and the first writable `open` creates it from the pin.
@@ -172,12 +172,12 @@ plan: commit (2 write(s))
                       db/metrics: unchanged
 ```
 
-Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`, `track` (new);
+Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`, `direct` (new);
 `fork`, `refuse` (restore); `delete-branch`, `keep-branch`, `delete-file`, `forget-vcs-workspace` (forget-workspace); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
 `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
 `add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
 (repair); `rename-pin`, `rename-branch`, `rewrite-history` (upgrade);
-`vcs-commit`. `track`, `defer-fork`, `reuse`, `refuse`, and `keep-branch` are
+`vcs-commit`. `direct`, `defer-fork`, `reuse`, `refuse`, and `keep-branch` are
 informational -- they write nothing.
 
 ## `gc` scope
@@ -309,7 +309,9 @@ The migrations so far: **v2** gave the dataset an id and namespaced every pin
 and working branch with it; **v3** re-fingerprints local `file` objects so
 their recorded state is a content hash rather than a size and mtime (it reads
 every file once; the stat cache remembers the answer), which is what keeps a
-byte-identical file from failing the `immutable` check after the upgrade.
+byte-identical file from failing the `immutable` check after the upgrade,
+and rewrites `write = "track"` to `write = "direct"` in the working-tree
+manifests (same meaning; the word `track` is no longer used for it).
 
 When a migration changes how native refs are named (v2 did: pins and working
 branches gained the dataset id), it renames them in every store *and*

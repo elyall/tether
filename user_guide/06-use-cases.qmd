@@ -120,13 +120,13 @@ tether promote
   fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK2M9A1B7C8D4E'}
   fast-forwarded features -> {'branch': 'main', 'version': 42}
   fast-forwarded code -> {'sha': '9e1c3a0b...'}
-  refused        db/metrics: Neon cannot promote a child branch into its parent; use `--write track` for branches that must receive writes, or copy the data with pg_dump/psql
+  refused        db/metrics: Neon cannot promote a child branch into its parent; use `--write direct` for branches that must receive writes, or copy the data with pg_dump/psql
 ```
 
 Icechunk, Lance, and git base branches moved to the forks because nothing else
 had touched them since the fork point (a fast-forward). Neon refuses -- there
 is no way to move `main` onto a child branch -- and says what to do instead:
-register the production database with `--write track` so the job writes on
+register the production database with `--write direct` so the job writes on
 `main` directly, or copy the rows across. That refusal is the honest answer,
 not a bug.
 
@@ -142,7 +142,7 @@ committed. That is the guard against losing an afternoon.
 ::: {.callout-note title="Rehearsing a database migration"}
 The same flow rehearses a schema change: `tether new`, run the migration
 against the Neon fork's URL, run the test suite, `tether diff main --content`
-to see the row counts move. Landing it is the `track` recipe above or applying
+to see the row counts move. Landing it is the `direct` recipe above or applying
 the migration to `main` yourself; the fork was the rehearsal.
 :::
 

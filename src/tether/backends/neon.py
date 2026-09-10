@@ -13,7 +13,7 @@ Model:
   first :meth:`open`.
 
 Neon cannot merge or promote a child into its parent, so production writes
-should use ``write = track`` on ``main``; child pins deepen the branch tree and
+should use ``write = direct`` on ``main``; child pins deepen the branch tree and
 can only be garbage-collected leaf-first.
 """
 
@@ -391,7 +391,7 @@ class NeonBackend(ObjectBackend):
         )
 
     PROMOTE_HINT = (
-        "Neon cannot promote a child branch into its parent; use `--write track` "
+        "Neon cannot promote a child branch into its parent; use `--write direct` "
         "for branches that must receive writes, or copy the data with pg_dump/psql"
     )
 

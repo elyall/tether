@@ -149,7 +149,7 @@ TABLES: dict[str, TableDef] = {
                 ("locator_json", "json", "Full locator"),
                 ("identity_json", "json", "Backend identity (what names the system)"),
                 ("identity_hash", "text", "blake2b of the canonical identity"),
-                ("policy_write", "text", "fork or track"),
+                ("policy_write", "text", "fork or direct"),
                 ("policy_file", "text", "immutable or versioned"),
                 ("policy_pin", "text", "native or record"),
                 ("state_json", "json", "Recorded state; null before the first commit"),

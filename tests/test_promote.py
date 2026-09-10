@@ -200,7 +200,7 @@ def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
     branches = store.system(system).branches
     tracked = f"sys-{uuid.uuid4().hex[:8]}"
     store.system(tracked)
-    repo.add("tracked", "memory", {"system": tracked}, policy=Policy(write="track"))
+    repo.add("tracked", "memory", {"system": tracked}, policy=Policy(write="direct"))
     wref = _forked(repo)
     store.write(system, wref, {"a": 1, "b": 2})
     c2 = repo.commit("fork work").vcs_commit  # pins the fork's state
@@ -210,7 +210,7 @@ def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
     plan = repo.plan_promote(rev=c2)
     ops = {a.key: a.op for a in plan.actions}
     assert ops == {"db": "fast-forward"}
-    assert any("tracked: write=track" in n for n in plan.notes)
+    assert any("tracked: write=direct" in n for n in plan.notes)
     assert "pin" in plan.actions[0].params["source"]
     report = repo.apply_promote(plan)
     pinned = repo.objects["db"].state

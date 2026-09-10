@@ -168,11 +168,11 @@ skill:
     - "A tether command exists where an operation has a VCS half and a store half (`commit`, `new`, `restore`, `abandon`, `forget-workspace`); everything that only touches files and history is jj/git's. Run `tether status` after any VCS operation that moved the working copy, and `tether new` before writing again."
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
-    - "Use `--write track` for production branches that must not be forked (e.g. Neon `main`)."
+    - "Use `--write direct` for production branches that must not be forked (e.g. Neon `main`)."
     - "`tether promote` only fast-forwards a base branch that is unchanged since the fork point; a moved base needs a backend with `MERGE` (lakeFS, Dolt, git) or a manual re-apply -- Icechunk/Iceberg refuse, Lance/Neon cannot promote at all."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on every command that makes them (`commit`, `new`, `gc`, `promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace`); save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Retire a losing workspace with `tether forget-workspace` *before* `tether abandon --gc` of its commit; the other order leaves branches holding unpinned writes that only `--force-prune` removes."
-    - "Datasets from before 0.1.0a8 need `tether upgrade` (`--dry-run` first): it renames every pin and branch into the dataset's namespace and rewrites history to match, so every clone must re-sync afterwards."
+    - "Datasets from before 0.1.0a8 need `tether upgrade` (`--dry-run` first): it renames every pin and branch into the dataset's namespace and rewrites history to match, so every clone must re-sync afterwards. The v3 migration (content-hashed file states, `write = \"direct\"`) touches only the working tree."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."
     - "For registries, run `tether publish` after each `tether commit` (or `tether export` for a file); join `objects.uri` to the catalog's URI column and `objects.commit_id` to whatever column records the VCS commit a job read. `tether import` only changes what is tracked; commit afterwards."

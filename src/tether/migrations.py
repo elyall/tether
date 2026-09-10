@@ -55,6 +55,7 @@ class UpgradeReport:
         renamed_branches: Old working branch -> new working branch.
         rewritten_commits: Old commit id -> new commit id (history rewrite).
         refingerprinted: Objects whose manifest state was recomputed (v3).
+        rewritten_manifests: Objects whose `write = "track"` was rewritten (v3).
         failed: Target -> why a step did not happen.
         vcs_commit: The commit that records the upgraded working tree.
         plan: The plan that was applied.
@@ -66,6 +67,7 @@ class UpgradeReport:
     renamed_branches: dict[str, str] = field(default_factory=dict)
     rewritten_commits: dict[str, str] = field(default_factory=dict)
     refingerprinted: list[str] = field(default_factory=list)
+    rewritten_manifests: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     vcs_commit: str | None = None
     plan: Plan | None = None
@@ -351,7 +353,7 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# v3: local file states are content hashes
+# v3: local file states are content hashes; the write policy `track` is `direct`
 # --------------------------------------------------------------------------- #
 def _local_file_objects(repo: Repo) -> list[ObjectManifest]:
     """Working-tree `file` objects on local disk with a committed state."""
@@ -364,7 +366,30 @@ def _local_file_objects(repo: Repo) -> list[ObjectManifest]:
     ]
 
 
+def _old_track_manifests(repo: Repo) -> list[str]:
+    """Keys of working-tree manifests still saying ``write = "track"``."""
+    from tether.manifest import objects_dir, relpath_to_key
+
+    root = objects_dir(repo.root)
+    return [
+        relpath_to_key(path.relative_to(root))
+        for path in sorted(root.rglob("*.toml"))
+        if 'write = "track"' in path.read_text(encoding="utf-8")
+    ]
+
+
 def _plan_v3(repo: Repo, plan: Plan) -> None:
+    for key in _old_track_manifests(repo):
+        plan.actions.append(
+            Action(
+                "rewrite-manifest",
+                key,
+                detail='write = "track" -> write = "direct" (same meaning: writes land '
+                "on the base branch; renamed so `track` cannot be read as "
+                '"follow upstream")',
+                params={"migration": 3},
+            )
+        )
     for m in _local_file_objects(repo):
         assert m.state is not None
         if m.state.get("type") == "file" and "sha256" in m.state:
@@ -383,24 +408,46 @@ def _plan_v3(repo: Repo, plan: Plan) -> None:
                 params={"migration": 3},
             )
         )
-    if not plan.actions or not any(
-        a.params.get("migration") == 3 for a in plan.actions
-    ):
-        plan.notes.append("v3: no local file objects to re-fingerprint")
+    if not any(a.params.get("migration") == 3 for a in plan.actions):
+        plan.notes.append(
+            "v3: no local file objects to re-fingerprint and no manifests using "
+            "the old write policy name"
+        )
     plan.actions.append(
         Action(
             "vcs-commit",
-            target="tether upgrade: v2 -> v3 (content-hashed file states)",
-            detail="manifests of local file objects get {size, sha256} states; "
-            "history keeps the old form (it recorded what the bytes were then, "
-            "not what they are now)",
+            target="tether upgrade: v2 -> v3 (content-hashed file states; write "
+            "policy track -> direct)",
+            detail="manifests of local file objects get {size, sha256} states and "
+            'write = "track" becomes write = "direct"; history keeps the old '
+            "forms (it recorded what the bytes were then, and the old spelling "
+            "stays readable)",
             params={"migration": 3},
         )
     )
 
 
 def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
-    from tether.manifest import listing_name, write_config, write_listing, write_object
+    from tether.manifest import (
+        listing_name,
+        objects_dir,
+        read_objects,
+        relpath_to_key,
+        write_config,
+        write_listing,
+        write_object,
+    )
+
+    root = objects_dir(repo.root)
+    for path in sorted(root.rglob("*.toml")):
+        text = path.read_text(encoding="utf-8")
+        if 'write = "track"' in text:
+            path.write_text(
+                text.replace('write = "track"', 'write = "direct"'), "utf-8"
+            )
+            report.rewritten_manifests.append(relpath_to_key(path.relative_to(root)))
+    if report.rewritten_manifests:
+        repo.objects = read_objects(repo.root)
 
     backend = repo.backend_for("file")
     for a in plan.actions:
@@ -444,7 +491,7 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         version=3,
-        title="Content-hash local file states",
+        title="Content-hash local file states; write policy track -> direct",
         plan=_plan_v3,
         apply=_apply_v3,
     ),

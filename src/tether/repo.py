@@ -727,7 +727,7 @@ class Repo:
         committed by this workspace at, `workspace.base_states[key]`. If the
         manifest in the working tree now records a different state -- someone
         else committed, or the VCS working copy moved to another commit -- the
-        fork no longer starts where the dataset says it does. `track` objects
+        fork no longer starts where the dataset says it does. `direct` objects
         write to the base branch and are never stale. Registering or removing
         *other* objects does not make a workspace stale.
         """
@@ -735,7 +735,7 @@ class Repo:
         keys = set(self.workspace.working_refs) | set(self.workspace.pending_forks)
         for key in sorted(keys):
             m = self.objects.get(key)
-            if m is None or m.policy.write == "track" or m.state is None:
+            if m is None or m.policy.write == "direct" or m.state is None:
                 continue
             expected = self.workspace.base_states.get(key)
             if expected is None or not self._same(m.kind, m.state, expected):
@@ -1266,7 +1266,7 @@ class Repo:
         """Compute what `new` would do without writing anywhere.
 
         Reads the manifests at `rev` (or the working tree) and decides per
-        `FORK`-capable object: `track` (use the base branch), `fork` now, or
+        `FORK`-capable object: `direct` (use the base branch), `fork` now, or
         `defer-fork` (create the branch on the first writable `open`), or skip
         (no committed state yet). `apply_new` moves the VCS working copy to
         `rev` first when one is given.
@@ -1313,10 +1313,10 @@ class Repo:
             eff = effective_capabilities(backend, m.locator, m.policy)
             if Capability.FORK not in eff:
                 continue
-            if m.policy.write == "track":
+            if m.policy.write == "direct":
                 branch = str(m.locator.get("branch", "main"))
                 plan.actions.append(
-                    Action("track", key, m.kind, target=branch, detail="write=track")
+                    Action("direct", key, m.kind, target=branch, detail="write=direct")
                 )
                 continue
             if m.state is None:
@@ -1461,7 +1461,7 @@ class Repo:
         reused: dict[str, State] = {}
         forks = {a.key: a for a in plan.actions if a.op == "fork"}
         for a in plan.actions:
-            if a.op == "track":
+            if a.op == "direct":
                 working_refs[a.key] = a.target
             elif a.op == "defer-fork":
                 pending[a.key] = a.target
@@ -1606,7 +1606,7 @@ class Repo:
         """Start working on top of `rev`: set up writable refs off its pins.
 
         Equivalent to `apply_new(plan_new(...))`. For every `FORK`-capable
-        object, `track` policy uses the locator's branch; otherwise a branch
+        object, `direct` policy uses the locator's branch; otherwise a branch
         named `working_ref_name(dataset_id, workspace_id, key)` is forked from the
         pin -- by default *lazily*, on the first writable `open` (see `plan_new`), or
         during `new` with `eager`. `pin = "record"` objects always fork now,
@@ -2320,8 +2320,8 @@ class Repo:
             if Capability.FORK not in eff:
                 plan.notes.append(f"{key}: not forkable; nothing to promote")
                 continue
-            if m.policy.write == "track":
-                plan.notes.append(f"{key}: write=track; already on the base branch")
+            if m.policy.write == "direct":
+                plan.notes.append(f"{key}: write=direct; already on the base branch")
                 continue
 
             base_locator = {k: v for k, v in m.locator.items() if k != "at"}
@@ -2601,8 +2601,8 @@ class Repo:
             refuse: str | None = None
             if m is None:
                 refuse = f"not registered at {rev}"
-            elif Capability.FORK not in eff or now.policy.write == "track":
-                refuse = "no working branch to restore (not Forkable, or write=track)"
+            elif Capability.FORK not in eff or now.policy.write == "direct":
+                refuse = "no working branch to restore (not Forkable, or write=direct)"
             elif m.state is None:
                 refuse = f"nothing committed at {rev}"
             elif m.pin is None and Capability.ADDRESSABLE not in eff:
@@ -3379,7 +3379,7 @@ class Repo:
 
         for key, ref in sorted(self.workspace.working_refs.items()):
             m = self.objects.get(key)
-            if m is None or m.policy.write == "track" or m.state is None:
+            if m is None or m.policy.write == "direct" or m.state is None:
                 continue
             backend = self.backend_for(m.kind)
             if Capability.FORK not in effective_capabilities(

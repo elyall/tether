@@ -51,7 +51,7 @@ auto_fork = false    # commit re-runs `new` from the pins it just created
 fork = "lazy"        # "lazy": create a working branch on first writable open; "eager": during `new`
 
 [defaults]           # policy for objects added without an explicit one
-write = "fork"       # fork | track
+write = "fork"       # fork | direct
 file = "immutable"   # immutable | versioned
 pin = "native"       # native | record
 
@@ -93,7 +93,7 @@ A `Policy` is stored per object (`[policy]` in its manifest) and set with the
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `write` | `fork` (default), `track` | `fork`: `new` creates a fresh per-workspace branch off the pin. `track`: the working ref is the locator's branch (e.g. `main`); use for production branches that must not be forked. |
+| `write` | `fork` (default), `direct` | `fork`: `new` creates a fresh per-workspace branch off the pin. `direct`: the working ref is the locator's branch (e.g. `main`); use for production branches that must not be forked. |
 | `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
 | `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming storage](05-reclaiming-storage.qmd). |
 

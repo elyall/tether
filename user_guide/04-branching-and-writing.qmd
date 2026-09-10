@@ -255,7 +255,7 @@ plan: promote (3 write(s))
         fast-forward  code          [git] main  main sha=41c0d9e2b7f3… -> sha=f01a9d3c2b7e… (base unchanged since fork)
         fast-forward  features      [lance] main  ...
         fast-forward  zarr/imaging  [icechunk] main  main snapshot_id=K3F9M2A1B7C8… -> snapshot_id=DEB4861EB388… (base unchanged since fork)
-              refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; use `--write track` ...
+              refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; use `--write direct` ...
 ```
 
 For each Forkable object tether compares the base branch to the **fork point**
@@ -293,7 +293,7 @@ Refusals are the honest part. Icechunk and Iceberg can fast-forward but not
 merge; if `main` moved under you, re-apply the writes on a fresh fork (or, for
 Icechunk, `reset_branch` when discarding `main`'s newer snapshots is what you
 mean). Lance cannot move a branch head at all yet. Neon cannot promote a child
-branch into its parent -- use `--write track` for databases that must receive
+branch into its parent -- use `--write direct` for databases that must receive
 writes, so the working ref *is* `main` and pins (child branches at an LSN)
 provide reproducibility.
 
@@ -350,16 +350,16 @@ git commit-ish); the ids `tether log` prints are always valid. Neon has no
 `at` (an LSN is only meaningful inside the history window) and files have
 no history to detach from.
 
-## `track` mode: write on the base branch
+## `direct` mode: write on the base branch
 
 Some objects should never be forked -- a production database, a shared
-`main` you deliberately advance. Register them with `--write track`:
+`main` you deliberately advance. Register them with `--write direct`:
 
 ```bash
-tether add db/prod --kind neon --project-id prj-9f2 --database prod --role app --write track
+tether add db/prod --kind neon --project-id prj-9f2 --database prod --role app --write direct
 ```
 
-For a `track` object, `tether new` sets the working ref to the locator's branch
+For a `direct` object, `tether new` sets the working ref to the locator's branch
 (`main`) instead of forking. `open` still returns a writable handle -- to
 `main` -- and `commit` still pins whatever state it finds there. You get
 reproducibility without branch sprawl, and the Neon quiescence check
@@ -477,5 +477,5 @@ write again; with `[new] fork = "eager"` it re-creates every branch.
   one, refusal with the system's recipe otherwise.
 - `commit` pins the forks' states and commits the manifests; `diff --content`
   shows what changed inside each system.
-- Promotion to `main` is per system and deliberate; `--write track` skips
+- Promotion to `main` is per system and deliberate; `--write direct` skips
   forking for objects that must stay on their base branch.

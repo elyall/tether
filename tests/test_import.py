@@ -222,7 +222,7 @@ def test_plan_and_apply_import(vcs_root: Path) -> None:
     repo.commit("baseline")
     committed = repo.objects["db/one"].state
     assert committed is not None
-    rows[0]["policy_write"] = "track"
+    rows[0]["policy_write"] = "direct"
     specs, _ = specs_from_rows(rows[:1], repo.config.defaults)
     plan = repo.plan_import(specs)
     assert [(a.op, a.key) for a in plan.actions] == [("update", "db/one")]
@@ -234,7 +234,7 @@ def test_plan_and_apply_import(vcs_root: Path) -> None:
     ]
     report = repo.apply_import(plan)
     assert report.updated == ["db/one"] and report.removed == ["db/two"]
-    assert repo.objects["db/one"].policy.write == "track"
+    assert repo.objects["db/one"].policy.write == "direct"
     assert repo.objects["db/one"].state == committed  # state kept
     assert "db/two" not in repo.objects
     assert not repo.is_stale()  # baseline refreshed

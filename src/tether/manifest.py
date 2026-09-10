@@ -40,7 +40,7 @@ CONFIG_VERSION = 3
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
 older datasets forward one migration at a time (see `tether.migrations`)."""
 
-WriteMode = Literal["fork", "track"]
+WriteMode = Literal["fork", "direct"]
 FileMode = Literal["immutable", "versioned"]
 PinMode = Literal["native", "record"]
 
@@ -217,9 +217,14 @@ class Policy:
     def from_dict(cls, data: dict[str, Any] | None) -> Policy:
         data = data or {}
         write = data.get("write", "fork")
+        if write == "track":
+            # The pre-0.1.0a9 spelling. Manifests in *history* keep it forever
+            # (gc, verify, export read them), so it stays readable; the v3
+            # migration rewrites the working tree.
+            write = "direct"
         file = data.get("file", "immutable")
         pin = data.get("pin", "native")
-        if write not in ("fork", "track"):
+        if write not in ("fork", "direct"):
             raise ConfigError(f"invalid policy.write: {write!r}")
         if file not in ("immutable", "versioned"):
             raise ConfigError(f"invalid policy.file: {file!r}")

@@ -62,7 +62,7 @@ deleted while its pins exist (`gc --prune-workspaces` and `forget-workspace`
 plan it as kept and name the pins), `gc` only drops leaf pins, and `new` onto
 a *different* pin forks a sibling rather than resetting a branch with children
 (`commit` then `new` reuses the branch, since it already sits at the pin).
-Neon cannot merge or promote a child into `main`; use `--write track` on
+Neon cannot merge or promote a child into `main`; use `--write direct` on
 `main` for production. `protected` needs a paid plan; branch quotas vary.
 
 **Neon fingerprint cost.** The LSN moves without user writes, so it is a

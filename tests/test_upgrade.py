@@ -398,3 +398,42 @@ def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
     assert backend.fingerprint({"uri": str(single)}, None) == single_state
     assert backend.fingerprint({"uri": str(data)}, None) == dir_state
     assert repo.plan_upgrade().is_empty
+
+
+def test_upgrade_v3_renames_the_write_policy(vcs_root: Path) -> None:
+    """The v3 migration also rewrites `write = "track"`; a v2 dataset with no
+    local files and one such manifest upgrades on that alone."""
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/cache\n"
+    )
+    (vcs_root / "tether.toml").write_text(V2_CONFIG)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    text = (
+        ObjectManifest(
+            key="db/prod",
+            kind="memory",
+            locator={"system": system, "branch": "main"},
+            policy=Policy(write="direct"),
+        )
+        .to_toml()
+        .replace('write = "direct"', 'write = "track"')
+    )
+    (vcs_root / ".tether" / "objects" / "db").mkdir()
+    (vcs_root / ".tether" / "objects" / "db" / "prod.toml").write_text(text)
+    vcs = detect_vcs(vcs_root)
+    vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v2: track")
+
+    with pytest.raises(ConfigError, match="tether upgrade"):
+        Repo.find(vcs_root)
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan = repo.plan_upgrade()
+    assert [(a.op, a.key) for a in plan.actions if a.op == "rewrite-manifest"] == [
+        ("rewrite-manifest", "db/prod")
+    ]
+    report = repo.apply_upgrade(plan)
+    assert report.rewritten_manifests == ["db/prod"] and report.to_version == 3
+    repo = Repo.find(vcs_root)
+    assert repo.objects["db/prod"].policy.write == "direct"
+    assert repo.plan_upgrade().is_empty

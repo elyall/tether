@@ -180,8 +180,8 @@ def test_stale_working_copy_blocks_writes(vcs_root: Path) -> None:
     # Track-policy objects write to the base and are never stale.
     tracked = f"sys-{uuid.uuid4().hex[:8]}"
     default_store().system(tracked)
-    reloaded.add("t", "memory", {"system": tracked}, policy=Policy(write="track"))
-    reloaded.commit("track")
+    reloaded.add("t", "memory", {"system": tracked}, policy=Policy(write="direct"))
+    reloaded.commit("direct")
     reloaded.new()
     _someone_else_commits(
         reloaded, "t", {"snapshot_id": default_store().write(tracked, "main", {"x": 1})}
@@ -205,8 +205,8 @@ def test_immutable_file_drift_is_error(vcs_root: Path) -> None:
 def test_track_mode_uses_base_branch(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     _mem_object(repo)
-    # Switch policy to track before committing.
-    repo.objects["db"].policy = Policy(write="track")
+    # Switch policy to direct before committing.
+    repo.objects["db"].policy = Policy(write="direct")
     repo.commit("baseline")
     repo.new()
     assert repo.workspace.working_refs["db"] == "main"
@@ -542,7 +542,7 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
         "tracked",
         "memory",
         {"system": tracked, "branch": "main"},
-        policy=Policy(write="track"),
+        policy=Policy(write="direct"),
     )
     plan = repo.plan_new()
     assert plan.is_empty  # nothing committed yet
@@ -551,7 +551,7 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
     res = repo.commit("baseline")
     plan = repo.plan_new()
     ops = {a.key: a.op for a in plan.actions}
-    assert ops == {"db": "defer-fork", "tracked": "track"}
+    assert ops == {"db": "defer-fork", "tracked": "direct"}
     assert plan.is_empty  # nothing is written by a lazy new
     assert (
         "first writable open" in next(a for a in plan.actions if a.key == "db").detail
@@ -559,7 +559,7 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
     plan_eager = repo.plan_new(eager=True)
     assert {a.key: a.op for a in plan_eager.actions} == {
         "db": "fork",
-        "tracked": "track",
+        "tracked": "direct",
     }
     assert not plan_eager.is_empty
     assert not any(
@@ -1191,13 +1191,13 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
                 "key": "db",
                 "kind": "memory",
                 "locator_json": {"system": system, "branch": "main"},
-                "policy_write": "track",
+                "policy_write": "direct",
             }
         ],
         repo.config.defaults,
     )
     repo.apply_import(repo.plan_import(specs))
-    assert repo.objects["db"].policy.write == "track"
+    assert repo.objects["db"].policy.write == "direct"
     repo.undo()
     assert repo.objects["db"] == manifest
 
@@ -1413,7 +1413,7 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     assert report.op.command == "restore" and report.complete
     assert store.resolve(system, wref) == s_scratch  # recorded head restored
 
-    # Not registered at that commit, or track policy: refused in the plan.
+    # Not registered at that commit, or direct policy: refused in the plan.
     with pytest.raises(ConfigError):
         repo.plan_restore(["nope"], c1)
     repo.add("late", "memory", {"system": _mem_object(repo, "tmp") and system})
