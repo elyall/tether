@@ -67,9 +67,31 @@ def _fail(exc: Exception) -> NoReturn:
     raise typer.Exit(1)
 
 
-def _snapshot_default(repo: Repo, no_snapshot: bool) -> bool:
-    """``[snapshot] auto`` sets the default; ``--no-snapshot`` always wins."""
-    return repo.config.snapshot_auto and not no_snapshot
+def _want_snapshot(repo: Repo, flag: bool | None) -> bool:
+    """``--snapshot`` / ``--no-snapshot`` win; otherwise ``[snapshot] auto``."""
+    return repo.config.snapshot_auto if flag is None else flag
+
+
+def _age(iso: str | None) -> str:
+    """``3m ago`` / ``2h ago`` / ``4d ago`` from an ISO timestamp."""
+    if not iso:
+        return "never"
+    from datetime import UTC, datetime
+
+    try:
+        then = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    seconds = max(0, int((datetime.now(UTC) - then).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 def _handle_address(handle: Handle) -> str:
@@ -103,6 +125,8 @@ def _status_payload(report: StatusReport) -> dict:
         "manifest_hash": report.manifest_hash,
         "stale": report.stale,
         "stale_keys": report.stale_keys,
+        "fresh": report.fresh,
+        "snapshot_at": report.snapshot_at,
         "vcs_drift": [
             {"op": d.op.id, "commit": d.commit, "referenced": d.referenced}
             for d in report.vcs_drift
@@ -339,19 +363,27 @@ def remove(key: str = typer.Argument(..., help="Object key.")) -> None:
 
 @app.command()
 def status(
-    no_snapshot: bool = typer.Option(
-        False, "--no-snapshot", help="Reuse the cached fingerprints; contact nothing."
+    snapshot: bool | None = typer.Option(
+        None,
+        "--snapshot/--no-snapshot",
+        help="Fingerprint every object now (--snapshot) or show the last snapshot "
+        "and its age (--no-snapshot). Default: [snapshot] auto in tether.toml "
+        "(off: show the last snapshot).",
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Fan out, fingerprint every object, and classify each one.
+    """Classify every object against its committed manifest.
 
-    Labels: new (never committed), modified, clean, error. `(STALE)` means
-    HEAD's manifests changed since this workspace forked; run `tether new`.
+    Local by default: the manifests, working refs, staleness, and the *last*
+    snapshot of each object's state, with its age. `--snapshot` fans out and
+    fingerprints every object first (one metadata round-trip per system; a
+    suspended Neon compute wakes). A workspace with no snapshot yet takes one.
+    Labels: new (never committed), modified, clean, error. `(STALE)` means the
+    committed state changed since this workspace forked; run `tether new`.
     """
     repo = _repo()
     try:
-        report = repo.status(do_snapshot=_snapshot_default(repo, no_snapshot))
+        report = repo.status(do_snapshot=_want_snapshot(repo, snapshot))
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -359,6 +391,12 @@ def status(
         return
     flag = f" (STALE: {', '.join(report.stale_keys)})" if report.stale else ""
     typer.echo(f"dataset {report.manifest_hash[:12]}{flag}")
+    if not report.fresh:
+        typer.secho(
+            f"  states as fingerprinted {_age(report.snapshot_at)}; "
+            "--snapshot to refresh",
+            fg=typer.colors.BRIGHT_BLACK,
+        )
     for drift in report.vcs_drift:
         typer.secho(f"  warning: {drift.message}", fg=typer.colors.YELLOW, err=True)
     for o in report.objects:
@@ -429,7 +467,9 @@ def commit(
         False, "--force", help="Skip quiescence checks (e.g. active Neon writers)."
     ),
     no_snapshot: bool = typer.Option(
-        False, "--no-snapshot", help="Commit the cached fingerprints as-is."
+        False,
+        "--no-snapshot",
+        help="Commit the cached fingerprints as-is instead of fingerprinting first.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be pinned/recorded; write nothing."
@@ -466,7 +506,7 @@ def commit(
                 message,
                 strict=strict,
                 force=force,
-                do_snapshot=_snapshot_default(repo, no_snapshot),
+                do_snapshot=not no_snapshot,  # commit always sees the real state
             )
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)

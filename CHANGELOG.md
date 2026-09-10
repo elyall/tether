@@ -24,6 +24,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`tether status` is local by default.** It shows the last snapshot of each
+  object's state with its age (`states as fingerprinted 2h ago; --snapshot to
+  refresh`) and contacts nothing, so it is cheap enough to run as often as
+  `jj status`. `--snapshot` fans out and fingerprints first; a workspace with
+  no snapshot yet always does. `[snapshot] auto` now defaults to `false`
+  (`true` restores fingerprinting on every `status`; `--no-snapshot` wins).
+  `commit` and `verify` always fingerprint regardless of the setting.
+  `StatusReport` gains `fresh` and `snapshot_at`, and the JSON output the same.
 - Local files are fingerprinted by **content hash**, not mtime. A file's state
   is `{size, sha256}` and a directory's digest is over its files' sha256s, so
   `touch`, `cp`, a fresh checkout, or an rsync no longer read as drift (an

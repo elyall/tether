@@ -142,7 +142,7 @@ def test_cli_log_and_pick(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert "  1. " in r.output and f"added db2 (memory) at {s1}" in r.output
 
 
-def test_cli_snapshot_auto_config(
+def test_cli_status_is_local_by_default(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from tether.manifest import RepoConfig
@@ -151,19 +151,50 @@ def test_cli_snapshot_auto_config(
     monkeypatch.chdir(vcs_root)
     system = f"sys-{uuid.uuid4().hex[:8]}"
     default_store().system(system)
-    repo = Repo.init(vcs_root, config=RepoConfig(snapshot_auto=False))
+    repo = Repo.init(vcs_root)
+    assert repo.config.snapshot_auto is False
     repo.add("db", "memory", {"system": system, "branch": "main"})
-    repo.commit("baseline")
-    default_store().write(system, "main", {"x": 1})
 
-    # snapshot.auto = false: status reuses the cached fingerprint -> clean.
+    # No snapshot yet: status takes one (there is nothing else to show).
     r = runner.invoke(app, ["status", "--json"])
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output)["objects"][0]["state"] == "clean"
-    # An explicit snapshot refreshes the cache and status sees the change.
-    assert runner.invoke(app, ["snapshot"]).exit_code == 0
+    first = json.loads(r.output)
+    assert first["fresh"] is True and first["snapshot_at"]
+    assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
+    default_store().write(system, "main", {"x": 1})
+
+    # Default: the cached states, with their age, and nothing contacted.
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, r.output
+    assert "states as fingerprinted" in r.output and "--snapshot to refresh" in r.output
     r = runner.invoke(app, ["status", "--json"])
+    payload = json.loads(r.output)
+    assert payload["fresh"] is False and payload["objects"][0]["state"] == "clean"
+    # --snapshot fans out and sees the change; the age line disappears.
+    r = runner.invoke(app, ["status", "--snapshot"])
+    assert r.exit_code == 0 and "modified" in r.output
+    assert "states as fingerprinted" not in r.output
+    r = runner.invoke(app, ["status", "--json"])  # cache refreshed by the fan-out
     assert json.loads(r.output)["objects"][0]["state"] == "modified"
+
+    # commit always fingerprints, whatever [snapshot] auto says.
+    default_store().write(system, "main", {"x": 2})
+    r = runner.invoke(app, ["commit", "-m", "second", "--json"])
+    assert r.exit_code == 0 and json.loads(r.output)["pinned"]["db"]
+
+    # [snapshot] auto = true restores fan-out on every status.
+    from tether.manifest import write_config
+
+    write_config(
+        vcs_root, RepoConfig(dataset_id=repo.config.dataset_id, snapshot_auto=True)
+    )
+    default_store().write(system, "main", {"x": 3})
+    r = runner.invoke(app, ["status", "--json"])
+    assert json.loads(r.output)["fresh"] is True
+    assert json.loads(r.output)["objects"][0]["state"] == "modified"
+    # ... and --no-snapshot still wins.
+    r = runner.invoke(app, ["status", "--no-snapshot", "--json"])
+    assert json.loads(r.output)["fresh"] is False
 
 
 def test_cli_plans_dry_run_and_from_plan(

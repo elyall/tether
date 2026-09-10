@@ -41,7 +41,7 @@ version = 3         # the format this tether writes; older datasets need `tether
 id = "0a1b2c3d"      # 8 hex chars; the namespace of this dataset's pins and branches in every store
 
 [snapshot]
-auto = true          # CLI status/commit fingerprint by default (--no-snapshot wins)
+auto = false         # `status` shows the last snapshot (--snapshot refreshes); true: fingerprint on every status
 
 [verify]
 on_status = false    # also run a cheap verify of each committed object in status
@@ -147,7 +147,7 @@ snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 `base_states` drive stale-working-copy detection (per object); `working_refs`
 are what `open` writes to; `pending_forks` are the branches `new` decided on but has not
 created (the first writable `open` moves an entry to `working_refs`);
-`last_snapshot` is what `--no-snapshot` reuses.
+`last_snapshot` (and `last_snapshot_at`) is what a plain `status` shows.
 
 ## Operation log
 

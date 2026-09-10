@@ -67,7 +67,7 @@ Neon cannot merge or promote a child into `main`; use `--write track` on
 
 **Neon fingerprint cost.** The LSN moves without user writes, so it is a
 volatile (address-only) key: only `next_xid` and the branch count as change.
-A snapshot may still wake a suspended compute; `--no-snapshot` skips it.
+A snapshot may still wake a suspended compute; a plain `status` does not fingerprint (`--snapshot`, `commit`, and `verify` do).
 
 **Files on unversioned storage** are Observed: detectably but not recoverably
 drifted. Bucket or container versioning promotes single objects to

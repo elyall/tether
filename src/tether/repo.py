@@ -191,6 +191,11 @@ class StatusReport:
     vcs_drift: list[VcsDrift] = field(default_factory=list)
     """Dataset commits this workspace made that left VCS history behind
     tether's back (see `Repo.vcs_drift`)."""
+    fresh: bool = True
+    """Whether the states were fingerprinted by this call (`False`: the cached
+    snapshot from `snapshot_at` was reused)."""
+    snapshot_at: str | None = None
+    """When the states shown were fingerprinted (UTC, ISO 8601)."""
 
 
 @dataclass
@@ -916,12 +921,14 @@ class Repo:
 
         Args:
             do_snapshot: Take a fresh `snapshot` first; otherwise reuse the
-                cached one (no external systems are contacted).
+                cached one (no external systems are contacted) and report its
+                age. A workspace with no snapshot yet always takes one.
 
         Returns:
             The report; `objects` are sorted by key.
         """
-        states = self.snapshot() if do_snapshot else self.workspace.last_snapshot
+        fresh = do_snapshot or not self.workspace.last_snapshot
+        states = self.snapshot() if fresh else self.workspace.last_snapshot
         objects: list[ObjectStatus] = []
         for key in sorted(self.objects):
             m = self.objects[key]
@@ -960,6 +967,8 @@ class Repo:
             objects=objects,
             stale_keys=stale,
             vcs_drift=self.vcs_drift(),
+            fresh=fresh,
+            snapshot_at=self.workspace.last_snapshot_at,
         )
 
     # -- commit ---------------------------------------------------------- #

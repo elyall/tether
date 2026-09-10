@@ -328,12 +328,12 @@ tether commit -m "Inventory as of 2026-09-01"
 Then schedule two commands:
 
 ```bash
-tether status          # fingerprints every object concurrently; exit 1 if an immutable file changed
+tether status --snapshot   # fingerprints every object concurrently; exit 1 if an immutable file changed
 tether verify          # exit 1 if a pin is missing or points elsewhere
 ```
 
-A raw file overwritten in place (`status` stops at the snapshot; the exit code
-is 1):
+A raw file overwritten in place -- its bytes, not its timestamp (`status`
+stops at the snapshot; the exit code is 1):
 
 ```
 error: immutable object 'raw/plate1' changed since it was committed; re-register with acceptance to record the new state

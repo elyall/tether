@@ -347,7 +347,11 @@ class RepoConfig:
     Pins are `tether.<id>.<hash>`, working branches `tether.ws.<id>.<ws>...`;
     `gc` only touches refs in this namespace. Committed, so all clones share
     it."""
-    snapshot_auto: bool = True
+    snapshot_auto: bool = False
+    """`[snapshot] auto`: whether the CLI's `status` fingerprints every object
+    on each run. Off by default: `status` shows the last snapshot and its age,
+    `status --snapshot` (or `tether snapshot`) refreshes. `commit` and `verify`
+    always fingerprint."""
     verify_on_status: bool = False
     new_auto_fork: bool = False
     new_fork: str = "lazy"
@@ -403,7 +407,7 @@ class RepoConfig:
         return cls(
             version=version,
             dataset_id=str(dataset_id) if is_dataset_id(dataset_id) else "",
-            snapshot_auto=bool(snapshot.get("auto", True)),
+            snapshot_auto=bool(snapshot.get("auto", False)),
             verify_on_status=bool(verify.get("on_status", False)),
             new_auto_fork=bool(new.get("auto_fork", False)),
             new_fork=fork,

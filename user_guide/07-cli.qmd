@@ -11,7 +11,7 @@ codes, and environment.
 tether init [PATH]
 tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write fork|track] [--file immutable|versioned] [--pin native|record]
 tether remove KEY
-tether status [--no-snapshot]
+tether status [--snapshot | --no-snapshot]
 tether snapshot
 tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-run | --plan FILE]
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
@@ -110,8 +110,15 @@ dataset 3f9c2a1b7d0e (STALE)
   run `tether new` before writing.
 - `verify=`: shown when `[verify] on_status = true`.
 
-`--no-snapshot` reuses the cached fingerprints (useful when a Neon compute is
-suspended); `[snapshot] auto = false` makes that the default.
+`status` is local by default: it shows the *last* snapshot of each object's
+state and prints its age (`states as fingerprinted 2h ago; --snapshot to
+refresh`), contacting nothing -- like `jj status`, it is meant to be cheap
+enough to run constantly. `--snapshot` fans out and fingerprints every object
+first: one metadata round-trip per system in parallel, so wall time is the
+slowest one (a suspended Neon compute has to wake). A workspace with no
+snapshot yet always takes one. `[snapshot] auto = true` makes every `status`
+fingerprint; `--no-snapshot` then wins. `commit` and `verify` always
+fingerprint regardless -- they must see the real state.
 
 ## What `commit` does
 
@@ -396,7 +403,7 @@ per-table counts.
 | Command | Shape |
 | --- | --- |
 | `init` | `{"root": "<absolute path>", "dataset_id": "<8 hex>"}` |
-| `status` | `{"manifest_hash", "stale", "stale_keys", "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}` |
+| `status` | `{"manifest_hash", "stale", "stale_keys", "fresh", "snapshot_at", "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "verify"}]}`; `fresh` is false when the cached snapshot from `snapshot_at` was shown |
 | `snapshot` | `{key: state}` |
 | `commit` | `{"vcs_commit": sha or null, "pinned": {key: ref or null}, "unrecoverable": [keys], "unchanged": [keys]}`; with `--dry-run`: the plan (below) |
 | `new` | `{"working_refs": {key: ref}, "pending_forks": {key: ref}, "fork_points": {key: state}}`; with `--dry-run`: the plan |

@@ -22,7 +22,7 @@ tether did to the *stores* to get there -- goes in tether's own
 | jj | tether |
 | --- | --- |
 | working copy | the VCS working dir; the committed thing is the manifests |
-| snapshot on every command | **snapshot**: concurrent fan-out fingerprint of every object |
+| snapshot on every command | **snapshot**: concurrent fan-out fingerprint of every object -- on `commit`, `verify`, `status --snapshot`, `tether snapshot`; a plain `status` shows the last one with its age, since a fan-out is a network round-trip per system rather than a stat walk |
 | `jj commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
 | `jj new <rev>` | checkout + **fork** decision per object: a writable branch created on the first write (`--eager`: now), or kept if it already sits at the pin |
 | stale working copy | per object: the committed state a fork was taken from is recorded; a manifest that now says otherwise refuses writes to that object until `new` |

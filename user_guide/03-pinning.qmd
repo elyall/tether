@@ -88,7 +88,7 @@ Some time later the imaging repository gets a new commit on `main` and the
 metrics database has been written to:
 
 ```bash
-tether status
+tether status --snapshot       # fingerprint now; plain `status` shows the last snapshot
 ```
 
 ```
@@ -197,10 +197,11 @@ objects with `--file versioned`, or put them in lakeFS.
 
 Because tether snapshots on every command, drift surfaces the next time you
 touch the dataset. The directory was registered with the default
-`--file immutable`, so if a file under `/mnt/instruments/plate1/` changes:
+`--file immutable`, so if a file under `/mnt/instruments/plate1/` changes
+(its *content* -- a `touch` is not a change):
 
 ```bash
-tether status
+tether status --snapshot
 ```
 
 ```

@@ -186,7 +186,7 @@ s3://bucket/features.lance#tether.ws.0a1b2c3d.7c1e0a4d.features@v4
 ## See what changed
 
 ```bash
-tether status
+tether status --snapshot
 ```
 
 ```

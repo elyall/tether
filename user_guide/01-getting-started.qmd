@@ -45,6 +45,11 @@ dataset 0f2e9c7a11b3
        new  zarr/imaging  [icechunk/forkable]
 ```
 
+That first `status` fingerprinted every object because the workspace had no
+snapshot yet. From now on `tether status` is local -- it shows the last
+snapshot with its age -- and `tether status --snapshot` (or `tether snapshot`)
+contacts the systems again. `commit` always fingerprints.
+
 `status` fanned out to all three systems concurrently, fingerprinted each one
 (a Neon LSN, an Icechunk snapshot id, an etag digest over the prefix), and
 classified them. Nothing has been recorded yet; `init` and `add` only wrote

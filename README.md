@@ -107,7 +107,7 @@ tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk
 tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
 tether add raw/plate1   --kind file s3://bucket/raw/plate1/
 
-tether status                       # fingerprint every object: clean / modified / drifted
+tether status                       # clean / modified / drifted per object (local; --snapshot re-fingerprints)
 tether commit -m "Baseline"         # pin each object natively, write the manifests, jj/git commit
 tether new main                     # start working: a writable branch per object, created on first write
 tether open db/metrics              # postgresql://... on this workspace's fork
