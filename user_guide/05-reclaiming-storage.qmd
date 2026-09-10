@@ -16,8 +16,9 @@ names it. Drop the commit and `gc` releases what it held.
 
 ## Preview before you write: plans
 
-`commit`, `new`, and `gc` are the commands that touch external systems. Each
-can be split into a read-only *plan* and an *apply*:
+Every command that touches an external system -- `commit`, `new`, `gc`,
+`promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace` --
+is a read-only *plan* followed by an *apply*:
 
 ```bash
 tether commit -m "Relabel plate1" --dry-run

@@ -24,8 +24,8 @@ tether did to the *stores* to get there -- goes in tether's own
 | working copy | the VCS working dir; the committed thing is the manifests |
 | snapshot on every command | **snapshot**: concurrent fan-out fingerprint of every object |
 | `jj commit` | **pin** fan-out + write state into manifests + `jj/git commit` |
-| `jj new <rev>` | checkout + **fork** fan-out (fresh writable branch per object) |
-| stale working copy | manifest hash recorded at fork differs from HEAD: refuse writes |
+| `jj new <rev>` | checkout + **fork** decision per object: a writable branch created on the first write (`--eager`: now), or kept if it already sits at the pin |
+| stale working copy | per object: the committed state a fork was taken from is recorded; a manifest that now says otherwise refuses writes to that object until `new` |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
 | `jj log` | **log**: an object's *native* history (snapshots / versions / commits); ids feed `add --at` |
 | detached head | an object registered `--at` a state that is not a branch head; `commit` pins it, `new` forks from it |
@@ -198,10 +198,45 @@ content-addressed under `.tether/listings/` and committed with the manifests
 (the same trick as DVC's `.dir` files). `diff --content` compares two listings
 file by file; `gc` prunes listings no manifest references.
 
+## jj or tether?
+
+Both work on the same repository, so the question comes up constantly. The
+rule: **an operation gets a tether command when it has two halves -- one in
+the VCS, one in the stores -- that must happen together.** If it only touches
+files and history, use jj or git directly; tether will notice what it needs
+to (a moved working copy makes objects stale, a vanished dataset commit shows
+in `status` and `ops`).
+
+| You want to | Use | Because |
+| --- | --- | --- |
+| record the dataset's state | `tether commit` | pins every object in its store, *then* commits the manifests |
+| start working on a revision | `tether new REV` | moves the working copy *and* decides a working branch per object |
+| look at another revision without writing | `jj new REV` / `jj edit` / `git switch` | nothing to fork; tether reports the objects as stale until you `tether new` |
+| reset one object to an older commit's state | `tether restore KEY --from REV` | the branch lives in a store |
+| drop dataset commits | `tether abandon REV` | the VCS drops them, descendants keep their manifests as snapshots, and the pins that just freed up are planned for `gc` |
+| edit history otherwise: describe, squash, rebase, split | jj / git | manifests are files; nothing in a store changes. Run `tether gc` afterwards if commits disappeared |
+| merge two dataset branches | jj / git merge | conflicts are per manifest file; then `tether verify` and `tether new` |
+| bookmarks, branches, push, fetch, review | jj / git | sharing is the VCS's |
+| open a second checkout | `jj workspace add` / `git worktree add` | the first tether command there starts its own tether workspace |
+| finish with a checkout | `tether forget-workspace` | the VCS forgets it *and* its working branches are deleted (safely) |
+| undo tether's last operation | `tether undo` (`--to ID` for several) | the VCS cannot see what tether did to the stores |
+| undo any other VCS operation | `jj undo` / the reflog | tether did nothing there; `status` warns if a dataset commit went with it |
+| a store lost a pin or branch a manifest names | `tether repair` | manifests are the source of truth |
+| reclaim storage | `tether gc` (after the VCS surgery above) | what history no longer names, the stores can release |
+
+Two habits keep the halves aligned: `tether status` after any VCS operation
+that moved the working copy or changed manifests, and `tether new` before
+writing again.
+
 ## What tether does not do
 
+- Sit in the data path. `open` hands back the system's native handle and
+  steps aside.
+- Run between commands. There is no daemon or watcher; every state is
+  compared when a command asks.
 - Cross-system atomicity. A commit records each object's state within a
   capture window; point-consistency requires quiesced writers.
 - Reimplement history, branching, or sharing. That is the VCS's job. tether's
-  own `undo` covers only what tether did to the stores.
+  own `ops` / `undo` / `repair` cover only what tether did to the stores --
+  the part the VCS cannot see.
 - Queries or transactions across systems.

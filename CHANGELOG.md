@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A **Caveats and Performance** guide, holding what the README used to: the
+  limits of the model (per-system promotion, no cross-system atomicity, what
+  `undo` can and cannot do, pin-then-commit ordering, lazy forks, storage
+  cost, secrets), the per-backend caveats, and the performance notes. The
+  backends guide gains the content-diff table. The README is a third of its
+  former length: capability table, prior art, install, a short quickstart,
+  layout, non-goals, development.
 - A **Use Cases** guide: seven scenarios -- reproduce an analysis months
   later; reprocess on a branch then land or discard it; A/B two candidates
   and keep one; catch drift nightly without a watcher; publish history to a

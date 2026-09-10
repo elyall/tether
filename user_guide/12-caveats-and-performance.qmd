@@ -1,0 +1,145 @@
+---
+title: "Caveats and Performance"
+---
+
+What to know before relying on tether in a pipeline: the limits that come from
+the model itself, the ones that come from each backend, and what the commands
+cost.
+
+## Limits of the model
+
+**Promotion is per system.** `tether promote` fast-forwards a base branch when
+it is unchanged since the fork point, uses the native three-way merge where one
+exists (git, lakeFS, Dolt), and otherwise refuses with the system's recipe:
+Icechunk and Iceberg cannot merge, Lance cannot move a branch head, Neon cannot
+promote a child branch. Landing the dataset commit in jj never merges data by
+itself.
+
+**No cross-system atomicity.** A commit records each object's state within a
+capture window; point-consistency requires quiesced writers. The Neon
+quiescence check helps -- `tether commit` refuses while writers are active
+unless `--force` -- but nothing coordinates two systems.
+
+**What `undo` can and cannot do.** `jj undo` / `git reset` move the
+manifests, never the stores. `tether undo` covers tether's side from its
+[operation log](02-concepts.qmd#the-operation-log): a commit is uncommitted
+(pins kept), a `new`'s branches are deleted or re-pointed to their recorded
+heads, a `gc`'s branches come back but its released pins do not (`tether
+repair` recreates them once a manifest references them again, while the
+snapshot still exists), a `promote` is refused with the previous heads printed.
+A branch that gained writes is never reset or deleted without `--discard` --
+by `undo` or by `new`.
+
+**Pin-then-commit ordering.** Pins are created before the VCS commit; if the
+commit never lands, the pins leak until `gc` (which scans VCS history plus the
+current workspace). Re-run `tether verify` after merging manifests across
+branches.
+
+**Forks are lazy.** `new` records which branch each object *will* get; the
+first writable `open` creates it from the pin. Workspaces that only read leave
+nothing behind, but that first `open` is a store write (no dry run; preview
+with `new --eager --dry-run`) and needs the pin to still exist. Objects with
+`--pin record` fork during `new` regardless: with no tag, the branch is the
+only thing keeping their snapshot or version from expiring. `--eager` or
+`[new] fork = "eager"` restores up-front branches.
+
+**Data history costs storage.** Every pin holds bytes in its system until the
+commit that names it is dropped and `gc` releases it. `--pin record` skips the
+native ref on any backend and forks from the recorded state instead, at the
+price of retention-bound recoverability. `commit`, `new`, `gc`, `promote`,
+`import`, `repair`, and `upgrade` all take `--dry-run` (and `--plan FILE` /
+`--from-plan FILE`) so store writes can be reviewed before they happen. See
+[Reclaiming Storage](05-reclaiming-storage.qmd).
+
+**Secrets** are never stored in manifests -- only credential *references* (an
+environment variable or secret name). Each backend reads the real credential
+from the environment.
+
+## Per backend
+
+**Neon lineage.** Pins are child branches, so a working branch cannot be
+deleted while its pins exist (`gc --prune-workspaces` and `forget-workspace`
+plan it as kept and name the pins), `gc` only drops leaf pins, and `new` onto
+a *different* pin forks a sibling rather than resetting a branch with children
+(`commit` then `new` reuses the branch, since it already sits at the pin).
+Neon cannot merge or promote a child into `main`; use `--write track` on
+`main` for production. `protected` needs a paid plan; branch quotas vary.
+
+**Neon fingerprint cost.** The LSN moves without user writes, so it is a
+volatile (address-only) key: only `next_xid` and the branch count as change.
+A snapshot may still wake a suspended compute; `--no-snapshot` skips it.
+
+**Files on unversioned storage** are Observed: detectably but not recoverably
+drifted. Bucket or container versioning promotes single objects to
+Addressable; prefixes stay Observed (tether does not record per-object version
+ids). Object-store credentials come from the environment; `[backends.file]
+storage_options` in `tether.toml` passes non-secret options (region, endpoint,
+account name) to obstore.
+
+**Iceberg catalog variance.** S3 Tables disables maintenance when user refs
+exist; use `--pin record` there (forks then come from the snapshot id, valid
+until snapshot expiry).
+
+**Delta has no refs.** Versions are recorded, not pinned; `VACUUM` (7-day
+default) and log retention (30 days) bound how long `open -r` works. A
+recreated table (new metadata id) verifies as drifted, not re-addressed.
+
+**Lance versions are branch-scoped.** State is `(branch, version)`; an
+untouched fork reports its parent's address so no-op commits stay no-ops.
+Lance refuses to delete a branch a tag references, so a pinned working branch
+outlives its workspace until `gc` drops the tag (a re-fork picks `name.2`).
+`--at N` is version `N` of the locator's branch.
+
+**lakeFS staging.** Uncommitted lakeFS changes are not in any commit; a dirty
+branch is reported in `status` and refused at `commit`. Pins are
+repository-wide: two objects with different prefixes on one branch describe
+the same commit and share a pin.
+
+**DuckLake attachments.** A DuckDB-file metadata catalog can be attached only
+once per process, so tether attaches per operation and a `DuckLakeHandle` owns
+its attachment: `close()` it (or use it as a context manager) before the next
+`status`, and do not hold your own writer connection open in the same process.
+Postgres, SQLite, and MySQL catalogs have no such limit. Snapshots are
+catalog-wide; `table` only scopes the handle. Put `CREATE SECRET` statements in
+`[backends.ducklake] init_sql` rather than credentials in the locator.
+
+**Dolt working sets.** Uncommitted changes on a branch are not in any commit;
+a dirty branch is reported and refused at `commit`. The password comes from
+`$DOLT_PASSWORD` (configurable via `[backends.dolt] password_env`), never the
+manifest. Dirty detection needs a Dolt with the `dirty` column on
+`dolt_branches`; older servers report clean.
+
+**git remotes.** With `remote` set, a pin is only a pin once the tag push
+succeeds: a failed push fails the `pin` and removes the local tag, and `unpin`
+deletes on the remote first.
+
+## Performance
+
+tether is an orchestrator; its cost is the network round-trips it fans out,
+not Python.
+
+**Fan-out uses threads, not asyncio.** Every backend SDK tether wraps (obstore,
+psycopg, pyiceberg, deltalake, lance, lakefs, duckdb, pymysql, `git`) is
+synchronous, the per-object Python work is microseconds, and a thread pool
+gives the same wall-clock concurrency without forcing an async protocol on
+backend authors. `snapshot`, `verify`, and the fork step of `new` all run
+concurrently.
+
+**History walks are batched.** `gc`, `verify --all-history`, `repair
+--all-history`, and `upgrade` stream every manifest at every commit through
+one `git cat-file --batch` process (jj repositories are git-backed, so the
+same plumbing applies), caching trees and blobs by object id and verifying
+each distinct `(system, state, pin)` once. On a repository with 200 commits
+and 5 objects this is ~20-40 ms end to end versus 6-12 s with one process per
+read. History *rewrites* (`upgrade`, `abandon`) only read and transform the
+commits that touch the dataset directory; under jj the rest are rebased, under
+git the answer is cached per subtree id.
+
+**Fingerprints are metadata-only.** Local trees use `os.scandir` (~4 us per
+file); a remote object is one `HEAD`; a prefix is one paged `LIST`.
+
+**Content diffs are metadata-only too.** Each backend reads manifests, logs,
+or catalog tables -- never data -- so `diff --content` costs about one
+fingerprint per changed object (two manifest reads for Icechunk and Lance, one
+log walk for Delta, one catalog query for DuckLake, one prolly-tree diff for
+Dolt). Two stored file listings diff in pure Python at ~50 ms per 100k paths.

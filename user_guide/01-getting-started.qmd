@@ -83,12 +83,13 @@ Where to next:
 
 ```
 <dataset-root>/
-  tether.toml                 # committed config
+  tether.toml                 # committed config, including the dataset id
   .tether/
-    .gitignore                # ignores workspace.toml
+    .gitignore                # ignores the two per-workspace files below
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed per-file listings for directory/prefix states
-    workspace.toml            # untracked: workspace id, working refs, cached snapshot
+    workspace.toml            # untracked: workspace id, working refs, base states, fork points
+    ops.jsonl                 # untracked: the operation log (`tether ops`, `undo`)
 ```
 
 Everything committed is small, text, and reviewable in `jj diff` / `git diff`.

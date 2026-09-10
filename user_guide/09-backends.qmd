@@ -62,6 +62,35 @@ native ref and `new` forks from it directly (Icechunk snapshot id, Lance
 `(branch, version)`, Iceberg snapshot id, lakeFS/Dolt/git commit, Neon LSN on
 the branch it was read from) for as long as the system still has that state.
 
+## Content diffs
+
+`tether diff A B` compares manifests: which objects were added, removed, or
+changed (with pin ids). `--content` additionally asks each changed object's
+backend for its *native* diff, using metadata only (no data is read), run
+concurrently across objects:
+
+| Kind | Unit | Source | Example detail |
+| --- | --- | --- | --- |
+| `file` (dir / prefix) | files | two stored listings (`.tether/listings/`) | `modified a.tif +4.0 KiB` |
+| `file` (object) | objects | recorded size / etag / version | `etag a -> b, version v1 -> v2` |
+| `git` | files | `git diff --name-status` + `--numstat` | `modified main.py +1 -1` |
+| `icechunk` | nodes | `Repository.diff(from, to)` | `modified /x 2 chunks` |
+| `iceberg` | snapshots | snapshot summaries along `b`'s ancestry to `a` | `append: +5 rows, +1 files` |
+| `delta` | commits | transaction-log `history()` in `(a, b]` | `WRITE: +2 rows, +1 files` |
+| `lance` | fragments | fragment ids / deletions / schema at both versions | `added fragment 1 +1 rows` |
+| `lakefs` | objects | server-side `Reference.diff`, scoped to `prefix` | `added raw/c.bin 1 B` |
+| `ducklake` | tables | snapshot `changes` + `ducklake_table_changes` | `modified main.t +5000 rows, -1 rows` |
+| `dolt` | tables | `dolt_diff_summary` + `dolt_diff_stat` | `modified t +6 rows` |
+| `neon` | -- | no native diff | |
+
+Directory and prefix states are digests, so the `file` backend hands the
+engine a per-file listing at commit time; it is stored content-addressed under
+`.tether/listings/` and committed with the manifests (the same trick as DVC's
+`.dir` files). Diffs of commits made before listings existed fall back to a
+count/size summary. `gc` removes listings no manifest references. Entries are
+capped at 2000 per object; counts are exact. See
+[Concepts: Listings](02-concepts.qmd#listings).
+
 ## `file` -- local paths and object stores
 
 Plain artifacts: a local file or directory, or an object / prefix in S3

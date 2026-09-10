@@ -2,6 +2,30 @@
 title: "Configuration"
 ---
 
+## Layout
+
+```
+<dataset-root>/
+  tether.toml                 # committed: tether.version (older -> `tether upgrade`), dataset.id (the namespace
+                              #   of this dataset's refs), snapshot.auto, verify.on_status, new.auto_fork,
+                              #   new.fork (lazy|eager), default policies, backend options, credential *references*
+  .tether/
+    .gitignore                # ignores workspace.toml and ops.jsonl
+    objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
+    listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
+                              #   states (so `diff --content` can compare them); pruned by gc
+    workspace.toml            # untracked: workspace_id, working refs, pending forks, base states, fork points, last snapshot
+    ops.jsonl                 # untracked: the operation log -- every store write, what it did, what it replaced
+```
+
+`pin_id = <dataset-id>.<blake2b(kind, locator identity, content state)[:16]>`;
+the native ref is `tether.<pin_id>`. Identical state yields the same pin within
+a dataset, so re-committing an unchanged object is a no-op and identical states
+dedupe to one pin; the dataset id keeps `gc` inside its own namespace when
+several datasets pin one store.
+
+## `tether.toml`
+
 A dataset's configuration is `tether.toml` at the dataset root, committed with
 the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
 default; a minimal file is `[tether] version = 2` plus the id `init` generates.
