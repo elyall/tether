@@ -123,3 +123,17 @@ python-version = "3.11"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.coverage.run]
+source = ["tether"]
+branch = true
+# The Click mirror of the CLI exists for the docs build, not for callers.
+omit = ["src/tether/_clickdoc.py"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "pragma: no cover",
+]
+

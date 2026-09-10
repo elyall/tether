@@ -62,4 +62,11 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras --python ${{ matrix.python-version }}
       - name: pytest
-        run: uv run pytest
+        run: uv run pytest --cov=tether --cov-report=xml --cov-report=term-missing:skip-covered
+      - name: Upload coverage
+        # One upload per matrix leg; Codecov merges them into a single report.
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: py${{ matrix.python-version }}
+          fail_ci_if_error: false

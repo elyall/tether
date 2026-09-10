@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/tether-vcs)](https://pypi.org/project/tether-vcs/)
 [![Python](https://img.shields.io/pypi/pyversions/tether-vcs)](https://pypi.org/project/tether-vcs/)
 [![CI](https://github.com/elyall/tether/actions/workflows/ci.yml/badge.svg)](https://github.com/elyall/tether/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/elyall/tether/graph/badge.svg)](https://codecov.io/gh/elyall/tether)
 [![Docs](https://github.com/elyall/tether/actions/workflows/docs.yml/badge.svg)](https://evanlyall.com/tether/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/elyall/tether/blob/main/LICENSE)
 
