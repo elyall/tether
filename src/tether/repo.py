@@ -702,7 +702,15 @@ class Repo:
     def _check_on_bookmark(self) -> None:
         """Refuse to commit when the VCS working copy has left the workspace's
         bookmark (a `jj new` / `git switch` behind tether's back): the commit
-        would move the bookmark somewhere its store branches do not describe."""
+        would move the bookmark somewhere its store branches do not describe.
+
+        Under jj the bookmark must be on the working copy or its parent: that
+        is where `new` and `commit` leave it, and the only place from which
+        jj's advance-bookmarks setting carries it onto the new commit inside
+        the commit's own operation (so `jj undo` reverts both). A bookmark
+        further back would need a second operation to catch up, and `jj undo`
+        would then strand the commit; refuse instead.
+        """
         b = self.workspace.bookmark
         if b is None:
             return
@@ -715,12 +723,27 @@ class Repo:
                 f"bookmark {b!r} no longer exists; `tether new -b {b}` recreates it, "
                 "`tether new NAME` joins another"
             )
-        ok = self.vcs.is_ancestor(b, "@") if self.vcs.kind == "jj" else here == [b]
-        if not ok:
+        if self.vcs.kind != "jj":
+            if here != [b]:
+                raise StaleWorkingCopyError(
+                    f"the working copy is not on bookmark {b!r} (it moved to "
+                    f"{', '.join(here) or 'no bookmark'}); run `tether new {b}` to "
+                    "return, or `tether new` to work where you are"
+                )
+            return
+        if not self.vcs.is_ancestor(b, "@"):
             raise StaleWorkingCopyError(
                 f"the working copy is not on bookmark {b!r} (it moved to "
                 f"{', '.join(here) or 'no bookmark'}); run `tether new {b}` to return, "
                 "or `tether new` to work where you are"
+            )
+        if self.vcs.is_ancestor(b, "@--"):
+            raise StaleWorkingCopyError(
+                f"bookmark {b!r} is behind the working copy's parent: there are "
+                "commits between them that the commit would skip over, and the "
+                f"bookmark could not move with it in one operation; run `tether new "
+                f"{b} --keep` to put the working copy back on the bookmark (its "
+                "branches are untouched)"
             )
 
     def _pick_bookmark(self, candidates: list[str]) -> str | None:
@@ -1264,8 +1287,8 @@ class Repo:
         fingerprints.
 
         An object's *position* is what the next commit records. It moves when
-        the object has a working ref (a forked branch, or the base branch for
-        `write = "direct"`), or when it has no committed state yet (the first
+        the object has a working ref (the bookmark's branch, or the upstream
+        branch on the trunk), or when it has no committed state yet (the first
         commit reads it). Everything else -- a committed object with no working
         branch, whether its system has branches or not -- stays at its previous
         pin or recorded state until `pull` takes what is there now, as an

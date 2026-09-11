@@ -54,9 +54,10 @@ tether did to the *stores* to get there -- goes in tether's own
 - **`commit` moves the bookmark.** jj bookmarks do not follow commits; git
   branches do. A tether bookmark must, or its store branches' heads would
   stop matching the commit that names them -- so `commit` advances it (in one
-  jj operation, so `jj undo` takes both back). `jj commit` also starts a fresh
-  change; `tether commit` leaves your branches where they are and the next
-  write lands on them.
+  jj operation, so `jj undo` takes both back; `commit` refuses when the
+  bookmark is not on the working copy or its parent, the one place jj can do
+  that). `jj commit` also starts a fresh change; `tether commit` leaves your
+  branches where they are and the next write lands on them.
 - **Snapshots are on demand.** Reading an object's state is a network
   round-trip, so `status` is local and `status --snapshot`, `verify`, and
   `commit` (for the bookmark's branches) fan out.

@@ -883,13 +883,15 @@ def test_partial_fork_records_what_succeeded(
 
 
 def test_two_datasets_sharing_a_store_do_not_gc_each_other(
-    vcs_root: Path, tmp_path: Path
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     """Dataset A's gc must not see dataset B's pins or working branches."""
     import subprocess
 
-    other_root = tmp_path / "other"
-    other_root.mkdir()
+    # B is its own repository. (Under jj `vcs_root` is the test's tmp_path, so
+    # a subdirectory of it would be *inside* A's working copy and B's commits
+    # would land in A's history, moving A's bookmarks -- a different test.)
+    other_root = tmp_path_factory.mktemp("other")
     subprocess.run(["git", "init", "-q", str(other_root)], check=True)
     subprocess.run(
         ["git", "-C", str(other_root), "config", "user.email", "t@example.com"],
@@ -1877,6 +1879,66 @@ def test_new_bookmark_never_reuses_another_bookmarks_branch(vcs_root: Path) -> N
     assert f"tether.ws.{ds}.scratch" not in heads.branches
     assert store.read(system, f"tether.ws.{ds}.sweep") == {"v": 2}
     assert repo.workspace.bookmark == "sweep"
+
+
+def test_jj_undo_after_commit_takes_the_bookmark_back_too(vcs_root: Path) -> None:
+    """`tether commit` moves the bookmark inside jj's commit operation, so a
+    plain `jj undo` reverts the commit and the bookmark together and the
+    workspace is coherent again (the next commit is not refused)."""
+    import shutil
+    import subprocess
+
+    if not (vcs_root / ".jj").exists():
+        pytest.skip("jj only")
+    if shutil.which("jj") is None:
+        pytest.skip("jj not on PATH")
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    c1 = repo.commit("baseline").vcs_commit
+    repo.new(bookmark="work", eager=True)
+    branch = f"tether.ws.{repo.config.dataset_id}.work"
+
+    store.write(system, branch, {"v": 2})
+    c2 = repo.commit("work").vcs_commit
+    assert c2 is not None and repo.vcs.bookmarks()["work"] == c2
+
+    subprocess.run(["jj", "undo"], cwd=vcs_root, check=True, capture_output=True)
+    fresh = Repo.find(vcs_root)
+    assert fresh.vcs.bookmarks()["work"] == c1
+    assert c2 not in fresh.vcs.history_revs()
+    # One operation undone leaves the working copy on the bookmark: commit again.
+    c3 = fresh.commit("work, again").vcs_commit
+    assert c3 is not None and fresh.vcs.bookmarks()["work"] == c3
+
+
+def test_commit_refuses_when_the_bookmark_is_behind_the_parent(
+    vcs_root: Path,
+) -> None:
+    """A `jj new` past an empty change leaves the bookmark two steps back;
+    advance-bookmarks would not carry it, so commit refuses rather than move
+    it in a second operation `jj undo` could not pair with the commit."""
+    if not (vcs_root / ".jj").exists():
+        pytest.skip("jj only")
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = f"tether.ws.{repo.config.dataset_id}.work"
+    store.write(system, branch, {"v": 2})
+
+    repo.vcs.new("@")  # an empty change between the bookmark and the working copy
+    with pytest.raises(StaleWorkingCopyError, match="behind the working copy's parent"):
+        repo.commit("skips a commit")
+    # `new NAME` would re-fork and refuse over the uncommitted write; `--keep`
+    # only moves the working copy back and leaves the branch as it is.
+    with pytest.raises(TetherError, match="has writes since"):
+        repo.new("work")
+    repo.new("work", keep=True)
+    c = repo.commit("work").vcs_commit
+    assert c is not None and repo.vcs.bookmarks()["work"] == c
+    assert store.read(system, branch) == {"v": 2}
 
 
 def test_new_refuses_when_the_bookmarks_branch_head_cannot_be_read(

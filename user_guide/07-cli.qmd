@@ -151,7 +151,11 @@ first). `undo` uncommits a pull like a commit.
 ## What `commit` does
 
 1. Refuse if the VCS working copy has left the bookmark (`status` says how to
-   return). Snapshot the bookmark's branches -- on the trunk every upstream
+   return). Under jj the bookmark must be on the working copy or its parent
+   -- where `new` and `commit` leave it; a `jj new` past an empty change puts
+   it a step further back, and `commit` refuses rather than move it in a
+   second operation (`tether new NAME --keep` brings the working copy back
+   without touching branches). Snapshot the bookmark's branches -- on the trunk every upstream
    branch, elsewhere the `tether.ws.*` branches that exist -- unless
    `--no-snapshot`. Objects with no branch keep their pin. Then quiescence
    checks for backends that need them (Neon refuses while writers are active;

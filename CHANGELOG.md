@@ -22,7 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     adopts HEAD's branch (git) and starts there. `WorkspaceState.bookmark`.
   - `commit` moves the bookmark onto the new commit -- in the same jj
     operation, so `jj undo` takes both back -- and refuses when the VCS
-    working copy has left the bookmark. `undo` of a `new -b` deletes the
+    working copy has left the bookmark, or (jj) when the bookmark is behind
+    the working copy's parent, the one position from which jj can carry it
+    along in that operation; `tether new NAME --keep` puts the working copy
+    back without touching branches. `undo` of a `new -b` deletes the
     bookmark it made. `abandon` moves a bookmark off a dropped commit to the
     nearest kept one instead of losing it (jj deletes them).
   - `tether pull [BOOKMARK]` is the fetch: it reads the heads of the bookmark's
