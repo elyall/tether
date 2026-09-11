@@ -75,19 +75,22 @@ init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
 
 ## Dataset id
 
-`init` generates `[dataset] id`, and because `tether.toml` is committed every
-clone shares it. Every native ref tether creates carries it -- pins are
-`tether.<id>.<hash>`, working branches `tether.ws.<id>.<workspace>.<key>` --
-and `gc` only considers refs in that namespace, so several datasets can share
-one Icechunk repo or Neon project without being able to delete each other's
-pins. Do not change it once anything has been committed: pins and branches
-made under the old id are no longer recognised as this dataset's (`gc` treats
-them as foreign and leaves them alone; `repair` recreates the pins the
-manifests name under the new id). Datasets from before the id existed get one
-from `tether upgrade`, which also renames their refs and rewrites history to
-match. A fork of the repository that is meant to become an *independent*
-dataset should change the id before it pins anything, or the two will share a
-namespace and be able to `gc` each other again.
+`init` generates `[dataset] id`; `tether.toml` is committed, so every clone
+shares it. Every native ref carries it -- pins `tether.<id>.<hash>`, working
+branches `tether.ws.<id>.<workspace>.<key>` -- and `gc` stays inside that
+namespace, so datasets can share one Icechunk repo or Neon project without
+being able to delete each other's pins. Datasets from before the id existed get
+one from `tether upgrade`.
+
+::: {.callout-warning}
+## Do not change the id after committing
+
+- Pins and branches made under the old id stop being this dataset's: `gc`
+  treats them as foreign and leaves them alone.
+- `repair` recreates the pins the manifests name, under the new id.
+- A fork meant to become an *independent* dataset must change the id *before*
+  it pins anything, or the two share a namespace and can `gc` each other.
+:::
 
 ## Policies
 
@@ -157,16 +160,11 @@ created (the first writable `open` moves an entry to `working_refs`);
 
 ## Operation log
 
-`.tether/ops.jsonl` sits next to `workspace.toml`, equally untracked and
-per workspace: one JSON object per line for every command that wrote to a
-store -- the plan it applied, what it did (`result`), and what it replaced
-(`pre`: the workspace state and VCS position before a `new`, the heads of
-branches it reset, the manifests an `import` rewrote, the base heads a
-`promote` moved from). `tether ops` reads it; `tether undo` reverses entries
-from it and appends its own entry plus a one-line *mark*
-(`{"undone": ID, "by": UNDO_ID}`) -- the file is only ever appended to, so an
-interruption loses at most the line being written. Deleting the file loses
-nothing but the ability to undo what came before.
+`.tether/ops.jsonl`, next to `workspace.toml` and equally untracked: one JSON
+line per store-writing command, appended only (an interruption loses at most
+the line being written). `tether ops` reads it, `tether undo` reverses from
+it. Deleting it loses nothing but the ability to undo what came before. What
+each entry holds: [Concepts](02-concepts.qmd#the-operation-log).
 
 ## Environment variables
 

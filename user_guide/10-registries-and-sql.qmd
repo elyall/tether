@@ -220,17 +220,13 @@ An unmodified export imports as an empty plan.
 
 ## Prior art
 
-This shape -- files are canonical, tables are a rebuildable index -- is how
-every comparable tool lands. [git-history](https://github.com/simonw/git-history)
-turns a file's git history into `commits` / `item` / `item_version` tables;
-[Quilt](https://docs.quilt.bio) keeps package manifests in S3 and maintains
-`package_revision` / `package_tag` / `package_manifest` / `package_entry`
-Iceberg tables beside them; [Dolt](https://www.dolthub.com) exposes its
-version graph as `dolt_log` / `dolt_history_*` system tables; Iceberg exposes
-`$snapshots` / `$history` / `$files`. [Kart](https://kartproject.org) is the
-model for the reverse direction: git holds the data, a SQL database is a
-working copy, and `kart commit` folds edits back -- which is what `import`
-followed by `tether commit` does for the object set. Even
-[Fossil](https://fossil-scm.org), a VCS stored *in* SQLite, treats its SQL
-metadata as a cache that `fossil rebuild` can recompute from the canonical
-artifacts.
+Files are canonical, tables are a rebuildable index -- every comparable tool
+lands on the same shape:
+
+| Tool | Shape | tether analogue |
+| --- | --- | --- |
+| [git-history](https://github.com/simonw/git-history) | a file's git history as `commits` / `item` / `item_version` tables | `export` / `publish` |
+| [Quilt](https://docs.quilt.bio) | package manifests in S3, Iceberg tables beside them | `export` / `publish` |
+| [Dolt](https://www.dolthub.com), Iceberg | version graph as `dolt_log` / `$snapshots` system tables | `export` / `publish` |
+| [Kart](https://kartproject.org) | git holds the data; a SQL database is the working copy; `kart commit` folds edits back | `import` then `tether commit` |
+| [Fossil](https://fossil-scm.org) | a VCS *in* SQLite whose SQL metadata `fossil rebuild` recomputes from the artifacts | the manifests are canonical |

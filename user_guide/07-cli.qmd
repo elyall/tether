@@ -210,19 +210,18 @@ references, forget the working refs of objects removed with `tether remove`
 (the native branch is left alone), and delete unreferenced
 `.tether/listings/` files. No branch is ever deleted by a plain `gc`.
 
-`--prune-workspaces` additionally lists each system's `tether.ws.*` branches
-and evaluates those belonging to workspaces that no longer exist -- every live
-jj workspace / git worktree of the repository is discovered and kept
-automatically; `--keep-workspace` (repeatable) adds ids that are live
-elsewhere -- plus this workspace's branches that no current object uses. A branch is
-`delete-branch` only if its head state is natively pinned by some commit or
-equals the base branch's head; a branch with unpinned writes, a pin-less
-(`--pin record`) state, or on a backend whose branches are the storage itself
-(Neon, `BRANCH_IS_STORAGE`) is `keep-branch`. `--force-prune` turns every
-`keep-branch` into a `delete-branch` marked `FORCED`; the data on those
-branches is lost. A branch the store will refuse to delete (Neon: pins hang
-off it) is planned as `keep-branch: cannot be deleted` with the reason, force
-or not, rather than failing when applied.
+`--prune-workspaces` also sweeps `tether.ws.*` branches: those of workspaces
+that no longer exist (every live jj workspace / git worktree is found and
+kept; `--keep-workspace ID` keeps others) and this workspace's branches that no
+current object uses. Each branch gets one verdict:
+
+| Branch head | Default | `--force-prune` |
+| --- | --- | --- |
+| natively pinned by some commit, or equal to the base branch | `delete-branch` | `delete-branch` |
+| holds unpinned writes | `keep-branch` | `delete-branch FORCED` (data lost) |
+| a `--pin record` state (no native ref) | `keep-branch` | `delete-branch FORCED` |
+| on a `BRANCH_IS_STORAGE` backend (Neon) | `keep-branch` | `delete-branch FORCED` |
+| the store refuses to delete it (Neon: pins hang off it) | `keep-branch: cannot be deleted` | same |
 
 Both sweeps stay inside this dataset's namespace: pins and branches whose
 name carries another dataset's id are counted in the plan's notes (`N pin(s)
@@ -241,17 +240,13 @@ the pins.
 
 ## `forget-workspace`
 
-`jj workspace forget` / `git worktree remove` and tether's half in one step.
-`tether forget-workspace [ID]` (default: this workspace) deletes that
-workspace's working branches under the `gc --prune-workspaces` rule -- head
-pinned or equal to the base is deleted, anything holding unpinned data is kept
-unless `--force-prune` -- removes its `workspace.toml` and `ops.jsonl` when
-its checkout is live, and has the VCS stop tracking the checkout (jj leaves
-the directory; git removes a clean non-main worktree and leaves the main
-one). Forgetting the *current* workspace means the next tether command here
-starts a fresh one; under jj the directory has no working copy until `jj undo`
-or a new `jj workspace add`, exactly as after `jj workspace forget`. Plan/apply;
-not undoable.
+`tether forget-workspace [ID]` (default: this one) is `jj workspace forget` /
+`git worktree remove` plus tether's half: that workspace's branches get the
+`gc --prune-workspaces` verdicts above, its `workspace.toml` and `ops.jsonl`
+are removed, and the VCS stops tracking the checkout. Forgetting the current
+workspace leaves the directory without a working copy under jj, as `jj
+workspace forget` does. Plan/apply; not undoable. Details and the
+retire-a-workspace flow: [Reclaiming storage](05-reclaiming-storage.qmd#working-branches-from-dead-workspaces).
 
 ## `ops`, `undo`, `repair`
 
@@ -271,36 +266,26 @@ undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
   restored   workspace.toml restored
 ```
 
-A `commit` is uncommitted (jj: squashed back into `@`; git: `reset --soft`)
-while it is still the working copy's parent -- the manifests become
-working-tree changes and the pins stay. A `new` or lazy fork has its branches
-deleted (created) or re-pointed to their recorded heads (reset), its
-`workspace.toml` restored, and the VCS working copy returned if it has not
-moved. A `gc` gets its deleted branches and listings back; its deleted pins
-cannot come back and are printed as `IRREVERSIBLE` (exit `2`). `import`,
-`add`, and `remove` restore the manifests. `promote` is refused with the
-previous base heads printed. A branch that gained writes since the operation
-is refused until you commit them or pass `--discard`.
+| Undoing a... | Does | Refused when |
+| --- | --- | --- |
+| `commit` | uncommits it (jj: squash into `@`; git: `reset --soft`); manifests become working-tree edits; pins stay | it is no longer the working copy's parent |
+| `new`, lazy fork | deletes branches it created, re-points branches it reset to their recorded heads, restores `workspace.toml`, returns the VCS working copy if it has not moved | a branch gained writes since (commit them, or `--discard`) |
+| `pull` | drops the held states | -- |
+| `gc` | recreates deleted branches and listings; deleted *pins* cannot come back and print as `IRREVERSIBLE` (exit `2`) | -- |
+| `add`, `remove`, `import` | restores the manifests | -- |
+| `promote` | -- | always; the previous base heads are printed |
+| `repair`, `upgrade`, `abandon`, `forget-workspace` | -- | always |
 
-When the VCS goes around tether -- `jj undo`, `jj abandon`, `git reset` on a
-dataset commit -- the op log still believes the commit exists. `tether status`
-prints a `warning:` line for each such commit, saying whether the pins it made
-are still named by the working tree (an undone commit leaves the manifests as
-uncommitted edits: still named, commit again) or not (an abandoned one reverts
-them: `gc` will release the pins, `repair` recreates them if the commit comes
-back), and `tether ops` flags the entry `(vcs commit gone)`. Removals tether
-did itself (`undo`, `abandon`) and rewrites it did itself (`abandon`,
-`upgrade`) are not reported.
+When the VCS goes around tether (`jj undo`, `jj abandon`, `git reset` on a
+dataset commit), `tether status` prints a `warning:` per vanished commit and
+`tether ops` flags its entry `(vcs commit gone)`. An *undone* commit leaves the
+manifests as uncommitted edits -- commit again; an *abandoned* one reverts
+them -- `gc` releases its pins, `repair` recreates them if it comes back.
 
-`tether undo --to OP_ID` is the closest thing to `jj op restore`: it undoes
-every operation newer than `OP_ID`, newest first, and reports each. jj's log
-stores whole views so a restore is one exact jump; tether's stores per-op
-deltas, so the walk reverses each step and stops -- keeping what it already
-reversed -- at the first operation that cannot be undone (`promote`,
-`upgrade`, `abandon`, or a branch with new writes and no `--discard`). A
-partial undo along the way (a `gc` whose pins are gone) is recorded and the
-walk continues, since older operations are unaffected. Exit code `2` unless
-every step was complete.
+`tether undo --to OP_ID` undoes every newer operation, newest first, and stops
+-- keeping what it already reversed -- at the first it cannot undo. It is not
+`jj op restore`: tether's log holds per-op deltas, not whole views, so the walk
+is stepwise. Exit `2` unless every step was complete.
 
 `tether repair` rebuilds what the manifests promise: a pin whose native ref is
 missing is recreated from the recorded state (if the store still has it); a
@@ -328,28 +313,25 @@ plan: upgrade (5 write(s))
                           dataset id: 0a1b2c3d
 ```
 
-The migrations so far: **v2** gave the dataset an id and namespaced every pin
-and working branch with it; **v3** re-fingerprints local `file` objects so
-their recorded state is a content hash rather than a size and mtime (it reads
-every file once; the stat cache remembers the answer), which is what keeps a
-byte-identical file from failing the `immutable` check after the upgrade,
-and rewrites `write = "track"` to `write = "direct"` in the working-tree
-manifests (same meaning; the word `track` is no longer used for it).
+| Version | Migration | Touches |
+| --- | --- | --- |
+| v2 | dataset id; every pin and working branch renamed into its namespace | stores and history |
+| v3 | local `file` states become content hashes (one read per file; the stat cache remembers); `write = "track"` becomes `write = "direct"` | working tree only |
 
-When a migration changes how native refs are named (v2 did: pins and working
-branches gained the dataset id), it renames them in every store *and*
-rewrites every historical manifest to the new names, because `gc` subtracts
-what history references from what the stores hold and both sides must agree.
-Rewriting history changes commit ids (jj keeps change ids; bookmarks and
-branches follow); every other clone has to re-sync afterwards -- in jj a
-`jj git fetch` shows the rewritten changes, in git it is a force-push and a
-reset on the other side. Under jj, commits marked immutable (pushed `main`)
-are only rewritten with `--ignore-immutable`. The upgrade fails *closed*: the
-dataset id is written first, then the store renames; if any rename fails the
-upgrade stops there -- history and the manifests still name the old refs, so
-nothing is orphaned -- and the error lists what failed. Fix the cause and run
-`tether upgrade` again: it continues under the same dataset id and skips the
-renames already made.
+A migration that renames native refs (v2) has to rewrite history too: `gc`
+subtracts what history references from what the stores hold, and both sides
+must agree. That means:
+
+- Commit ids change (jj keeps change ids; bookmarks and branches follow).
+  Every other clone re-syncs afterwards: `jj git fetch`, or a force-push and
+  reset under git.
+- Under jj, commits marked immutable (pushed `main`) are only rewritten with
+  `--ignore-immutable`.
+- It fails **closed**: the dataset id is written first, then the store
+  renames; the first failed rename stops the upgrade with history and
+  manifests still naming the old refs, so nothing is orphaned.
+- Re-running `tether upgrade` continues under the same id and skips the
+  renames already made.
 
 ## What `restore` does
 

@@ -65,17 +65,15 @@ records where each object *is between commits* -- its position:
 | not committed yet | -- | yes, once: the branch head or `--at` |
 
 The rule falls out of the table: `commit` contacts an object only if this
-checkout can have moved it. Everything else keeps its pin, the way a file you
-did not edit stays as the parent commit had it. Upstream moving on (a new
-Icechunk snapshot on `main`, a table version, a directory changed) is not a
-change to *your* position; `status --snapshot` reports it as `behind`, and
-`tether pull` is the explicit step that takes it -- fetch and rebase, for
-data. `commit --pull` or `[commit] pull = true` does that on every commit for
-datasets that should trail `main`.
+checkout can have moved it; everything else keeps its pin, the way a file you
+did not edit stays as the parent commit had it. The world moving on is not a
+change to *your* position -- `status --snapshot` shows it as `behind`, and
+`tether pull` takes it (fetch and rebase, for data; `[commit] pull = true` on
+every commit).
 
 `locator.branch` is the object's *upstream*: what the first commit pins,
 `pull` reads, `promote` lands on, and `direct` writes to. `--at` is only where
-a new object starts; after the first commit the pin is the position.
+a new object starts.
 
 ## State, pin, fork
 
@@ -196,28 +194,30 @@ aside. You read and write with the system's own library.
 
 ## Stale working copies
 
-For every working ref, the workspace remembers the committed state it was
-forked from (or last committed at by this workspace). If that object's
-manifest now records a different state -- a teammate committed, or you `jj
-new`'d to another revision -- the fork no longer starts where the dataset says
-it does: that object is *stale*. `status` names the stale objects and writable
-`open` refuses with `StaleWorkingCopyError` until you `tether new` again. It is
-per object and per workspace: your own commits never make you stale,
-registering or removing *other* objects changes nothing, and `direct` objects
-(which write to the base branch) are never stale. This is jj's
-stale-working-copy check applied to external branches.
+jj's stale-working-copy check, applied to external branches. The workspace
+remembers the committed state each working branch was forked from; if the
+manifest now says otherwise, the branch no longer starts where the dataset
+says it does and the object is *stale*: `status` names it, writable `open`
+refuses with `StaleWorkingCopyError`, and `tether new` clears it.
+
+- Stale: a teammate committed that object; you `jj new`'d to another revision.
+- Never stale: your own commits; other objects being added or removed;
+  `direct` objects (they write to the base branch).
 
 ## Content and address
 
-A state is a small dict, but its keys do two different jobs. *Content* keys
-say what the data is (an Icechunk snapshot id, a Neon `next_xid`, a git sha).
-*Address* keys say where to find or cut it and can move without the data
-changing: Neon's `lsn` advances on checkpoints, git's `change_id` exists only
-when jj is installed. Backends declare the address keys as `VOLATILE_KEYS`;
-drift detection, the unchanged check in `commit`, pin ids, listing names, and
-`promote`'s comparisons use only the content, while `open`, `pin`, and
-`verify` get the whole state. Iceberg's `metadata_location`, which changes on
-every table commit on any branch, is not in the state at all.
+A state's keys do two jobs:
+
+- **Content** keys say what the data is: an Icechunk snapshot id, a Neon
+  `next_xid`, a git sha. Equality (drift, `commit`'s unchanged check,
+  `promote`), pin ids, and listing names use only these.
+- **Address** keys say where to find or cut it and can move without the data
+  changing: Neon's `lsn` advances on checkpoints; git's `change_id` exists only
+  when jj is installed. Backends list them in `VOLATILE_KEYS`; `open`, `pin`,
+  and `verify` get the whole state.
+
+Iceberg's `metadata_location`, which changes on every table commit on any
+branch, is in neither: it is not part of the state at all.
 
 ## Drift
 

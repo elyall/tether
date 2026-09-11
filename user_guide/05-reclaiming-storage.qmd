@@ -221,25 +221,19 @@ Those are the system's operations, not tether's.
 
 ### Working branches from dead workspaces
 
-Every workspace gets its own `tether.ws.<dataset>.<workspace>.<key>-<hash>` branch per Forkable
-object it writes to (forks are lazy by default, so objects a workspace only
-read never got one; `--pin record` objects and `--eager` workspaces have a
-branch per object). Workspaces that were forgotten, machines that were wiped,
-and `jj workspace forget` all leave those branches behind -- each one holding
-whatever it wrote. By default `gc` never deletes a branch: it releases tether's
-*refs* (tags) and leaves data reclamation to each system, so a branch you
-forgot about is never the reason data disappears.
+Every workspace gets its own `tether.ws.<dataset>.<workspace>.<key>-<hash>`
+branch per Forkable object it writes to. Forgotten workspaces, wiped machines,
+and `jj workspace forget` leave those branches behind, each holding whatever
+it wrote. A plain `gc` never deletes a branch, so a branch you forgot about is
+never why data disappears.
 
-When you know which checkout you are done with, `tether forget-workspace [ID]`
-does the same evaluation for that one workspace right away, removes its state
-files, and forgets the jj workspace / removes the git worktree in the same
-step. `--prune-workspaces` is the sweep for everything that was left behind:
-it opts in. It lists the `tether.ws.*` branches in each
-system, skips the branches of every *live* checkout -- tether finds the jj
-workspaces (`jj workspace list` / `jj workspace root --name`) or git worktrees
-of the repository and reads their `.tether/workspace.toml` -- plus any id on
-the keep list, and for each remaining branch reads its head and asks whether
-deleting it would lose anything:
+Two commands retire them. `tether forget-workspace [ID]` is for a checkout you
+know you are done with: it judges that workspace's branches, removes its state
+files, and forgets the jj workspace / removes the git worktree in one step.
+`gc --prune-workspaces` is the sweep for everything left behind: it finds the
+`tether.ws.*` branches in each system, keeps those of every *live* checkout
+(discovered through `jj workspace list` / git worktrees) and of any id on the
+keep list, and judges the rest by their head:
 
 | Head state | Decision |
 | --- | --- |

@@ -330,7 +330,7 @@ tether pull zarr/imaging        # just this one
 ```
 
 ```
-  pulled zarr/imaging  snapshot_id=TYZ25DJEHXER -> snapshot_id=AZ1REKMV3HET
+  pulled zarr/imaging  snapshot_id=TYZ25DJEHXER -> snapshot_id=AZ1REKMV3HET  (pending working branch will fork from here, not the pin)
   up to date db/metrics
   skipped features: has working branch tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f; commit it, or `new --discard`
 commit to pin the pulled states; `tether undo` puts them back
@@ -338,16 +338,13 @@ commit to pin the pulled states; `tether undo` puts them back
 
 The pulled state is held in the workspace (`status` shows `pulled`) until the
 next `commit` pins it; a writable `open` before then forks from it, so "pull,
-then work on top" behaves like rebasing onto upstream. That includes a branch
-`new` has already decided but not yet created: `pull` says so (`pending
-working branch will fork from here, not the pin`). `pull` writes nothing to
-any store and `undo` reverses it. Objects with a working branch that *exists*
-are skipped: the branch is their position, and replacing it silently would
-discard writes -- commit them, or `new --discard` if they are disposable.
+then work on top" is a rebase onto upstream. `pull` writes nothing to any
+store; `undo` reverses it. An object whose working branch *exists* is skipped
+-- replacing the branch would discard its writes; commit them, or `new
+--discard`.
 
-If you want every commit to take upstream automatically -- a trail of where
-`main` was each night -- pass `commit --pull`, or set `[commit] pull = true`
-in `tether.toml`. The commit then says so (`pulled from main` in the plan).
+For a dataset that should trail `main` on every commit, pass `commit --pull`
+or set `[commit] pull = true`; the plan then says `pulled from main`.
 
 ### Starting from an older snapshot
 
@@ -391,14 +388,12 @@ Pick an entry (number or id) [1]: 2
 added zarr/imaging (icechunk) at TYZ25DJEHXERGBR7H3P0
 ```
 
-The first `commit` pins that state, `open` reads it read-only, and `new`
-forks from the pin -- exactly as if it had been the branch head. After that
-`at` has no further role: the pin is the position, and `tether pull` moves
-the object onto `main` (and drops `at` from the manifest). What `at` accepts
-is per system (snapshot id or tag; version or tag; commit hash or tag; any
-git commit-ish); the ids `tether log` prints are always valid. Neon has no
-`at` (an LSN is only meaningful inside the history window) and files have
-no history to start from.
+The first `commit` pins that state, `open` reads it, and `new` forks from the
+pin, exactly as if it had been the branch head. After that `at` has no further
+role: the pin is the position, and `tether pull` moves the object onto `main`
+(dropping `at` from the manifest). The ids `tether log` prints are always
+valid `at` values; the per-system forms are in the
+[backends guide](09-backends.qmd). Neon and files have no `at`.
 
 ## `direct` mode: write on the base branch
 
