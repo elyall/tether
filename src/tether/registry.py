@@ -31,7 +31,6 @@ CANONICAL_COLUMNS: tuple[str, ...] = (
     "kind",
     "uri",
     "locator_json",
-    "policy_write",
     "policy_file",
     "policy_pin",
     "at",
@@ -85,7 +84,6 @@ class ImportSpec:
             )
 
         policy_data = {
-            "write": row.get("policy_write") or defaults.write,
             "file": row.get("policy_file") or defaults.file,
             "pin": row.get("policy_pin") or defaults.pin,
         }

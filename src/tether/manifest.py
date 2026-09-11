@@ -40,7 +40,6 @@ CONFIG_VERSION = 3
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
 older datasets forward one migration at a time (see `tether.migrations`)."""
 
-WriteMode = Literal["fork", "direct"]
 FileMode = Literal["immutable", "versioned"]
 PinMode = Literal["native", "record"]
 
@@ -231,33 +230,30 @@ def _now() -> str:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Policy:
-    """Per-object behavioral knobs."""
+    """Per-object behavioral knobs.
 
-    write: WriteMode = "fork"
+    Whether writes fork a branch or land on the upstream branch is not a
+    policy any more: it is which bookmark the working copy is on (the trunk
+    writes upstream, anything else forks). Manifests from before that carry
+    a ``write`` key; it is read and ignored.
+    """
+
     file: FileMode = "immutable"
     pin: PinMode = "native"
 
     def to_dict(self) -> dict[str, str]:
-        return {"write": self.write, "file": self.file, "pin": self.pin}
+        return {"file": self.file, "pin": self.pin}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> Policy:
         data = data or {}
-        write = data.get("write", "fork")
-        if write == "track":
-            # The pre-0.1.0a9 spelling. Manifests in *history* keep it forever
-            # (gc, verify, export read them), so it stays readable; the v3
-            # migration rewrites the working tree.
-            write = "direct"
         file = data.get("file", "immutable")
         pin = data.get("pin", "native")
-        if write not in ("fork", "direct"):
-            raise ConfigError(f"invalid policy.write: {write!r}")
         if file not in ("immutable", "versioned"):
             raise ConfigError(f"invalid policy.file: {file!r}")
         if pin not in ("native", "record"):
             raise ConfigError(f"invalid policy.pin: {pin!r}")
-        return cls(write=write, file=file, pin=pin)
+        return cls(file=file, pin=pin)
 
 
 @dataclass(frozen=True)

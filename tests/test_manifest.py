@@ -24,7 +24,7 @@ def test_object_manifest_round_trip() -> None:
         key="zarr/imaging",
         kind="icechunk",
         locator={"uri": "s3://bucket/imaging.zarr.icechunk"},
-        policy=Policy(write="fork", file="immutable", pin="native"),
+        policy=Policy(file="immutable", pin="native"),
         state={"snapshot_id": "abc123"},
         pin=Pin("deadbeef1234", "tether.deadbeef1234"),
         captured_at="2026-09-04T00:00:00+00:00",
@@ -44,7 +44,7 @@ def test_repo_config_round_trip() -> None:
     c = RepoConfig(
         snapshot_auto=False,
         verify_on_status=True,
-        defaults=Policy(write="direct"),
+        defaults=Policy(pin="record"),
         vcs={"jj_path": "/x/jj"},
         backends={"neon": {"api_key_env": "NEON_API_KEY"}},
     )

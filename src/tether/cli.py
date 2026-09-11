@@ -208,12 +208,6 @@ def add(
     set_: list[str] = typer.Option(
         [], "--set", help="Extra locator field key=value (repeatable)."
     ),
-    write: str = typer.Option(
-        "fork",
-        "--write",
-        help="fork: `new` forks a per-workspace branch off the pin; "
-        "direct: writes land on the base branch itself (no working branch).",
-    ),
     file: str = typer.Option(
         "immutable",
         "--file",
@@ -273,7 +267,7 @@ def add(
         chosen = _pick_entry(entries)
         loc["at"] = chosen.id
     try:
-        policy = Policy.from_dict({"write": write, "file": file, "pin": pin})
+        policy = Policy.from_dict({"file": file, "pin": pin})
         repo.add(key, kind, loc, policy=policy)
     except TetherError as exc:
         _fail(exc)
@@ -377,12 +371,6 @@ def remove(key: str = typer.Argument(..., help="Object key.")) -> None:
 @app.command(name="set")
 def set_(
     keys: list[str] | None = typer.Argument(None, help="Objects to change; or --all."),
-    write: str | None = typer.Option(
-        None,
-        "--write",
-        help="fork | direct: fork a working branch on `new`, or "
-        "write on the base branch.",
-    ),
     file: str | None = typer.Option(
         None, "--file", help="immutable | versioned (file objects)."
     ),
@@ -394,10 +382,9 @@ def set_(
 ) -> None:
     """Change an object's policy in place.
 
-    Manifest-only, logged, undoable. Changing --write lets the workspace go of
-    the object's working branch (left for `gc --prune-workspaces`, never
-    deleted here); run `tether new` to decide the new one. Commit afterwards
-    to record the policy.
+    Manifest-only, logged, undoable. Commit afterwards to record the policy.
+    Whether writes fork or land upstream is not a policy: it is the bookmark
+    you are on (`tether new`).
     """
     repo = _repo()
     if all_:
@@ -405,7 +392,7 @@ def set_(
     if not keys:
         _fail(TetherError("give one or more KEY, or --all"))
     try:
-        report = repo.set_policy(keys, write=write, file=file, pin=pin)
+        report = repo.set_policy(keys, file=file, pin=pin)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -416,7 +403,6 @@ def set_(
                     for k, d in report.changed.items()
                 },
                 "unchanged": report.unchanged,
-                "released": report.released,
             },
             as_json=True,
         )
@@ -426,10 +412,6 @@ def set_(
         typer.echo(f"  set {key}  {fields}")
     for key in report.unchanged:
         typer.echo(f"  unchanged {key}")
-    for key, ref in report.released.items():
-        typer.echo(f"  released {key}  {ref} (left for gc --prune-workspaces)")
-    if report.released:
-        typer.echo("run `tether new` to decide the new working refs")
     if report.changed:
         typer.echo("commit to record the policy")
 
@@ -1733,8 +1715,8 @@ def import_(
 ) -> None:
     """[experimental] Register or sync objects from a registry query.
 
-    Rows carry `key`, `kind`, and any of `uri`, `locator_json`, `policy_write`,
-    `policy_file`, `policy_pin`, `at`; write the mapping from your registry's
+    Rows carry `key`, `kind`, and any of `uri`, `locator_json`, `policy_file`,
+    `policy_pin`, `at`; write the mapping from your registry's
     columns in SQL. Import changes what is tracked (manifests only) -- run
     `tether commit` afterwards to record states. `--sync` removes objects the
     source no longer lists.

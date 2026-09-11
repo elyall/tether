@@ -150,9 +150,6 @@ class SetReport:
     """key -> {field: (old, new)} for the policy fields that changed."""
     unchanged: list[str] = field(default_factory=list)
     """Objects whose policy already had the requested values."""
-    released: dict[str, str] = field(default_factory=dict)
-    """key -> working ref the workspace let go of because `write` changed; the
-    branch itself is left for `gc --prune-workspaces`. Run `new` to re-decide."""
 
 
 @dataclass
@@ -1023,30 +1020,25 @@ class Repo:
         self,
         keys: Sequence[str],
         *,
-        write: str | None = None,
         file: str | None = None,
         pin: str | None = None,
     ) -> SetReport:
         """Change policy fields of registered objects in place.
 
-        Manifest-only, logged, undoable. When `write` changes (`fork` <->
-        `direct`), the workspace lets go of the object's working ref -- the
-        old branch is where writes *used* to belong, so it is left for
-        `gc --prune-workspaces` (never deleted here) -- and the next `new`
-        decides the new one. `file` and `pin` changes keep the workspace's
-        hold. Commit afterwards to record the policy.
+        Manifest-only, logged, undoable. Commit afterwards to record the
+        policy. (Whether writes fork or land upstream is not a policy: it is
+        the bookmark the working copy is on.)
 
         Args:
             keys: Objects to change.
-            write: New write policy (`fork` | `direct`), or None to keep.
             file: New file policy (`immutable` | `versioned`), or None.
             pin: New pin policy (`native` | `record`), or None.
 
         Raises:
             ConfigError: Unknown key, an invalid value, or nothing to set.
         """
-        if write is None and file is None and pin is None:
-            raise ConfigError("nothing to set: pass --write, --file, or --pin")
+        if file is None and pin is None:
+            raise ConfigError("nothing to set: pass --file or --pin")
         report = SetReport()
         updates: dict[str, ObjectManifest] = {}
         for key in keys:
@@ -1055,14 +1047,13 @@ class Repo:
                 raise ConfigError(f"no such object: {key}")
             wanted = Policy.from_dict(
                 {
-                    "write": write if write is not None else m.policy.write,
                     "file": file if file is not None else m.policy.file,
                     "pin": pin if pin is not None else m.policy.pin,
                 }
             )
             diff = {
                 f: (getattr(m.policy, f), getattr(wanted, f))
-                for f in ("write", "file", "pin")
+                for f in ("file", "pin")
                 if getattr(m.policy, f) != getattr(wanted, f)
             }
             if not diff:
@@ -1079,14 +1070,6 @@ class Repo:
         for key, updated in updates.items():
             write_object(self.root, updated)
             self.objects[key] = updated
-            if "write" in report.changed[key]:
-                ref = self.workspace.working_refs.get(key) or (
-                    self.workspace.pending_forks.get(key)
-                )
-                if ref is not None:
-                    report.released[key] = ref
-                self._forget_working_state(key)
-        write_workspace(self.root, self.workspace)
         self._log_op(
             "set",
             result={
@@ -1094,7 +1077,6 @@ class Repo:
                     k: {f: list(v) for f, v in d.items()}
                     for k, d in report.changed.items()
                 },
-                "released": dict(report.released),
             },
             pre=pre,
         )
@@ -4164,7 +4146,7 @@ class Repo:
         """Register / update / remove objects from canonical rows in one step.
 
         Rows carry `key`, `kind`, and any of `uri`, `locator_json`,
-        `policy_write`, `policy_file`, `policy_pin`, `at` (see
+        `policy_file`, `policy_pin`, `at` (see
         `tether.registry.CANONICAL_COLUMNS`); missing policy fields take
         `config.defaults`. Equivalent to `apply_import(plan_import(...))`.
         """

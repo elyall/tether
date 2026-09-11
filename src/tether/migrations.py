@@ -56,7 +56,7 @@ class UpgradeReport:
         renamed_branches: Old working branch -> new working branch.
         rewritten_commits: Old commit id -> new commit id (history rewrite).
         refingerprinted: Objects whose manifest state was recomputed (v3).
-        rewritten_manifests: Objects whose `write = "track"` was rewritten (v3).
+        rewritten_manifests: Objects whose manifest lost its write policy (v3).
         failed: Target -> why a step did not happen.
         vcs_commit: The commit that records the upgraded working tree.
         plan: The plan that was applied.
@@ -372,7 +372,7 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# v3: local file states are content hashes; the write policy `track` is `direct`
+# v3: local file states are content hashes; the write policy is gone
 # --------------------------------------------------------------------------- #
 def _local_file_objects(repo: Repo) -> list[ObjectManifest]:
     """Working-tree `file` objects on local disk with a committed state."""
@@ -385,27 +385,30 @@ def _local_file_objects(repo: Repo) -> list[ObjectManifest]:
     ]
 
 
-def _old_track_manifests(repo: Repo) -> list[str]:
-    """Keys of working-tree manifests still saying ``write = "track"``."""
+_WRITE_LINE = re.compile(r'^write = "(?:fork|track|direct)"\n', re.M)
+
+
+def _manifests_with_write(repo: Repo) -> list[str]:
+    """Keys of working-tree manifests that still carry a ``write`` policy."""
     from tether.manifest import objects_dir, relpath_to_key
 
     root = objects_dir(repo.root)
     return [
         relpath_to_key(path.relative_to(root))
         for path in sorted(root.rglob("*.toml"))
-        if 'write = "track"' in path.read_text(encoding="utf-8")
+        if _WRITE_LINE.search(path.read_text(encoding="utf-8"))
     ]
 
 
 def _plan_v3(repo: Repo, plan: Plan) -> None:
-    for key in _old_track_manifests(repo):
+    for key in _manifests_with_write(repo):
         plan.actions.append(
             Action(
                 "rewrite-manifest",
                 key,
-                detail='write = "track" -> write = "direct" (same meaning: writes land '
-                "on the base branch; renamed so `track` cannot be read as "
-                '"follow upstream")',
+                detail="drop the write policy: whether writes fork or land upstream "
+                "is now the bookmark the working copy is on, not a per-object "
+                "setting",
                 params={"migration": 3},
             )
         )
@@ -429,18 +432,17 @@ def _plan_v3(repo: Repo, plan: Plan) -> None:
         )
     if not any(a.params.get("migration") == 3 for a in plan.actions):
         plan.notes.append(
-            "v3: no local file objects to re-fingerprint and no manifests using "
-            "the old write policy name"
+            "v3: no local file objects to re-fingerprint and no manifests carrying "
+            "a write policy"
         )
     plan.actions.append(
         Action(
             "vcs-commit",
-            target="tether upgrade: v2 -> v3 (content-hashed file states; write "
-            "policy track -> direct)",
+            target="tether upgrade: v2 -> v3 (content-hashed file states; no write "
+            "policy)",
             detail="manifests of local file objects get {size, sha256} states and "
-            'write = "track" becomes write = "direct"; history keeps the old '
-            "forms (it recorded what the bytes were then, and the old spelling "
-            "stays readable)",
+            "the write policy line goes; history keeps the old forms (it recorded "
+            "what the bytes were then, and a write key is read and ignored)",
             params={"migration": 3},
         )
     )
@@ -460,10 +462,8 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     root = objects_dir(repo.root)
     for path in sorted(root.rglob("*.toml")):
         text = path.read_text(encoding="utf-8")
-        if 'write = "track"' in text:
-            path.write_text(
-                text.replace('write = "track"', 'write = "direct"'), "utf-8"
-            )
+        if _WRITE_LINE.search(text):
+            path.write_text(_WRITE_LINE.sub("", text), "utf-8")
             report.rewritten_manifests.append(relpath_to_key(path.relative_to(root)))
     if report.rewritten_manifests:
         repo.objects = read_objects(repo.root)
@@ -510,7 +510,7 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         version=3,
-        title="Content-hash local file states; write policy track -> direct",
+        title="Content-hash local file states; drop the write policy",
         plan=_plan_v3,
         apply=_apply_v3,
     ),

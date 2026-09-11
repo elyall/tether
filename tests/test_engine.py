@@ -539,7 +539,6 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
         "tracked",
         "memory",
         {"system": tracked, "branch": "main"},
-        policy=Policy(write="direct"),
     )
     plan = repo.plan_new(bookmark="work")
     assert plan.is_empty  # nothing committed yet
@@ -1218,13 +1217,13 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
                 "key": "db",
                 "kind": "memory",
                 "locator_json": {"system": system, "branch": "main"},
-                "policy_write": "direct",
+                "policy_pin": "record",
             }
         ],
         repo.config.defaults,
     )
     repo.apply_import(repo.plan_import(specs))
-    assert repo.objects["db"].policy.write == "direct"
+    assert repo.objects["db"].policy.pin == "record"
     repo.undo()
     assert repo.objects["db"] == manifest
 
@@ -1448,7 +1447,7 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     assert report.op.command == "restore" and report.complete
     assert store.resolve(system, wref) == s_scratch  # recorded head restored
 
-    # Not registered at that commit, or direct policy: refused in the plan.
+    # Not registered at that commit, or on the trunk: refused in the plan.
     with pytest.raises(ConfigError):
         repo.plan_restore(["nope"], c1)
     repo.add("late", "memory", {"system": _mem_object(repo, "tmp") and system})
@@ -1764,9 +1763,7 @@ def test_set_policy_changes_file_and_pin_in_place(vcs_root: Path) -> None:
 
     # pin changes keep the workspace's hold; undo restores the manifest.
     report = repo.set_policy(["db"], pin="record")
-    assert (
-        report.changed == {"db": {"pin": ("native", "record")}} and not report.released
-    )
+    assert report.changed == {"db": {"pin": ("native", "record")}}
     assert repo.workspace.working_refs["db"] == branch
     assert Repo.find(vcs_root).objects["db"].policy.pin == "record"
     assert (

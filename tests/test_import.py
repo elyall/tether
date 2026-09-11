@@ -37,7 +37,7 @@ def test_import_spec_validation() -> None:
         defaults,
     )
     assert spec.locator == {"uri": "mem://a"} and spec.policy.pin == "record"
-    assert spec.policy.write == "fork"  # default filled in
+    assert spec.policy.file == "immutable"  # default filled in
 
     # locator_json wins over uri when both name `uri`; `at` lands in the locator.
     spec = ImportSpec.from_row(
@@ -64,7 +64,7 @@ def test_import_spec_validation() -> None:
         {"key": "../k", "kind": "memory", "uri": "u"},  # unsafe key
         {"key": "k", "kind": "memory"},  # no locator
         {"key": "k", "kind": "memory", "locator_json": "[1]"},  # not an object
-        {"key": "k", "kind": "memory", "uri": "u", "policy_write": "maybe"},
+        {"key": "k", "kind": "memory", "uri": "u", "policy_pin": "maybe"},
     ):
         with pytest.raises(ConfigError):
             ImportSpec.from_row(bad, defaults)
@@ -164,10 +164,10 @@ def test_publish_then_import_from_postgres(vcs_root: Path, pg_dsn: str) -> None:
         conn.execute("UPDATE tether.objects SET policy_pin = 'record' WHERE key = 'db'")
         conn.execute(
             "CREATE TABLE registry AS SELECT key, kind, locator_json, "
-            "policy_write, policy_file, policy_pin FROM tether.objects_head"
+            "policy_file, policy_pin FROM tether.objects_head"
         )
         conn.execute(
-            "INSERT INTO registry VALUES ('db/two', 'memory', %s::jsonb, 'fork', "
+            "INSERT INTO registry VALUES ('db/two', 'memory', %s::jsonb, "
             "'immutable', 'native')",
             (json.dumps({"system": _system(), "branch": "main"}),),
         )
@@ -222,7 +222,7 @@ def test_plan_and_apply_import(vcs_root: Path) -> None:
     repo.commit("baseline")
     committed = repo.objects["db/one"].state
     assert committed is not None
-    rows[0]["policy_write"] = "direct"
+    rows[0]["policy_pin"] = "record"
     specs, _ = specs_from_rows(rows[:1], repo.config.defaults)
     plan = repo.plan_import(specs)
     assert [(a.op, a.key) for a in plan.actions] == [("update", "db/one")]
@@ -234,7 +234,7 @@ def test_plan_and_apply_import(vcs_root: Path) -> None:
     ]
     report = repo.apply_import(plan)
     assert report.updated == ["db/one"] and report.removed == ["db/two"]
-    assert repo.objects["db/one"].policy.write == "direct"
+    assert repo.objects["db/one"].policy.pin == "record"
     assert repo.objects["db/one"].state == committed  # state kept
     assert "db/two" not in repo.objects
     assert not repo.is_stale()  # baseline refreshed
@@ -296,8 +296,7 @@ def test_export_import_round_trip(vcs_root: Path, tmp_path: Path) -> None:
     rows = read_source(
         str(db),
         query=(
-            "SELECT key, kind, locator_json, policy_write, policy_file, policy_pin "
-            "FROM objects_head"
+            "SELECT key, kind, locator_json, policy_file, policy_pin FROM objects_head"
         ),
     )
     assert {r["key"] for r in rows} == {"db", "notes"}

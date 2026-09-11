@@ -10,7 +10,6 @@ from tether.backends.base import Capability
 from tether.backends.memory import default_store
 from tether.errors import BackendError, ConfigError, MergeConflict, StalePlanError
 from tether.handles import MemoryHandle
-from tether.manifest import Policy
 from tether.plan import Plan
 from tether.repo import Repo
 
@@ -200,7 +199,7 @@ def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
     branches = store.system(system).branches
     tracked = f"sys-{uuid.uuid4().hex[:8]}"
     store.system(tracked)
-    repo.add("tracked", "memory", {"system": tracked}, policy=Policy(write="direct"))
+    repo.add("tracked", "memory", {"system": tracked})
     wref = _forked(repo)
     store.write(system, wref, {"a": 1, "b": 2})
     c2 = repo.commit("fork work").vcs_commit  # pins the fork's state
