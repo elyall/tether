@@ -7,7 +7,7 @@ import pytest
 
 from tether.backends.base import ObjectBackend
 from tether.errors import BackendError
-from tether.manifest import Locator
+from tether.manifest import Locator, Pin
 from tether.testing import run_conformance
 
 ic = pytest.importorskip("icechunk")
@@ -55,11 +55,11 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
-def test_icechunk_deleted_tag_cannot_be_repinned_but_the_state_still_opens(
-    vcs_root: Path,
-) -> None:
-    """Icechunk never reuses a deleted tag name: `repair` reports it, `open`
-    falls back to the recorded snapshot while the store still has it."""
+def test_icechunk_deleted_tag_comes_back_as_a_new_generation(vcs_root: Path) -> None:
+    """Icechunk never reuses a deleted tag name, so a pin whose tag was deleted
+    is recreated under a generation suffix: same id, ref `tether.<id>.2`.
+    Readers resolve the pin through whichever generation is live; `gc` sees
+    one pin id and `unpin` clears every generation."""
     from tether.handles import IcechunkHandle
     from tether.repo import Repo
 
@@ -69,27 +69,45 @@ def test_icechunk_deleted_tag_cannot_be_repinned_but_the_state_still_opens(
     res = repo.commit("pin it")
     pin = res.pinned["zarr/imaging"]
     assert pin is not None and res.vcs_commit is not None
-
-    ic.Repository.open(ic.local_filesystem_storage(uri)).delete_tag(pin.ref)
-    assert not repo.verify()["zarr/imaging"].ok
-
-    report = repo.apply_repair(repo.plan_repair())
-    assert not report.repinned
-    (failure,) = report.failed.values()
-    assert "does not allow reusing a deleted tag" in failure
-
-    handle = repo.open("zarr/imaging", rev=res.vcs_commit)
     state = repo.objects["zarr/imaging"].state
     assert state is not None
-    assert isinstance(handle, IcechunkHandle) and handle.read_only
-    assert handle.snapshot_id == state["snapshot_id"]
-    assert handle.tag is None  # opened by snapshot, not by the missing tag
+    ic_repo = ic.Repository.open(ic.local_filesystem_storage(uri))
+    backend = repo.backend_for("icechunk")
+    locator = {"uri": uri, "branch": "main"}
 
-    # A bookmark forks from the recorded snapshot the same way.
+    ic_repo.delete_tag(pin.ref)
+    assert not repo.verify()["zarr/imaging"].ok
+
+    # Meanwhile, before repair: reads and forks still work, by snapshot.
+    handle = repo.open("zarr/imaging", rev=res.vcs_commit)
+    assert isinstance(handle, IcechunkHandle) and handle.read_only
+    assert handle.snapshot_id == state["snapshot_id"] and handle.tag is None
+
+    report = repo.apply_repair(repo.plan_repair())
+    assert report.repinned == {"zarr/imaging": pin.id} and not report.failed
+    assert ic_repo.lookup_tag(f"{pin.ref}.2") == state["snapshot_id"]
+    verdict = repo.verify()["zarr/imaging"]
+    assert verdict.ok and verdict.message == f"pinned as {pin.ref}.2"
+    # The manifest still says `tether.<id>`; the backend resolves the live tag.
+    assert repo.objects["zarr/imaging"].pin == pin
+    handle = repo.open("zarr/imaging", rev=res.vcs_commit)
+    assert isinstance(handle, IcechunkHandle) and handle.tag == f"{pin.ref}.2"
+
+    # Re-committing the same state is idempotent against the live generation,
+    # and gc counts it as the one pin it is.
+    assert backend.pin(locator, state, pin.id) == Pin(id=pin.id, ref=f"{pin.ref}.2")
+    assert backend.list_pins(locator) == {pin.id}
     repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["zarr/imaging"]
-    ic_repo = ic.Repository.open(ic.local_filesystem_storage(uri))
     assert wref is not None and ic_repo.lookup_branch(wref) == state["snapshot_id"]
+
+    # Burn the second name too: the third generation takes over. Unpin by the
+    # manifest's original ref clears every generation.
+    ic_repo.delete_tag(f"{pin.ref}.2")
+    assert backend.pin(locator, state, pin.id).ref == f"{pin.ref}.3"
+    backend.unpin(locator, pin)
+    assert backend.list_pins(locator) == set()
+    assert not repo.verify()["zarr/imaging"].ok
 
 
 def test_icechunk_diff_across_branches_goes_through_the_common_base(

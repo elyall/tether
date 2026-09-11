@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -152,45 +153,96 @@ class IcechunkBackend(ObjectBackend):
                 break
         return entries
 
+    # Icechunk keeps a tombstone for every deleted tag and never lets the name
+    # be reused. A pin id is content-addressed, so the same state would always
+    # ask for the same name; when that name is burnt, the pin lives on under a
+    # *generation*: `tether.<id>.2`, `.3`, ... The pin id is unchanged (gc and
+    # manifests key on it); only the ref differs, and every reader resolves a
+    # pin through `_live_tag` rather than trusting `pin.ref` alone.
+    _MAX_GENERATIONS = 1000
+
+    @staticmethod
+    def _generations(pin_id: str) -> Iterator[str]:
+        base = ref_for_pin(pin_id)
+        yield base
+        for n in range(2, IcechunkBackend._MAX_GENERATIONS + 1):
+            yield f"{base}.{n}"
+
+    @staticmethod
+    def _pin_id_of(tag: str) -> str | None:
+        """The pin id a `tether.*` tag belongs to, generation suffix dropped."""
+        prefix = ref_for_pin("")
+        if not tag.startswith(prefix):
+            return None
+        rest = tag[len(prefix) :]
+        parts = rest.split(".")
+        if len(parts) == 3 and parts[2].isdigit():
+            rest = f"{parts[0]}.{parts[1]}"
+        return rest
+
+    def _live_tag(self, repo: Any, pin: Pin) -> tuple[str, str] | None:
+        """`(tag, snapshot_id)` for the tag that carries `pin` now, or `None`.
+
+        The manifest's `pin.ref` first; failing that, the newest generation of
+        the same id that exists (a `repair` after someone deleted the tag).
+        """
+        import icechunk as ic
+
+        with contextlib.suppress(ic.IcechunkError):
+            return pin.ref, str(repo.lookup_tag(pin.ref))
+        wanted = self._pin_id_of(pin.ref) or pin.id
+        live = [
+            t for t in repo.list_tags() if self._pin_id_of(t) == wanted and t != pin.ref
+        ]
+        for tag in sorted(live, key=_generation_number, reverse=True):
+            with contextlib.suppress(ic.IcechunkError):
+                return tag, str(repo.lookup_tag(tag))
+        return None
+
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         import icechunk as ic
 
         repo = self._repo(locator)
-        ref = ref_for_pin(pin_id)
         sid = str(state["snapshot_id"])
-        try:
-            repo.create_tag(ref, sid)
-        except ic.IcechunkError:
-            # Tag already exists (idempotent commit) -- confirm it matches.
+        for ref in self._generations(pin_id):
+            try:
+                repo.create_tag(ref, sid)
+                return Pin(id=pin_id, ref=ref)
+            except ic.IcechunkError:
+                pass
             try:
                 existing = repo.lookup_tag(ref)
             except ic.IcechunkError:
-                # Icechunk keeps a tombstone for every deleted tag and never
-                # lets the name be reused, so a pin someone deleted by hand
-                # cannot come back under the same id. `repair` reports this.
-                raise BackendError(
-                    f"tag {ref} was deleted and Icechunk does not allow reusing "
-                    f"a deleted tag name; snapshot {sid} is still reachable but "
-                    "cannot be re-pinned under this id",
-                    kind="icechunk",
-                ) from None
-            if existing != sid:
-                raise BackendError(
-                    f"tag {ref} already points at {existing}, not {sid}",
-                    kind="icechunk",
-                ) from None
-        return Pin(id=pin_id, ref=ref)
+                continue  # this name is a tombstone; try the next generation
+            if existing == sid:
+                return Pin(id=pin_id, ref=ref)  # idempotent commit
+            # The name is taken by another snapshot: our state and the id's
+            # earlier life disagree. Do not step over it silently.
+            raise BackendError(
+                f"tag {ref} already points at {existing}, not {sid}",
+                kind="icechunk",
+            )
+        raise BackendError(
+            f"pin {pin_id}: every tag name up to generation "
+            f"{self._MAX_GENERATIONS} has been used and deleted",
+            kind="icechunk",
+        )
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         import icechunk as ic
 
-        with contextlib.suppress(ic.IcechunkError):
-            self._repo(locator).delete_tag(pin.ref)  # ignore if already gone
+        repo = self._repo(locator)
+        # Every generation of this id: the plan may know only `tether.<id>`
+        # while the live tag is a later one.
+        wanted = self._pin_id_of(pin.ref) or pin.id
+        for tag in {pin.ref, *repo.list_tags()}:
+            if tag == pin.ref or self._pin_id_of(tag) == wanted:
+                with contextlib.suppress(ic.IcechunkError):
+                    repo.delete_tag(tag)  # ignore if already gone
 
     def list_pins(self, locator: Locator) -> set[str]:
-        prefix = ref_for_pin("")
-        tags = self._repo(locator).list_tags()
-        return {t[len(prefix) :] for t in tags if t.startswith(prefix)}
+        ids = (self._pin_id_of(t) for t in self._repo(locator).list_tags())
+        return {i for i in ids if i is not None}
 
     def verify(
         self,
@@ -204,14 +256,16 @@ class IcechunkBackend(ObjectBackend):
         repo = self._repo(locator)
         sid = str(state["snapshot_id"])
         if pin is not None:
-            try:
-                actual = repo.lookup_tag(pin.ref)
-            except ic.IcechunkError:
+            live = self._live_tag(repo, pin)
+            if live is None:
                 return VerifyReport(VerifyStatus.MISSING, f"tag {pin.ref} missing")
+            tag, actual = live
             if actual != sid:
                 return VerifyReport(
-                    VerifyStatus.DRIFTED, f"{pin.ref} -> {actual}, expected {sid}"
+                    VerifyStatus.DRIFTED, f"{tag} -> {actual}, expected {sid}"
                 )
+            if tag != pin.ref:
+                return VerifyReport(VerifyStatus.OK, f"pinned as {tag}")
             return VerifyReport(VerifyStatus.OK)
         if not deep:
             return VerifyReport(VerifyStatus.UNKNOWN, "pass --deep to read snapshot")
@@ -226,7 +280,7 @@ class IcechunkBackend(ObjectBackend):
 
         repo = self._repo(locator)
         if isinstance(source, Pin):
-            sid = repo.lookup_tag(source.ref)
+            sid = self._pin_sid(repo, source)
         else:
             # Recorded state (no tag): the snapshot must still be reachable.
             sid = self._resolve(repo, str(source["snapshot_id"]))
@@ -254,9 +308,15 @@ class IcechunkBackend(ObjectBackend):
         "snapshots is intended"
     )
 
+    def _pin_sid(self, repo: Any, pin: Pin) -> str:
+        live = self._live_tag(repo, pin)
+        if live is None:
+            raise BackendError(f"icechunk tag {pin.ref} not found", kind="icechunk")
+        return live[1]
+
     def _source_sid(self, repo: Any, source: str | Pin | State) -> str:
         if isinstance(source, Pin):
-            return str(repo.lookup_tag(source.ref))
+            return self._pin_sid(repo, source)
         if isinstance(source, dict):
             return self._resolve(repo, str(source["snapshot_id"]))
         return self._resolve(repo, source)
@@ -291,22 +351,22 @@ class IcechunkBackend(ObjectBackend):
         target: str | Pin | State | None,
         read_only: bool,
     ) -> Handle:
-        import icechunk as ic
 
         repo = self._repo(locator)
         if isinstance(target, Pin):
-            try:
-                session = repo.readonly_session(tag=target.ref)
-            except ic.IcechunkError as exc:
+            live = self._live_tag(repo, target)
+            if live is None:
                 raise BackendError(
                     f"icechunk tag {target.ref} not found", kind="icechunk"
-                ) from exc
+                )
+            tag, _sid = live
+            session = repo.readonly_session(tag=tag)
             return IcechunkHandle(
                 key=self._uri(locator),
                 read_only=True,
                 repository=repo,
                 session=session,
-                tag=target.ref,
+                tag=tag,
                 snapshot_id=session.snapshot_id,
             )
         if isinstance(target, dict):
@@ -413,6 +473,12 @@ class IcechunkBackend(ObjectBackend):
         _collect(out, merged)
         out.note = f"diverged at snapshot {base}; changes on either side"
         return out
+
+
+def _generation_number(tag: str) -> int:
+    """`tether.<id>` is generation 1; `tether.<id>.N` is N."""
+    parts = tag.split(".")
+    return int(parts[-1]) if len(parts) == 4 and parts[-1].isdigit() else 1
 
 
 def _entries(d: Any) -> dict[str, tuple[str, str]]:
