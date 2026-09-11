@@ -33,6 +33,7 @@ from tether.backends.base import (
     tier_of,
 )
 from tether.errors import (
+    BackendError,
     CapabilityError,
     ConfigError,
     ImmutableObjectModified,
@@ -2100,14 +2101,21 @@ class Repo:
         """Create working branch `name` from a manifest's pin (or recorded state)."""
         backend = self.backend_for(m.kind)
         assert m.state is not None
+        gone = ""
         if m.pin is not None:
             report = backend.verify(m.locator, m.state, m.pin, deep=False)
-            if report.status is VerifyStatus.MISSING:
+            if report.status is not VerifyStatus.MISSING:
+                return backend.fork(m.locator, m.pin, name)
+            # The pin is gone (`verify` says so; `repair` may not be able to
+            # bring it back). The state it named is still a fork point while
+            # the store has it, as it is for `open`.
+            eff = effective_capabilities(backend, m.locator, m.policy)
+            if Capability.ADDRESSABLE not in eff:
                 raise TetherError(f"pin missing: {report.message}")
-            return backend.fork(m.locator, m.pin, name)
+            gone = f"pin missing ({report.message}) and "
         report = backend.verify(m.locator, m.state, None, deep=True)
         if report.status is VerifyStatus.MISSING:
-            raise TetherError(f"recorded state is gone: {report.message}")
+            raise TetherError(f"{gone}recorded state is gone: {report.message}")
         return backend.fork(m.locator, m.state, name)
 
     def _forget_working_state(self, key: str) -> None:
@@ -2288,11 +2296,29 @@ class Repo:
         working_ref = self._working_ref(key)
         if working_ref is None:
             if m.pin is not None and Capability.PIN in eff:
-                return backend.open(m.locator, m.pin, read_only=True)
+                return self._open_pinned(m, backend, eff)
             if Capability.ADDRESSABLE in eff:
                 state = m.state or backend.fingerprint(m.locator, None)
                 return backend.open(m.locator, state, read_only=True)
         return backend.open(m.locator, working_ref, read_only=True)
+
+    @staticmethod
+    def _open_pinned(
+        m: ObjectManifest, backend: ObjectBackend, eff: Capability
+    ) -> Handle:
+        """Open read-only at the pin; if its native ref is gone, at the state.
+
+        A pin someone deleted (`verify` says `missing`) does not make the
+        recorded state unreadable while the store still has it: an
+        Addressable backend opens it by the state the manifest recorded.
+        """
+        assert m.pin is not None
+        try:
+            return backend.open(m.locator, m.pin, read_only=True)
+        except BackendError:
+            if Capability.ADDRESSABLE in eff and m.state is not None:
+                return backend.open(m.locator, m.state, read_only=True)
+            raise
 
     def _open_at_rev(self, key: str, rev: str) -> Handle:
         objects = self._objects_at(self.vcs.resolve(rev))
@@ -2304,7 +2330,7 @@ class Repo:
         if m.state is None:
             raise TetherError(f"{key!r} has no committed state at {rev}")
         if m.pin is not None and Capability.PIN in eff:
-            return backend.open(m.locator, m.pin, read_only=True)
+            return self._open_pinned(m, backend, eff)
         if Capability.ADDRESSABLE in eff:
             return backend.open(m.locator, m.state, read_only=True)
         raise CapabilityError(

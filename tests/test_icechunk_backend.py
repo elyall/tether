@@ -55,6 +55,43 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
+def test_icechunk_deleted_tag_cannot_be_repinned_but_the_state_still_opens(
+    vcs_root: Path,
+) -> None:
+    """Icechunk never reuses a deleted tag name: `repair` reports it, `open`
+    falls back to the recorded snapshot while the store still has it."""
+    from tether.handles import IcechunkHandle
+    from tether.repo import Repo
+
+    uri = _new_repo(vcs_root / "imaging.icechunk")
+    repo = Repo.init(vcs_root)
+    repo.add("zarr/imaging", "icechunk", {"uri": uri, "branch": "main"})
+    res = repo.commit("pin it")
+    pin = res.pinned["zarr/imaging"]
+    assert pin is not None and res.vcs_commit is not None
+
+    ic.Repository.open(ic.local_filesystem_storage(uri)).delete_tag(pin.ref)
+    assert not repo.verify()["zarr/imaging"].ok
+
+    report = repo.apply_repair(repo.plan_repair())
+    assert not report.repinned
+    (failure,) = report.failed.values()
+    assert "does not allow reusing a deleted tag" in failure
+
+    handle = repo.open("zarr/imaging", rev=res.vcs_commit)
+    state = repo.objects["zarr/imaging"].state
+    assert state is not None
+    assert isinstance(handle, IcechunkHandle) and handle.read_only
+    assert handle.snapshot_id == state["snapshot_id"]
+    assert handle.tag is None  # opened by snapshot, not by the missing tag
+
+    # A bookmark forks from the recorded snapshot the same way.
+    repo.new(bookmark="work", eager=True)
+    wref = repo.workspace.working_refs["zarr/imaging"]
+    ic_repo = ic.Repository.open(ic.local_filesystem_storage(uri))
+    assert wref is not None and ic_repo.lookup_branch(wref) == state["snapshot_id"]
+
+
 def test_icechunk_diff_across_branches_goes_through_the_common_base(
     tmp_path: Path,
 ) -> None:

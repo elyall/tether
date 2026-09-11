@@ -162,7 +162,18 @@ class IcechunkBackend(ObjectBackend):
             repo.create_tag(ref, sid)
         except ic.IcechunkError:
             # Tag already exists (idempotent commit) -- confirm it matches.
-            existing = repo.lookup_tag(ref)
+            try:
+                existing = repo.lookup_tag(ref)
+            except ic.IcechunkError:
+                # Icechunk keeps a tombstone for every deleted tag and never
+                # lets the name be reused, so a pin someone deleted by hand
+                # cannot come back under the same id. `repair` reports this.
+                raise BackendError(
+                    f"tag {ref} was deleted and Icechunk does not allow reusing "
+                    f"a deleted tag name; snapshot {sid} is still reachable but "
+                    "cannot be re-pinned under this id",
+                    kind="icechunk",
+                ) from None
             if existing != sid:
                 raise BackendError(
                     f"tag {ref} already points at {existing}, not {sid}",
@@ -280,9 +291,16 @@ class IcechunkBackend(ObjectBackend):
         target: str | Pin | State | None,
         read_only: bool,
     ) -> Handle:
+        import icechunk as ic
+
         repo = self._repo(locator)
         if isinstance(target, Pin):
-            session = repo.readonly_session(tag=target.ref)
+            try:
+                session = repo.readonly_session(tag=target.ref)
+            except ic.IcechunkError as exc:
+                raise BackendError(
+                    f"icechunk tag {target.ref} not found", kind="icechunk"
+                ) from exc
             return IcechunkHandle(
                 key=self._uri(locator),
                 read_only=True,
