@@ -145,6 +145,19 @@ class ObjectStatus:
 
 
 @dataclass
+class SetReport:
+    """What `set` changed per object."""
+
+    changed: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
+    """key -> {field: (old, new)} for the policy fields that changed."""
+    unchanged: list[str] = field(default_factory=list)
+    """Objects whose policy already had the requested values."""
+    released: dict[str, str] = field(default_factory=dict)
+    """key -> working ref the workspace let go of because `write` changed; the
+    branch itself is left for `gc --prune-workspaces`. Run `new` to re-decide."""
+
+
+@dataclass
 class PullReport:
     """What `pull` did per object."""
 
@@ -898,6 +911,88 @@ class Repo:
         self.workspace.base_states.pop(key, None)
         self.workspace.pulled.pop(key, None)
         write_workspace(self.root, self.workspace)
+
+    # -- set ------------------------------------------------------------- #
+    def set_policy(
+        self,
+        keys: Sequence[str],
+        *,
+        write: str | None = None,
+        file: str | None = None,
+        pin: str | None = None,
+    ) -> SetReport:
+        """Change policy fields of registered objects in place.
+
+        Manifest-only, logged, undoable. When `write` changes (`fork` <->
+        `direct`), the workspace lets go of the object's working ref -- the
+        old branch is where writes *used* to belong, so it is left for
+        `gc --prune-workspaces` (never deleted here) -- and the next `new`
+        decides the new one. `file` and `pin` changes keep the workspace's
+        hold. Commit afterwards to record the policy.
+
+        Args:
+            keys: Objects to change.
+            write: New write policy (`fork` | `direct`), or None to keep.
+            file: New file policy (`immutable` | `versioned`), or None.
+            pin: New pin policy (`native` | `record`), or None.
+
+        Raises:
+            ConfigError: Unknown key, an invalid value, or nothing to set.
+        """
+        if write is None and file is None and pin is None:
+            raise ConfigError("nothing to set: pass --write, --file, or --pin")
+        report = SetReport()
+        updates: dict[str, ObjectManifest] = {}
+        for key in keys:
+            m = self.objects.get(key)
+            if m is None:
+                raise ConfigError(f"no such object: {key}")
+            wanted = Policy.from_dict(
+                {
+                    "write": write if write is not None else m.policy.write,
+                    "file": file if file is not None else m.policy.file,
+                    "pin": pin if pin is not None else m.policy.pin,
+                }
+            )
+            diff = {
+                f: (getattr(m.policy, f), getattr(wanted, f))
+                for f in ("write", "file", "pin")
+                if getattr(m.policy, f) != getattr(wanted, f)
+            }
+            if not diff:
+                report.unchanged.append(key)
+                continue
+            report.changed[key] = diff
+            updates[key] = dataclasses.replace(m, policy=wanted)
+        if not updates:
+            return report
+        pre = {
+            "objects": self._manifest_texts(updates),
+            "workspace": self.workspace.to_toml(),
+        }
+        for key, updated in updates.items():
+            write_object(self.root, updated)
+            self.objects[key] = updated
+            if "write" in report.changed[key]:
+                ref = self.workspace.working_refs.get(key) or (
+                    self.workspace.pending_forks.get(key)
+                )
+                if ref is not None:
+                    report.released[key] = ref
+                self._forget_working_state(key)
+        write_workspace(self.root, self.workspace)
+        self._log_op(
+            "set",
+            result={
+                "changed": {
+                    k: {f: list(v) for f, v in d.items()}
+                    for k, d in report.changed.items()
+                },
+                "released": dict(report.released),
+            },
+            pre=pre,
+        )
+        return report
 
     # -- pull ------------------------------------------------------------ #
     def pull(self, keys: Sequence[str] | None = None) -> PullReport:
@@ -3281,6 +3376,7 @@ class Repo:
             "add": self._undo_manifests,
             "remove": self._undo_manifests,
             "pull": self._undo_manifests,
+            "set": self._undo_manifests,
         }.get(target.command)
         if handler is None:
             raise TetherError(f"cannot undo {target.command!r}")

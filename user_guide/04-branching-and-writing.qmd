@@ -411,6 +411,11 @@ reproducibility without branch sprawl, and the Neon quiescence check
 (`commit` refuses while writers are active unless `--force`) keeps pins
 consistent.
 
+Switch an object later with `tether set db/prod --write direct` (or `--write
+fork`): the workspace lets go of its current working branch -- left in the
+store for `gc --prune-workspaces` -- and the next `tether new` decides the new
+one. `tether set --all --write direct` does the whole dataset.
+
 ## Stale working copies
 
 If an object's committed manifest changes under you -- a teammate committed

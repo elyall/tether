@@ -180,6 +180,11 @@ class OpEntry:
             )
         if self.command in ("add", "remove"):
             return str(r.get("key", ""))
+        if self.command == "set":
+            return ", ".join(
+                f"{k}: " + " ".join(f"{f}={v[0]}->{v[1]}" for f, v in d.items())
+                for k, d in (r.get("changed") or {}).items()
+            )
         if self.command == "pull":
             pulled = sorted(r.get("pulled") or {})
             same = len(r.get("up_to_date") or [])

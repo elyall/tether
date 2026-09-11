@@ -93,8 +93,9 @@ one from `tether upgrade`.
 
 ## Policies
 
-A `Policy` is stored per object (`[policy]` in its manifest) and set with the
-`--write`, `--file`, `--pin` options of `tether add` or `Repo.add(policy=...)`.
+A `Policy` is stored per object (`[policy]` in its manifest), set with the
+`--write`, `--file`, `--pin` options of `tether add` (or `Repo.add(policy=...)`)
+and changed in place with `tether set KEY... --write|--file|--pin`.
 
 | Field | Values | Meaning |
 | --- | --- | --- |

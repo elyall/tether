@@ -373,6 +373,66 @@ def remove(key: str = typer.Argument(..., help="Object key.")) -> None:
     typer.echo(f"removed {key}")
 
 
+@app.command(name="set")
+def set_(
+    keys: list[str] | None = typer.Argument(None, help="Objects to change; or --all."),
+    write: str | None = typer.Option(
+        None,
+        "--write",
+        help="fork | direct: fork a working branch on `new`, or "
+        "write on the base branch.",
+    ),
+    file: str | None = typer.Option(
+        None, "--file", help="immutable | versioned (file objects)."
+    ),
+    pin: str | None = typer.Option(
+        None, "--pin", help="native | record: a native ref per commit, or state only."
+    ),
+    all_: bool = typer.Option(False, "--all", help="Every registered object."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Change an object's policy in place.
+
+    Manifest-only, logged, undoable. Changing --write lets the workspace go of
+    the object's working branch (left for `gc --prune-workspaces`, never
+    deleted here); run `tether new` to decide the new one. Commit afterwards
+    to record the policy.
+    """
+    repo = _repo()
+    if all_:
+        keys = sorted(repo.objects)
+    if not keys:
+        _fail(TetherError("give one or more KEY, or --all"))
+    try:
+        report = repo.set_policy(keys, write=write, file=file, pin=pin)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "changed": {
+                    k: {f: {"from": a, "to": b} for f, (a, b) in d.items()}
+                    for k, d in report.changed.items()
+                },
+                "unchanged": report.unchanged,
+                "released": report.released,
+            },
+            as_json=True,
+        )
+        return
+    for key, diff in report.changed.items():
+        fields = ", ".join(f"{f} {a} -> {b}" for f, (a, b) in diff.items())
+        typer.echo(f"  set {key}  {fields}")
+    for key in report.unchanged:
+        typer.echo(f"  unchanged {key}")
+    for key, ref in report.released.items():
+        typer.echo(f"  released {key}  {ref} (left for gc --prune-workspaces)")
+    if report.released:
+        typer.echo("run `tether new` to decide the new working refs")
+    if report.changed:
+        typer.echo("commit to record the policy")
+
+
 @app.command()
 def pull(
     keys: list[str] | None = typer.Argument(

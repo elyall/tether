@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`tether set KEY... | --all [--write] [--file] [--pin]`** changes a
+  registered object's policy in place (`Repo.set_policy`, `SetReport`):
+  manifest-only, logged, undoable. Changing `write` releases the workspace's
+  hold on the object's working branch (left for `gc --prune-workspaces`) so
+  the next `new` decides the new one. Until now this took `remove` + `add`
+  (losing the committed state) or an `import` from a registry.
 - **Positions and `tether pull`.** An object with no working branch now keeps
   its pin from commit to commit -- `commit` does not contact its store -- the
   way an untouched file stays as the parent commit had it. `tether pull

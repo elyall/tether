@@ -1736,3 +1736,57 @@ def test_add_at_is_the_initial_position_only(vcs_root: Path) -> None:
     repo.commit("onto main")
     assert repo.objects["db"].state == {"snapshot_id": s2}
     assert "at" not in repo.objects["db"].locator
+
+
+def test_set_policy_switches_write_mode_in_place(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"v": 1})
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    repo.new(eager=True)
+    branch = repo.workspace.working_refs["db"]
+
+    # fork -> direct: the manifest changes, the workspace lets go of the branch
+    # (left in the store), and `new` puts the working ref on main.
+    report = repo.set_policy(["db"], write="direct")
+    assert report.changed == {"db": {"write": ("fork", "direct")}}
+    assert report.released == {"db": branch}
+    assert repo.objects["db"].policy.write == "direct"
+    assert "db" not in repo.workspace.working_refs
+    assert branch in store.system(system).branches
+    assert Repo.find(vcs_root).objects["db"].policy.write == "direct"
+    repo.new()
+    assert repo.workspace.working_refs["db"] == "main"
+    assert (
+        repo.ops()[1].command == "set"
+        and "write=fork->direct" in repo.ops()[1].summary()
+    )
+
+    # Nothing to change is reported, not logged; bad values refuse.
+    report = repo.set_policy(["db"], write="direct")
+    assert report.unchanged == ["db"] and not report.changed
+    assert repo.ops()[0].command == "new"
+    with pytest.raises(ConfigError, match=r"invalid policy\.write"):
+        repo.set_policy(["db"], write="sideways")
+    with pytest.raises(ConfigError, match="nothing to set"):
+        repo.set_policy(["db"])
+    with pytest.raises(ConfigError, match="no such object"):
+        repo.set_policy(["nope"], write="fork")
+
+    # pin-only changes keep the workspace's hold; undo restores the manifest.
+    report = repo.set_policy(["db"], pin="record")
+    assert (
+        report.changed == {"db": {"pin": ("native", "record")}} and not report.released
+    )
+    assert repo.workspace.working_refs["db"] == "main"
+    repo.undo()
+    assert repo.objects["db"].policy.pin == "native"
+
+    # direct -> fork: the next `new` forks a branch off the pin.
+    repo.set_policy(["db"], write="fork")
+    assert "db" not in repo.workspace.working_refs
+    repo.new(eager=True)
+    assert repo.workspace.working_refs["db"].startswith("tether.ws.")

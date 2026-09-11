@@ -38,7 +38,7 @@ cli:
   sections:
     - title: Dataset
       desc: Create a dataset and manage its objects.
-      contents: [init, add, remove]
+      contents: [init, add, set, remove]
     - title: Inspect
       desc: Fingerprint, classify, compare, browse history, and verify.
       contents: [status, snapshot, diff, log, verify]
@@ -75,6 +75,7 @@ reference:
         - AbandonReport
         - ForgetWorkspaceReport
         - PullReport
+        - SetReport
         - PromoteReport
         - UndoReport
         - UndoToReport
@@ -170,7 +171,7 @@ skill:
     - "A tether command exists where an operation has a VCS half and a store half (`commit`, `new`, `restore`, `abandon`, `forget-workspace`); everything that only touches files and history is jj/git's. Run `tether status` after any VCS operation that moved the working copy, and `tether new` before writing again."
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
-    - "Use `--write direct` for production branches that must not be forked (e.g. Neon `main`)."
+    - "Use `--write direct` for production branches that must not be forked (e.g. Neon `main`); `tether set KEY --write direct|fork` switches a registered object, then `tether new`."
     - "`tether promote` only fast-forwards a base branch that is unchanged since the fork point; a moved base needs a backend with `MERGE` (lakeFS, Dolt, git) or a manual re-apply -- Icechunk/Iceberg refuse, Lance/Neon cannot promote at all."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on every command that makes them (`commit`, `new`, `gc`, `promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace`); save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."

@@ -10,6 +10,7 @@ codes, and environment.
 ```
 tether init [PATH]
 tether add KEY [LOCATOR] --kind KIND [--branch BRANCH] [--at STATE | --pick] [locator options] [--set k=v]... [--write fork|direct] [--file immutable|versioned] [--pin native|record]
+tether set KEY... | --all [--write fork|direct] [--file immutable|versioned] [--pin native|record]
 tether remove KEY
 tether status [--snapshot | --no-snapshot]
 tether snapshot
@@ -87,6 +88,13 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
 | `--at ID` / `--pick` | `at` | initial position: snapshot id / version / commit / tag (all but file, neon) that the first commit pins instead of the branch head; `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
+
+`tether set KEY... --write|--file|--pin` changes a registered object's policy
+in place (`--all` for every object): manifest-only, logged, undoable. Changing
+`--write` makes the workspace let go of the object's working branch -- the
+branch stays in the store for `gc --prune-workspaces` to judge -- and `tether
+new` decides the new one (`main` for `direct`, a fork for `fork`). Commit to
+record the policy.
 
 Policy options: `--write fork|direct` (fork a per-workspace branch on `new`, or
 stay on the base branch), `--file immutable|versioned` (`file` only: treat drift

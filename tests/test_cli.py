@@ -840,3 +840,29 @@ def test_cli_pull(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 0 and "pinned db" in r.output
     r = runner.invoke(app, ["pull", "nope"])
     assert r.exit_code != 0 and "no such object" in r.output
+
+
+def test_cli_set(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tether.repo import Repo
+
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    repo = Repo.init(vcs_root)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.add("db2", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    repo.new(eager=True)
+
+    r = runner.invoke(app, ["set", "db", "--write", "direct"])
+    assert r.exit_code == 0, r.output
+    assert "set db  write fork -> direct" in r.output
+    assert "released db" in r.output and "run `tether new`" in r.output
+    r = runner.invoke(app, ["set", "--all", "--pin", "record", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert set(payload["changed"]) == {"db", "db2"} and payload["released"] == {}
+    r = runner.invoke(app, ["set", "db"])
+    assert r.exit_code != 0 and "nothing to set" in r.output
+    r = runner.invoke(app, ["set", "--write", "fork"])
+    assert r.exit_code != 0 and "--all" in r.output
