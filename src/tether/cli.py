@@ -1497,14 +1497,16 @@ def promote(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Move each system's base branch to what this workspace's fork holds.
+    """Land this bookmark on the trunk: move each system's upstream branch to
+    what the bookmark's branch holds, then move the trunk bookmark.
 
-    The dataset commit already pins the fork's state, so nothing needs
+    The dataset commit already pins the branch's state, so nothing needs
     re-committing after a fast-forward; `promote` makes `main` in each system
-    point at it too. Base unchanged since the fork -> fast-forward. Base moved
-    -> native 3-way merge where the system has one (lakeFS, Dolt, git),
-    otherwise refused with the system's own recipe. Then land the dataset
-    commit with jj/git.
+    point at it too, and when everything fast-forwarded, sets the trunk
+    bookmark to this bookmark's commit. Base unchanged since the fork ->
+    fast-forward. Base moved -> native 3-way merge where the system has one
+    (lakeFS, Dolt, git), otherwise refused with the system's own recipe; after
+    a merge, `commit` then `promote` again to move the trunk.
     """
     repo = _repo()
     try:
@@ -1530,6 +1532,7 @@ def promote(
                 "skipped": report.skipped,
                 "refused": report.refused,
                 "conflicts": report.conflicts,
+                "trunk_moved": report.trunk_moved,
             },
             as_json=True,
         )
@@ -1547,7 +1550,9 @@ def promote(
         for unit in report.conflicts.get(key, []):
             typer.echo(f"                   conflict: {unit}")
     if report.merged:
-        typer.echo("run `tether commit` to pin the merge result(s)")
+        typer.echo("run `tether commit` to pin the merge result(s), then promote again")
+    if report.trunk_moved:
+        typer.echo(f"{repo.config.trunk} -> {report.trunk_moved[:12]}")
     if report.refused:
         raise typer.Exit(1)
 

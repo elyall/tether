@@ -303,6 +303,10 @@ class PromoteReport:
     """Key -> why tether would not move the base (with the system's own recipe)."""
     conflicts: dict[str, list[str]] = field(default_factory=dict)
     """Key -> conflicting units reported by a merge that was rolled back."""
+    trunk_moved: str | None = None
+    """The commit the trunk bookmark now points at, when every promoted object
+    fast-forwarded and nothing was refused: the bookmark's commit describes
+    what the upstream branches now hold, so `main` is set to it."""
     plan: Plan | None = None
 
 
@@ -3035,6 +3039,25 @@ class Repo:
                 touched = True
         if touched:
             write_workspace(self.root, self.workspace)
+        # The dataset side of the promotion: when the whole bookmark landed
+        # cleanly, its commit now describes the upstream branches, so the
+        # trunk bookmark moves to it -- `jj bookmark set main -r feature`.
+        # A merge leaves states the commit does not describe; commit first,
+        # then promote again (a fast-forward) to move the trunk.
+        bookmark = self.workspace.bookmark
+        if (
+            results
+            and bookmark
+            and not self.on_trunk()
+            and plan.context.get("rev") is None
+            and not report.refused
+            and not report.merged
+            and not errors
+        ):
+            commit = self.vcs.bookmarks().get(bookmark)
+            if commit:
+                self.vcs.bookmark_set(self.config.trunk, commit)
+                report.trunk_moved = commit
         if results or errors:
             self._log_op(
                 "promote",

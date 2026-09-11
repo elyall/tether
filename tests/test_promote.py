@@ -425,3 +425,29 @@ def test_dolt_promote_and_merge(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(MergeConflict) as exc:
         b.merge(loc, "tether.ws.x.ledger", "boom")
     assert exc.value.conflicts == ["k"]
+
+
+def test_promote_moves_the_trunk_bookmark(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    main_before = repo.vcs.bookmarks()["main"]
+    store.write(system, wref, {"a": 1})
+    c2 = repo.commit("fork work").vcs_commit
+    assert (
+        repo.vcs.bookmarks()["work"] == c2
+        and repo.vcs.bookmarks()["main"] == main_before
+    )
+
+    report = repo.promote()
+    assert report.fast_forwarded and report.trunk_moved == c2
+    assert repo.vcs.bookmarks()["main"] == c2
+    assert store.system(system).branches["main"] == store.system(system).branches[wref]
+    # Nothing to promote: the trunk stays where it is.
+    assert repo.promote().trunk_moved is None
+    # Promoting a specific revision moves stores only.
+    store.write(system, wref, {"a": 2})
+    c3 = repo.commit("more").vcs_commit
+    assert repo.promote(rev=c3).trunk_moved is None
+    assert repo.vcs.bookmarks()["main"] == c2

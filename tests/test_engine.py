@@ -1239,11 +1239,19 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
     assert "db: base branch moved" in str(exc.value)
     assert repo.ops()[0].command == "promote" and repo.ops()[0].undone_by is None
 
-    # Nothing left that can be undone -> loud.
+    # Nothing left that can be undone -> loud. (promote moved `main` onto the
+    # work commit; under git, returning to `main` therefore lands past the
+    # baseline commit, which then cannot be uncommitted -- also loud.)
     for e in repo.ops():
         if e.undoable and e.command != "promote":
-            repo.undo(e.id)
-    with pytest.raises(TetherError, match=r"nothing to undo|only fast-forwards"):
+            try:
+                repo.undo(e.id)
+            except TetherError as exc:
+                assert "no longer the working copy's parent" in str(exc)
+                break
+    with pytest.raises(
+        TetherError, match=r"nothing to undo|only fast-forwards|no longer the"
+    ):
         repo.undo()
 
 
