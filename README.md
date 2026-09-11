@@ -78,7 +78,8 @@ things are versioned, and they live in different places:
 
 `commit` fingerprints the working branches and pins their heads; it does not
 contact objects that have no branch, because their position cannot have
-moved -- like files you did not edit. When the world has moved (someone
+moved -- like files you did not edit. Unlike `jj commit`, it does not start
+anything new: your branches stay, and the next write lands on them. When the world has moved (someone
 committed to Icechunk's `main`, a table gained a version, a directory
 changed), `tether status --snapshot` says `behind`, and `tether pull` is the
 explicit step that takes the new state for the next commit -- the dataset's
@@ -104,8 +105,8 @@ Every existing tool versions a single layer:
 | Dagster observable assets | staleness detection | analog of our snapshot/drift step; no branching |
 
 Nothing provides unified version control *across* files + Icechunk + Postgres +
-Iceberg with pinning and forking. So tether borrows jj's working-copy model
-(fingerprint, snapshot, stale-working-copy detection), DVC's
+Iceberg with pinning and forking. So tether borrows jj's working-copy and
+operation-log ideas (`new REV`, stale-working-copy detection, `undo`), DVC's
 manifests-in-VCS layout, and [Yggdrasil](https://github.com/replikativ/yggdrasil)'s
 observe-then-record shape (a workspace that watches independent systems and
 records their snapshots, rather than a store that holds the data).

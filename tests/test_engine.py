@@ -246,7 +246,7 @@ def test_lazy_forking(vcs_root: Path) -> None:
     assert not any(b.startswith("tether.ws.") for b in branches)
     assert next(o for o in repo.status().objects if o.key == "db").changed is False
     assert repo.commit("nothing").pinned == {}  # unchanged: no branch, no new pin
-    assert "db" in repo.workspace.pending_forks  # auto_fork is off; still pending
+    assert "db" in repo.workspace.pending_forks  # still pending
 
     # The first writable open forks from the pin; later opens reuse the branch.
     handle = repo.open("db")
@@ -379,35 +379,24 @@ def test_content_diff_reports_backend_failures_per_object(
     assert entries["db"].detail_error == "no diff for you"
 
 
-def test_new_auto_fork_reforks_after_commit(vcs_root: Path) -> None:
-    from tether.manifest import RepoConfig
-
-    repo = Repo.init(vcs_root, config=RepoConfig(new_auto_fork=True))
+def test_commit_keeps_the_working_branch(vcs_root: Path) -> None:
+    """`commit` is not `jj commit`: it does not start a new branch. Writes keep
+    landing on the same working branch, and `new` afterwards reuses it."""
+    repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     repo.commit("baseline")
-    # `new` ran without being asked; the fork itself waits for the first write.
-    first = repo.workspace.pending_forks["db"]
-    assert first.startswith("tether.ws.")
-    assert first not in default_store().system(system).branches
+    repo.new()
     handle = repo.open("db")
-    assert isinstance(handle, MemoryHandle) and handle.ref == first
-    default_store().write(system, first, {"x": 1})
+    assert isinstance(handle, MemoryHandle)
+    branch = handle.ref
+    default_store().write(system, branch, {"x": 1})
     repo.commit("update")
-    # The branch already holds the state that was just pinned from it, so the
-    # auto new keeps it as the working ref rather than deferring a re-fork.
-    assert repo.workspace.working_refs["db"] == first
-    assert "db" not in repo.workspace.pending_forks
-    repo.open("db")
-    assert default_store().read(system, first) == {"x": 1}
-    assert not repo.is_stale()
-
-    # eager mode creates every branch during new/commit, as before.
-    repo.config.new_fork = "eager"
-    default_store().write(system, first, {"x": 2})
-    repo.commit("eager")
-    assert (
-        repo.workspace.working_refs["db"] == first and not repo.workspace.pending_forks
-    )
+    assert repo.workspace.working_refs["db"] == branch
+    default_store().write(system, branch, {"x": 2})
+    repo.commit("again")  # a second breadcrumb on the same branch
+    assert repo.workspace.working_refs["db"] == branch
+    plan = repo.plan_new()
+    assert [a.op for a in plan.actions if a.key == "db"] == ["reuse"]
 
 
 def test_history_and_detached_base(vcs_root: Path) -> None:

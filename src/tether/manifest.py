@@ -358,7 +358,6 @@ class RepoConfig:
     `status --snapshot` (or `tether snapshot`) refreshes. `commit` and `verify`
     always fingerprint."""
     verify_on_status: bool = False
-    new_auto_fork: bool = False
     new_fork: str = "lazy"
     commit_pull: bool = False
     """`[commit] pull`: whether `commit` fingerprints the upstream branch of
@@ -382,7 +381,7 @@ class RepoConfig:
             doc["dataset"] = {"id": self.dataset_id}
         doc["snapshot"] = {"auto": self.snapshot_auto}
         doc["verify"] = {"on_status": self.verify_on_status}
-        doc["new"] = {"auto_fork": self.new_auto_fork, "fork": self.new_fork}
+        doc["new"] = {"fork": self.new_fork}
         doc["commit"] = {"pull": self.commit_pull}
         doc["defaults"] = self.defaults.to_dict()
         if self.vcs:
@@ -421,7 +420,6 @@ class RepoConfig:
             dataset_id=str(dataset_id) if is_dataset_id(dataset_id) else "",
             snapshot_auto=bool(snapshot.get("auto", False)),
             verify_on_status=bool(verify.get("on_status", False)),
-            new_auto_fork=bool(new.get("auto_fork", False)),
             new_fork=fork,
             commit_pull=bool(commit.get("pull", False)),
             defaults=Policy.from_dict(data.get("defaults")),

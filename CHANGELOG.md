@@ -44,6 +44,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`[new] auto_fork` is gone.** It re-ran `new` after every commit to give
+  jj's "fresh working copy" rhythm; since `new` reuses a branch that already
+  sits at the pin, it had stopped doing anything. `commit` leaves working
+  branches where they are, and the docs now say so (Concepts: "Where tether
+  is not jj").
 - **The write policy `track` is now `direct`** (`--write direct`,
   `[defaults] write = "direct"`, `policy_write = "direct"` in registries): writes
   land on the base branch instead of a forked working branch. Same behaviour,

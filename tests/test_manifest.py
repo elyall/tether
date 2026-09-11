@@ -44,7 +44,6 @@ def test_repo_config_round_trip() -> None:
     c = RepoConfig(
         snapshot_auto=False,
         verify_on_status=True,
-        new_auto_fork=True,
         defaults=Policy(write="direct"),
         vcs={"jj_path": "/x/jj"},
         backends={"neon": {"api_key_env": "NEON_API_KEY"}},

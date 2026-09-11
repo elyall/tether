@@ -35,7 +35,6 @@ auto = true
 on_status = false
 
 [new]
-auto_fork = false
 fork = "lazy"
 
 [defaults]
@@ -272,7 +271,6 @@ auto = false
 on_status = false
 
 [new]
-auto_fork = false
 fork = "lazy"
 
 [defaults]

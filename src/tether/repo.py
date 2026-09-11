@@ -1412,9 +1412,6 @@ class Repo:
                 },
                 pre=pre,
             )
-        if outcomes and self.config.new_auto_fork:
-            # jj-style: every commit leaves you on a fresh working copy.
-            self.new()
         return result
 
     def commit(
@@ -1435,8 +1432,9 @@ class Repo:
         objects have their state recorded, and Observed objects are recorded
         with `recoverable = False`. Backends that provide a listing have it
         stored under `.tether/listings/`. If any pin fails, pins created by this
-        call are released best-effort. With `config.new_auto_fork`, `new` runs
-        afterwards.
+        call are released best-effort. Working branches stay where they are:
+        the next write lands on the same branch, and `new` afterwards reuses
+        it (`commit` is not `jj commit`, which implies `jj new`).
 
         Args:
             message: VCS commit message.

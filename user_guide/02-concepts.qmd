@@ -2,12 +2,11 @@
 title: "Concepts"
 ---
 
-tether borrows its shape from [jj](https://jj-vcs.dev): a working copy,
-commits that record it, and `new` to start working on top of a commit. What
-differs is *what* is versioned: not files in a tree, but the state of external
-systems that keep their own history -- and since reading that state is a
-network round-trip, not a stat walk, tether snapshots on demand rather than on
-every command.
+tether borrows [jj](https://jj-vcs.dev)'s working-copy and operation-log
+ideas -- `new REV` to start on top of a commit, the stale-working-copy check,
+an op log with `undo` -- and applies them to the state of external systems
+that keep their own history. It is not jj for data: the section after the
+table says where the two part ways.
 
 ## The working copy is the manifests
 
@@ -19,6 +18,8 @@ enclosing git/jj repository. History, branching, bookmarks, workspaces, and
 sharing are therefore the VCS's, not tether's. What the VCS cannot see -- what
 tether did to the *stores* to get there -- goes in tether's own
 [operation log](#the-operation-log).
+
+### jj vocabulary, where it maps
 
 | jj | tether |
 | --- | --- |
@@ -40,6 +41,20 @@ tether did to the *stores* to get there -- goes in tether's own
 | `jj squash` | the VCS's own; what history no longer names, `gc` releases |
 | `jj op log` / `jj undo` | **ops** / **undo**: tether's own log of what each command did to the stores, and the reversal of an entry where the store still allows it; **repair** rebuilds what a manifest promises |
 | -- | **export** / **publish** (history as SQL tables) and **import** (the object set from a registry query) |
+
+### Where tether is not jj
+
+- **`commit` does not imply `new`.** `jj commit` describes the change and
+  starts a fresh one on top. `tether commit` pins your working branches' heads
+  and records them; the branches stay, the next write lands on the same
+  branch, and `new` afterwards reuses it. Only `new REV` moves you. A branch
+  accumulates commits the way a git branch does, not the way a jj change does.
+- **Snapshots are on demand.** Reading an object's state is a network
+  round-trip, so `status` is local and `status --snapshot`, `verify`, and
+  `commit` (for the objects this checkout can have moved) fan out.
+- **The stores are remotes.** Pins are what commits reference; working
+  branches are local branches; `pull` is fetch and rebase; `promote` is the
+  push to `main`. `behind` and `pulled` make sense in that frame, not jj's.
 
 ## Commits hold pins; the working copy holds branches
 

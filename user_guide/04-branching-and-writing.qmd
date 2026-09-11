@@ -490,24 +490,12 @@ If a store lost something a manifest promises -- a pin deleted by hand, a
 branch this workspace expects -- `tether repair` recreates it from the recorded
 state, while the store still has that state.
 
-## Workspaces and `auto_fork`
+## Workspaces
 
 Because working refs live in the *untracked* `.tether/workspace.toml`, each
 jj workspace (or each checkout) is an independent tether workspace with its own
 id and its own forks. Two agents working on the same dataset commit never write
 to the same branch.
-
-If you prefer jj's rhythm where every commit leaves you on a fresh working
-copy, set in `tether.toml`:
-
-```toml
-[new]
-auto_fork = true
-```
-
-`commit` then re-runs `new` after pinning, so the next write starts from
-exactly what was committed. With lazy forking that costs nothing until you
-write again; with `[new] fork = "eager"` it re-creates every branch.
 
 ## Recap
 

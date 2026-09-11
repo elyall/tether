@@ -318,7 +318,7 @@ storage, so tether never deletes it without being told.
 :::
 ::::
 
-Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-auto_fork),
+Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces),
 [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 ## 4. Catch drift nightly without a watcher

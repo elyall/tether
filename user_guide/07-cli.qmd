@@ -153,7 +153,9 @@ written to any store; the op is logged and `undo` drops the held states.
    (`--strict` fails instead). Unchanged objects are skipped.
 3. Write `.tether/objects/<key>.toml` and any `.tether/listings/<hash>.jsonl`,
    then `jj commit` / `git commit` scoped to those paths (`--no-vcs` skips).
-4. With `[new] auto_fork = true`, re-run `new` from the new pins.
+4. Leave the working branches where they are. `commit` is not `jj commit`:
+   nothing new is forked, the next write lands on the same branch, and a
+   later `new` reuses it. Only `new REV` moves you.
 
 ## What `new` does
 

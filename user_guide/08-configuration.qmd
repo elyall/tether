@@ -7,7 +7,7 @@ title: "Configuration"
 ```
 <dataset-root>/
   tether.toml                 # committed: tether.version (older -> `tether upgrade`), dataset.id (the namespace
-                              #   of this dataset's refs), snapshot.auto, verify.on_status, new.auto_fork,
+                              #   of this dataset's refs), snapshot.auto, verify.on_status,
                               #   new.fork (lazy|eager), default policies, backend options, credential *references*
   .tether/
     .gitignore                # ignores workspace.toml and ops.jsonl
@@ -47,7 +47,6 @@ auto = false         # `status` shows the last snapshot (--snapshot refreshes); 
 on_status = false    # also run a cheap verify of each committed object in status
 
 [new]
-auto_fork = false    # commit re-runs `new` from the pins it just created
 fork = "lazy"        # "lazy": create a working branch on first writable open; "eager": during `new`
 
 [commit]
