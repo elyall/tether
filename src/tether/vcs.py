@@ -461,6 +461,35 @@ class VcsAdapter(Protocol):
         no-op -- the next commit lands on the current branch.
         """
 
+    def bookmarks(self) -> dict[str, str]:
+        """Local bookmarks (jj) / branches (git): name -> commit id."""
+
+    def bookmark_set(self, name: str, rev: str) -> None:
+        """Create ``name`` at ``rev`` or move it there (backwards allowed)."""
+
+    def bookmark_delete(self, name: str) -> None:
+        """Delete the bookmark / branch ``name``."""
+
+    def current_bookmarks(self) -> list[str]:
+        """The bookmarks the working copy is on.
+
+        jj: the bookmarks at ``@``, else -- when ``@`` is empty -- at ``@-``
+        (the usual state right after ``jj new main`` or ``tether commit``);
+        several when they share a commit, as right after ``new_bookmark``.
+        git: the branch ``HEAD`` points at, or nothing when detached.
+        """
+
+    def new_bookmark(self, name: str, rev: str | None) -> None:
+        """Start a bookmark ``name`` at ``rev`` (default: the current base) and
+        move the working copy onto it.
+
+        jj: ``jj new REV`` then the bookmark at ``@-``. git: ``switch -c NAME
+        [REV]``.
+        """
+
+    def is_ancestor(self, ancestor: str, rev: str) -> bool:
+        """Whether ``ancestor`` is ``rev`` or one of its ancestors."""
+
 
 # --------------------------------------------------------------------------- #
 # jj
@@ -651,8 +680,7 @@ class JjAdapter:
             )
         return infos
 
-    def refs(self) -> list[RefInfo]:
-        refs: list[RefInfo] = []
+    def bookmarks(self) -> dict[str, str]:
         out = self._jj(
             "bookmark",
             "list",
@@ -662,10 +690,61 @@ class JjAdapter:
             'name ++ " " ++ normal_target.commit_id() ++ "\\n"))',
             check=False,
         )
+        found: dict[str, str] = {}
         for line in out.stdout.splitlines():
             parts = line.split()
             if len(parts) == 2:
-                refs.append(RefInfo(parts[0], "bookmark", parts[1]))
+                found[parts[0]] = parts[1]
+        return found
+
+    def bookmark_set(self, name: str, rev: str) -> None:
+        self._jj("bookmark", "set", name, "-r", rev, "--allow-backwards")
+
+    def bookmark_delete(self, name: str) -> None:
+        self._jj("bookmark", "delete", name)
+
+    def _bookmarks_at(self, rev: str) -> list[str]:
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "-r",
+            rev,
+            "-T",
+            'local_bookmarks.map(|b| b.name()).join("\\n") ++ "\\n"',
+            check=False,
+        )
+        return [b for b in out.stdout.split() if b]
+
+    def current_bookmarks(self) -> list[str]:
+        at = self._bookmarks_at("@")
+        if not at and self.position().get("empty"):
+            at = self._bookmarks_at("@-")
+        return sorted(at)
+
+    def new_bookmark(self, name: str, rev: str | None) -> None:
+        self._jj("new", rev if rev is not None else "@")
+        self._jj("bookmark", "set", name, "-r", "@-", "--allow-backwards")
+
+    def is_ancestor(self, ancestor: str, rev: str) -> bool:
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            f"({ancestor})::({rev})",
+            "--limit",
+            "1",
+            "-T",
+            "commit_id",
+            check=False,
+        )
+        return out.returncode == 0 and bool(out.stdout.strip())
+
+    def refs(self) -> list[RefInfo]:
+        refs: list[RefInfo] = [
+            RefInfo(name, "bookmark", commit)
+            for name, commit in self.bookmarks().items()
+        ]
         store = self._git_store()
         if store is not None:
             assert self._git_exe is not None
@@ -1087,6 +1166,36 @@ class GitAdapter:
                 return
             name = f"tether/{sha[:12]}-{n}"  # taken and moved on; start a sibling
         raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
+
+    def bookmarks(self) -> dict[str, str]:
+        return {
+            r.name: r.commit_id
+            for r in _git_refs(self._exe, self.root, None)
+            if r.kind == "branch"
+        }
+
+    def bookmark_set(self, name: str, rev: str) -> None:
+        # update-ref moves the current branch too (HEAD is symbolic) without
+        # touching the working tree, which is what `commit` and `pull` want.
+        self._git("update-ref", f"refs/heads/{name}", self.resolve(rev))
+
+    def bookmark_delete(self, name: str) -> None:
+        self._git("branch", "-D", name)
+
+    def current_bookmarks(self) -> list[str]:
+        out = self._git("symbolic-ref", "--short", "-q", "HEAD", check=False)
+        name = out.stdout.strip()
+        return [name] if name else []
+
+    def new_bookmark(self, name: str, rev: str | None) -> None:
+        args = ["switch", "-c", name]
+        if rev is not None:
+            args.append(self.resolve(rev))
+        self._git(*args)
+
+    def is_ancestor(self, ancestor: str, rev: str) -> bool:
+        out = self._git("merge-base", "--is-ancestor", ancestor, rev, check=False)
+        return out.returncode == 0
 
     def commit_alive(self, commit: str) -> bool:
         out = self._git("rev-list", "--all", check=False)

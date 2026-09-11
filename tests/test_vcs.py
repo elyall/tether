@@ -256,3 +256,38 @@ def test_abandon_keeps_descendant_manifests_as_snapshots(vcs_root: Path) -> None
     tip2 = vcs.resolve("@-" if vcs.kind == "jj" else "HEAD")
     assert tip2 == c1
     assert (vcs_root / "ds/.tether/objects/db.toml").read_text() == "state = 1\n"
+
+
+def test_bookmarks(vcs_root: Path) -> None:
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, "tether.toml", "v=1\n")
+    c1 = vcs.commit(["tether.toml"], "first")
+    # A fresh repo: git is on its default branch, jj has no bookmark yet.
+    before = vcs.bookmarks()
+    assert all(commit == c1 for commit in before.values())
+
+    vcs.bookmark_set("main", c1)
+    assert vcs.bookmarks()["main"] == c1
+    if vcs.kind == "git":
+        assert set(vcs.current_bookmarks()) <= {"main", *before}
+
+    vcs.new_bookmark("feature", "main")
+    assert vcs.bookmarks()["feature"] == c1
+    # jj: both bookmarks sit on c1 until the first commit; git: HEAD is definite.
+    assert "feature" in vcs.current_bookmarks()
+    _write(vcs_root, "tether.toml", "v=2\n")
+    c2 = vcs.commit(["tether.toml"], "second")
+    if vcs.kind == "jj":
+        assert vcs.bookmarks()["feature"] == c1  # jj bookmarks do not follow
+        vcs.bookmark_set("feature", c2)
+    assert vcs.bookmarks()["feature"] == c2 and vcs.bookmarks()["main"] == c1
+    assert vcs.current_bookmarks() == ["feature"]
+    assert vcs.is_ancestor(c1, c2) and not vcs.is_ancestor(c2, c1)
+    assert vcs.is_ancestor(c2, c2)
+
+    # Moving backwards is allowed; deleting removes the name.
+    vcs.bookmark_set("feature", c1)
+    assert vcs.bookmarks()["feature"] == c1
+    vcs.new("main")
+    vcs.bookmark_delete("feature")
+    assert "feature" not in vcs.bookmarks()
