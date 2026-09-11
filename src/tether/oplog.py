@@ -186,9 +186,10 @@ class OpEntry:
                 for k, d in (r.get("changed") or {}).items()
             )
         if self.command == "pull":
-            pulled = sorted(r.get("pulled") or {})
-            same = len(r.get("up_to_date") or [])
-            return ", ".join(pulled) + (f" (+{same} up to date)" if same else "")
+            pinned = r.get("pinned") or {}
+            return (
+                f"pulled {len(pinned)} object(s) -> {str(r.get('vcs_commit', ''))[:12]}"
+            )
         if self.command == "undo":
             return f"undid {self.undoes}: {r.get('summary', '')}"
         if self.command == "repair":

@@ -85,6 +85,8 @@ class IcechunkBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
 
+    base_branch = _base_branch
+
     def _resolve(self, repo: Any, ref: str) -> str:
         """Resolve a branch, tag, or snapshot id to a snapshot id."""
         import icechunk as ic

@@ -75,6 +75,8 @@ class IcebergBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
 
+    base_branch = _base_branch
+
     @staticmethod
     def _refs(table) -> dict:
         refs = table.refs

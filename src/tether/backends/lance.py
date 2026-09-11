@@ -85,6 +85,8 @@ class LanceBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", MAIN))
 
+    base_branch = _base_branch
+
     def _dataset(self, locator: Locator) -> Any:
         """Open the dataset at its main head (never cached: heads move)."""
         import lance

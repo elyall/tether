@@ -254,6 +254,8 @@ class DoltBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", MAIN))
 
+    base_branch = _base_branch
+
     def _client(self, locator: Locator) -> DoltClient:
         """Return a client for the locator's database. Tests replace this seam."""
         try:

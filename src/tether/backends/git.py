@@ -273,6 +273,8 @@ class GitBackend(ObjectBackend):
             raise BackendError(f"{ref!r} is not a local branch", kind="git")
         return ref
 
+    base_branch = _base_branch
+
     @staticmethod
     def _source_ref(source: str | Pin | State) -> str:
         if isinstance(source, Pin):

@@ -300,6 +300,13 @@ class ObjectBackend(Protocol):
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
 
+    def base_branch(self, locator: Locator) -> str:
+        """The upstream branch a locator names: what the trunk bookmark stands
+        for, `promote` moves, and a trunk working copy writes to. Default
+        ``locator["branch"]`` (``main``); git uses the checked-out branch when
+        the locator has no ``ref``."""
+        return str(locator.get("branch", "main"))
+
     def configure_cache(self, cache_dir: Path) -> None:
         """Tell the backend where it may keep per-workspace scratch state.
 

@@ -44,9 +44,9 @@ def _dataset(vcs_root: Path) -> tuple[Repo, str, list[str]]:
     repo.add("raw/plate", "file", {"uri": str(data)}, policy=Policy(file="versioned"))
     c1 = repo.commit("baseline").vcs_commit
     store.write(system, "main", {"v": 2})
-    c2 = repo.commit("db moved", pull=True).vcs_commit  # plate unchanged
+    c2 = repo.commit("db moved").vcs_commit  # plate unchanged
     (data / "b.bin").write_bytes(b"bb")
-    c3 = repo.commit("plate moved", pull=True).vcs_commit  # db unchanged
+    c3 = repo.pull(message="plate moved").vcs_commit  # db unchanged
     assert c1 and c2 and c3
     return repo, system, [c1, c2, c3]
 
@@ -190,7 +190,7 @@ def test_export_append_is_idempotent_and_incremental(
     assert _rows(out, "SELECT COUNT(*) FROM refs WHERE kind = 'head'")[0][0] == 1
 
     default_store().write(system, "main", {"v": 3})
-    c4 = repo.commit("again", pull=True).vcs_commit
+    c4 = repo.commit("again").vcs_commit
     repo.export().to_sqlite(out, append=True)
     # git: c4's two manifests. jj: c4 plus the fresh working-copy commit; the
     # rewritten old working-copy row lingers (append never deletes).
@@ -362,7 +362,7 @@ def test_publish_live(vcs_root: Path, pg_dsn: str) -> None:
 
     # A new commit publishes incrementally; the head ref moves with it.
     default_store().write(system, "main", {"v": 3})
-    c4 = repo.commit("again", pull=True).vcs_commit
+    c4 = repo.commit("again").vcs_commit
     third = repo.export().to_postgres(pg_dsn, schema="tether")
     assert third.upserted["commits"] == 1 + _extra(repo) // 2  # c4 (+ jj's new @)
     with _pg(pg_dsn) as conn:

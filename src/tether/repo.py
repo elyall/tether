@@ -26,6 +26,7 @@ from tether.backends.base import (
     Tier,
     VerifyReport,
     VerifyStatus,
+    base_at,
     build_backend,
     content_state,
     effective_capabilities,
@@ -123,22 +124,17 @@ class ObjectStatus:
     """Cheap verify result when `RepoConfig.verify_on_status` is set."""
     error: str | None = None
     """Fingerprint failure message, if any."""
-    pulled: bool = False
-    """`tether pull` took a new upstream state that the next commit pins."""
     behind: bool = False
     """The object has no working branch and its upstream branch has moved past
     the committed state (seen by a fan-out snapshot); `tether pull` takes it."""
 
     @property
     def state_label(self) -> str:
-        """`"new"`, `"modified"`, `"pulled"`, `"behind"`, `"clean"`, or
-        `"error"`."""
+        """`"new"`, `"modified"`, `"behind"`, `"clean"`, or `"error"`."""
         if self.error is not None:
             return "error"
         if not self.committed:
             return "new"
-        if self.pulled:
-            return "pulled"
         if self.behind:
             return "behind"
         if self.changed:
@@ -161,17 +157,20 @@ class SetReport:
 
 @dataclass
 class PullReport:
-    """What `pull` did per object."""
+    """What `pull` did: the fetched heads of a bookmark's branches, committed."""
 
-    pulled: dict[str, tuple[State, State]] = field(default_factory=dict)
-    """key -> (committed state, upstream head now held for the next commit)."""
-    up_to_date: list[str] = field(default_factory=list)
-    """Objects whose upstream head is the committed state."""
+    bookmark: str = ""
+    """The bookmark pulled (the one this workspace works on)."""
+    committed: dict[str, tuple[State, State]] = field(default_factory=dict)
+    """key -> (state at the bookmark's commit, head now) for objects that moved."""
+    unchanged: list[str] = field(default_factory=list)
+    """Objects whose head is what the bookmark's commit recorded."""
     skipped: dict[str, str] = field(default_factory=dict)
-    """key -> why it was not pulled (working branch, direct, not committed)."""
-    retargeted: list[str] = field(default_factory=list)
-    """Pulled objects with a working branch pending from `new`: it will be
-    forked from the pulled state on the first write, not from the pin."""
+    """key -> why it was not fetched (no commit yet; no branch yet)."""
+    vcs_commit: str | None = None
+    """The dataset commit made on the bookmark, if anything moved."""
+    pinned: dict[str, Pin | None] = field(default_factory=dict)
+    """key -> pin created for the fetched state (None: recorded only)."""
 
 
 @dataclass
@@ -665,7 +664,21 @@ class Repo:
         return held
 
     def _working_ref(self, key: str) -> str | None:
-        return self.workspace.working_refs.get(key)
+        ref = self.workspace.working_refs.get(key)
+        if ref is None and self.on_trunk():
+            # On the trunk a Forkable object's working ref *is* its upstream
+            # branch, whether or not `new` has recorded it yet -- unless it was
+            # registered `--at` a state: that is its position until a `pull`
+            # moves it onto the branch.
+            m = self.objects.get(key)
+            if m is not None and base_at(m.locator) is None:
+                backend = self.backend_for(m.kind)
+                if Capability.FORK in effective_capabilities(
+                    backend, m.locator, m.policy
+                ):
+                    with contextlib.suppress(TetherError):
+                        return backend.base_branch(m.locator)
+        return ref
 
     def _content(self, kind: str, state: State | None) -> State | None:
         """`content_state` for `kind`: what equality and pin ids compare."""
@@ -969,7 +982,6 @@ class Repo:
         self.workspace.pending_forks.pop(key, None)
         self.workspace.fork_points.pop(key, None)
         self.workspace.base_states.pop(key, None)
-        self.workspace.pulled.pop(key, None)
         write_workspace(self.root, self.workspace)
         return manifest
 
@@ -1000,7 +1012,6 @@ class Repo:
         self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
         self.workspace.fork_points.pop(key, None)
         self.workspace.base_states.pop(key, None)
-        self.workspace.pulled.pop(key, None)
         write_workspace(self.root, self.workspace)
 
     # -- set ------------------------------------------------------------- #
@@ -1086,83 +1097,89 @@ class Repo:
         return report
 
     # -- pull ------------------------------------------------------------ #
-    def pull(self, keys: Sequence[str] | None = None) -> PullReport:
-        """Move objects without a working branch to their upstream branch head.
+    def pull(
+        self, bookmark: str | None = None, *, message: str | None = None
+    ) -> PullReport:
+        """Fetch the heads of this bookmark's branches and commit them onto it.
 
-        The dataset analogue of `jj git fetch` + rebasing onto it: a committed
-        object that nobody in this workspace is writing to keeps its pin (or
-        recorded state) from commit to commit; `pull` is the explicit step
-        that takes what is there now -- the upstream branch head
-        (`locator.branch`) for branching systems, the current table version
-        or file contents for the rest. The new state is held in
-        `workspace.pulled` until the next `commit` pins it (`status` shows
-        `pulled`); a writable `open` before then forks from it -- including a
-        fork `new` already decided but has not created (`PullReport.retargeted`
-        names those). Objects with a working branch, `direct` objects (already
-        on upstream), and objects with no commit yet are skipped with a reason.
-        Nothing is written to any store.
+        The dataset's `git fetch` + rebase. On the trunk the branches are every
+        object's upstream branch (and, for systems without branches, the
+        object itself); on any other bookmark they are its `tether.ws.*`
+        branches -- which are this workspace's working refs, so a pull there
+        is what `commit` already does. What differs from the bookmark's commit
+        is pinned and committed on the bookmark, which moves; the working copy
+        ends up on top. Nothing moved: no commit.
 
         Args:
-            keys: Objects to pull; default every object.
+            bookmark: Must be the bookmark this workspace works on (default).
+                Pulling another bookmark means `tether new NAME` first.
+            message: Commit message; default `pull <bookmark>: <n> object(s)`.
 
         Raises:
-            ConfigError: Unknown key.
+            ConfigError: No bookmark, another bookmark, or `.tether/` has
+                uncommitted manifest edits.
             ImmutableObjectModified: An Observed `file = "immutable"` object
                 changed; re-register it to accept the new state.
             MultiObjectError: A fingerprint failed.
         """
-        wanted = list(keys) if keys is not None else sorted(self.objects)
-        report = PullReport()
+        mine = self.workspace.bookmark
+        if mine is None:
+            raise ConfigError(
+                "this working copy is on no bookmark; `tether new NAME` to work on "
+                "one, then pull"
+            )
+        if bookmark is not None and bookmark != mine:
+            raise ConfigError(
+                f"this workspace works on {mine!r}; `tether new {bookmark}` first"
+            )
+        self._check_on_bookmark()
+        if self.vcs.dirty(self._vcs_paths()):
+            raise ConfigError(
+                "manifests have uncommitted edits; `tether commit` them (or undo) "
+                "before pulling"
+            )
+        report = PullReport(bookmark=mine)
+        moving = set(self.moving_keys())
         targets: list[str] = []
-        for key in wanted:
-            m = self.objects.get(key)
-            if m is None:
-                raise ConfigError(f"no such object: {key}")
+        for key, m in self.objects.items():
             if m.state is None:
                 report.skipped[key] = "not committed yet; the first commit reads it"
-            elif self.workspace.working_refs.get(key) is not None:
-                ref = self.workspace.working_refs[key]
-                if self.on_trunk():
-                    report.skipped[key] = f"on trunk: already on {ref}"
-                else:
-                    report.skipped[key] = (
-                        f"has working branch {ref}; commit it, or `new --discard`"
-                    )
+            elif key in moving:
+                targets.append(key)  # a working branch: its head is the position
+            elif self.on_trunk():
+                targets.append(key)  # upstream branch, or the object itself
             else:
-                targets.append(key)
+                report.skipped[key] = "no branch yet; sits at its pin"
 
         def fp(key: str) -> State:
             m = self.objects[key]
-            return self.backend_for(m.kind).fingerprint(self._upstream_locator(m), None)
+            backend = self.backend_for(m.kind)
+            ref = self._working_ref(key)
+            if ref is None:
+                return backend.fingerprint(self._upstream_locator(m), None)
+            return backend.fingerprint(m.locator, ref)
 
         heads = self._fanout(fp, targets)
         self._enforce_immutability(heads)
-        pre = {"workspace": self.workspace.to_toml()}
+        fetched: dict[str, State] = {}
         for key in targets:
             m = self.objects[key]
-            head = heads[key]
             assert m.state is not None
-            if self._same(m.kind, head, m.state):
-                self.workspace.pulled.pop(key, None)
-                report.up_to_date.append(key)
+            if self._same(m.kind, heads[key], m.state):
+                report.unchanged.append(key)
             else:
-                self.workspace.pulled[key] = dict(head)
-                report.pulled[key] = (dict(m.state), dict(head))
-                if key in self.workspace.pending_forks:
-                    # `new` decided a branch off the pin; it has not been
-                    # created, so the first write will start here instead.
-                    report.retargeted.append(key)
-            self.workspace.last_snapshot[key] = dict(head)
-        if targets:
+                report.committed[key] = (dict(m.state), dict(heads[key]))
+            fetched[key] = dict(heads[key])
+            self.workspace.last_snapshot[key] = dict(heads[key])
+        if not report.committed:
             write_workspace(self.root, self.workspace)
-            self._log_op(
-                "pull",
-                result={
-                    "pulled": {k: v[1] for k, v in report.pulled.items()},
-                    "up_to_date": list(report.up_to_date),
-                },
-                pre=pre,
-            )
+            return report
+        n = len(report.committed)
+        text = message or f"pull {mine}: {n} object{'s' if n != 1 else ''}"
+        plan = self.plan_commit(text, fetched=fetched)
+        result = self.apply_commit(plan, verify=False)
+        report.vcs_commit = result.vcs_commit
+        report.pinned = dict(result.pinned)
         return report
 
     # -- snapshot / status ---------------------------------------------- #
@@ -1212,7 +1229,11 @@ class Repo:
             MultiObjectError: One or more fingerprints failed.
         """
         moving = set(self.moving_keys())
-        keys = list(self.objects) if upstream else sorted(moving)
+        # Upstream only means something where the position *could* follow it:
+        # on the trunk (or on no bookmark). A feature bookmark forked from pins;
+        # the world moving on is not its business until it is promoted.
+        ask_upstream = upstream and (self.on_trunk() or self.workspace.bookmark is None)
+        keys = list(self.objects) if ask_upstream else sorted(moving)
 
         def fp(key: str) -> State:
             m = self.objects[key]
@@ -1224,11 +1245,8 @@ class Repo:
 
         states: dict[str, State] = self._fanout(fp, keys)
         for key, m in self.objects.items():
-            if key in states:
-                continue
-            state = self.workspace.pulled.get(key) or m.state
-            if state is not None:
-                states[key] = dict(state)
+            if key not in states and m.state is not None:
+                states[key] = dict(m.state)
         self._enforce_immutability(states)
         # Cache what was actually read. A partial (commit-time) snapshot must
         # not overwrite what an earlier fan-out learned about upstream: a
@@ -1269,9 +1287,9 @@ class Repo:
         """Classify every object against its committed manifest.
 
         Objects with a working ref compare the branch head to the committed
-        state (`modified`). Objects without one are `pulled` when `pull` took
-        a new upstream state, `behind` when a fan-out saw the upstream branch
-        move past the committed state, else `clean`.
+        state (`modified`). Objects without one are `behind` when a fan-out on
+        the trunk saw the upstream branch move past the committed state (`pull`
+        takes it), else `clean`.
 
         Args:
             do_snapshot: Take a fresh `snapshot` first; otherwise reuse the
@@ -1291,16 +1309,13 @@ class Repo:
             eff = effective_capabilities(backend, m.locator, m.policy)
             current = states.get(key)
             committed = m.state is not None
-            pulled = key in self.workspace.pulled and key not in moving
-            if pulled:
-                current = dict(self.workspace.pulled[key])
             differs = (
                 committed
                 and current is not None
                 and not self._same(m.kind, current, m.state)
             )
-            changed = bool(differs) and (key in moving or pulled)
-            behind = bool(differs) and key not in moving and not pulled
+            changed = bool(differs) and key in moving
+            behind = bool(differs) and key not in moving
             report: VerifyReport | None = None
             if self.config.verify_on_status and committed:
                 try:
@@ -1316,7 +1331,6 @@ class Repo:
                     pinned=m.pin is not None,
                     recoverable=m.recoverable,
                     changed=changed,
-                    pulled=pulled,
                     behind=behind,
                     current_state=current,
                     verify=report,
@@ -1341,7 +1355,7 @@ class Repo:
         strict: bool = False,
         force: bool = False,
         do_snapshot: bool = True,
-        pull: bool | None = None,
+        fetched: dict[str, State] | None = None,
     ) -> Plan:
         """Compute what `commit` would do without writing anywhere.
 
@@ -1356,37 +1370,28 @@ class Repo:
             strict: Fail instead of recording Observed objects unrecoverably.
             force: Skip quiescence checks (`NEEDS_QUIESCENCE` backends).
             do_snapshot: Take a fresh `snapshot` first.
-            pull: Also take the upstream branch head of every object that has
-                no working branch, as `tether pull` would, and pin it. Default
-                `config.commit_pull` (off): those objects keep their previous
-                pin, or the state `pull` already took.
+            fetched: States `pull` read from the bookmark's branches; used in
+                place of a snapshot and pinned as they are (the plan is a
+                `pull` plan). Internal.
 
         Raises:
             UnpinnedStateError: `strict` and an Observed object changed.
             BackendError: A quiescence check failed.
             MultiObjectError: The snapshot failed for one or more objects.
         """
-        pull = self.config.commit_pull if pull is None else pull
         moving = set(self.moving_keys())
-        if do_snapshot:
-            states = dict(self.snapshot(upstream=pull))
+        if fetched is not None:
+            states = dict(fetched)
+        elif do_snapshot:
+            states = dict(self.snapshot(upstream=False))
         else:
             states = dict(self.workspace.last_snapshot)
-        # Positions: an object with no working branch commits at its previous
-        # pin (or what `pull` took), whatever a cached fan-out says about its
-        # upstream -- unless this commit pulls.
-        pulled: dict[str, State] = {}
-        for key, m in self.objects.items():
-            if key in moving:
-                continue
-            if key in self.workspace.pulled and not pull:
-                pulled[key] = dict(self.workspace.pulled[key])
-                states[key] = pulled[key]
-            elif pull:
-                if key in states and not self._same(m.kind, states[key], m.state):
-                    pulled[key] = dict(states[key])
-            elif m.state is not None:
-                states[key] = dict(m.state)
+        if fetched is None:
+            # Positions: an object with no working branch commits at its
+            # previous pin, whatever a cached fan-out says about its upstream.
+            for key, m in self.objects.items():
+                if key not in moving and m.state is not None:
+                    states[key] = dict(m.state)
         keys = list(self.objects)
 
         if not force:
@@ -1406,7 +1411,7 @@ class Repo:
                 "manifest_hash": self.current_manifest_hash(),
                 "states": {k: states[k] for k in keys if k in states},
                 "workspace_id": self.workspace.workspace_id,
-                "pulled": sorted(pulled),
+                "pull": fetched is not None,
             },
         )
         for key in keys:
@@ -1423,9 +1428,8 @@ class Repo:
             ):
                 plan.notes.append(f"{key}: unchanged")
                 continue
-            if key in pulled:
-                branch = str(m.locator.get("branch", "main"))
-                plan.notes.append(f"{key}: pulled from {branch}")
+            if fetched is not None:
+                plan.notes.append(f"{key}: fetched {short_state(state)}")
             if tier_of(eff) is Tier.OBSERVED:
                 if strict:
                     raise UnpinnedStateError(
@@ -1551,12 +1555,12 @@ class Repo:
             raise
 
         # Persist manifests (and listings for backends that provide them).
-        pulled_keys = {str(k) for k in plan.context.get("pulled") or []}
+        is_pull = bool(plan.context.get("pull"))
         for key, (state, pin, recoverable) in outcomes.items():
             m = self.objects[key]
-            if key in pulled_keys and "at" in m.locator:
-                # Pulled onto the upstream branch: the state it was first
-                # registered at is history now, not where it sits.
+            if is_pull and "at" in m.locator:
+                # Pulled onto the branch: the state it was first registered at
+                # is history now, not where it sits.
                 m = dataclasses.replace(m, locator=self._upstream_locator(m))
             updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
             self.objects[key] = updated
@@ -1588,12 +1592,10 @@ class Repo:
             for k in outcomes
             if k in self.workspace.working_refs or k in self.workspace.pending_forks
         )
-        for key in outcomes:
-            self.workspace.pulled.pop(key, None)
         write_workspace(self.root, self.workspace)
         if outcomes or result.vcs_commit:
             self._log_op(
-                "commit",
+                "pull" if is_pull else "commit",
                 plan=plan,
                 result={
                     "vcs_commit": result.vcs_commit,
@@ -1614,7 +1616,6 @@ class Repo:
         strict: bool = False,
         force: bool = False,
         do_snapshot: bool = True,
-        pull: bool | None = None,
     ) -> CommitResult:
         """Pin and record every object's current state, then commit the manifests.
 
@@ -1634,8 +1635,6 @@ class Repo:
             strict: Fail instead of recording Observed objects unrecoverably.
             force: Skip quiescence checks (`NEEDS_QUIESCENCE` backends).
             do_snapshot: Take a fresh `snapshot` first.
-            pull: Pin the upstream head of objects without a working branch
-                too (see `plan_commit`).
 
         Returns:
             What was pinned, recorded, or skipped, and the VCS commit id.
@@ -1650,7 +1649,6 @@ class Repo:
             strict=strict,
             force=force,
             do_snapshot=do_snapshot,
-            pull=pull,
         )
         return self.apply_commit(plan, vcs=vcs, verify=False)
 
@@ -1786,7 +1784,11 @@ class Repo:
             if Capability.FORK not in eff:
                 continue
             if trunk:
-                branch = str(m.locator.get("branch", "main"))
+                try:
+                    branch = backend.base_branch(m.locator)
+                except TetherError as exc:
+                    plan.notes.append(f"{key}: no upstream branch to write to ({exc})")
+                    continue
                 plan.actions.append(
                     Action(
                         "trunk", key, m.kind, target=branch, detail="upstream branch"
@@ -1930,9 +1932,6 @@ class Repo:
             self.vcs.new(str(rev))
             self.objects = read_objects(self.root)
         self.workspace.bookmark = str(bookmark) if bookmark else None
-        # `new REV` puts every position at REV's pins, kept branches included;
-        # states `pull` took were relative to the manifests we just left.
-        self.workspace.pulled = {}
         if plan.context.get("keep"):
             self._mark_base_states(
                 set(self.workspace.working_refs) | set(self.workspace.pending_forks)
@@ -2035,13 +2034,7 @@ class Repo:
 
     def _forget_working_state(self, key: str) -> None:
         """Drop everything this workspace knows about `key`'s working branch."""
-        for table in (
-            "working_refs",
-            "pending_forks",
-            "base_states",
-            "fork_points",
-            "pulled",
-        ):
+        for table in ("working_refs", "pending_forks", "base_states", "fork_points"):
             getattr(self.workspace, table).pop(key, None)
 
     def materialize_fork(self, key: str) -> str:
@@ -2074,20 +2067,10 @@ class Repo:
         # reset; remember its head so undo can put it back.
         if name in backend.list_working_refs(m.locator):
             pre["heads"] = {key: backend.fingerprint(m.locator, name)}
-        pulled = self.workspace.pulled.get(key)
-        if pulled is not None:
-            # `pull` moved the position past the pin: start there.
-            report = backend.verify(m.locator, pulled, None, deep=True)
-            if report.status is VerifyStatus.MISSING:
-                raise TetherError(f"pulled state is gone: {report.message}")
-            ref = backend.fork(m.locator, pulled, name)
-        else:
-            ref = self._fork_from_manifest(m, name)
+        ref = self._fork_from_manifest(m, name)
         self.workspace.working_refs[key] = ref
         self.workspace.pending_forks.pop(key, None)
-        if pulled is not None:
-            self.workspace.fork_points[key] = dict(pulled)
-        elif m.state is not None:
+        if m.state is not None:
             self.workspace.fork_points[key] = dict(m.state)
         self._mark_base_states([key])
         write_workspace(self.root, self.workspace)
@@ -2221,18 +2204,15 @@ class Repo:
             return backend.open(m.locator, working_ref, read_only=False)
 
         # Read-only handle at the object's position: its working ref when it
-        # has one, else what the working copy holds -- the pulled state, or the
-        # committed pin / state -- rather than wherever upstream is now. Before
-        # the first commit, the registered base (`at`, or the branch head).
+        # has one, else the committed pin / state -- rather than wherever
+        # upstream is now. Before the first commit, the registered base (`at`,
+        # or the branch head).
         working_ref = self._working_ref(key)
         if working_ref is None:
-            pulled = self.workspace.pulled.get(key)
-            if pulled is not None and Capability.ADDRESSABLE in eff:
-                return backend.open(m.locator, pulled, read_only=True)
-            if pulled is None and m.pin is not None and Capability.PIN in eff:
+            if m.pin is not None and Capability.PIN in eff:
                 return backend.open(m.locator, m.pin, read_only=True)
             if Capability.ADDRESSABLE in eff:
-                state = pulled or m.state or backend.fingerprint(m.locator, None)
+                state = m.state or backend.fingerprint(m.locator, None)
                 return backend.open(m.locator, state, read_only=True)
         return backend.open(m.locator, working_ref, read_only=True)
 
@@ -3209,7 +3189,6 @@ class Repo:
             self.workspace.pending_forks.pop(a.key, None)
             self.workspace.fork_points[a.key] = dict(a.params["then_state"])
             self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
-            self.workspace.pulled.pop(a.key, None)
         # What the branch now holds is deliberate: it corresponds to the
         # working tree's manifest as far as staleness is concerned.
         self._mark_base_states(done)
@@ -3574,7 +3553,7 @@ class Repo:
             "import": self._undo_manifests,
             "add": self._undo_manifests,
             "remove": self._undo_manifests,
-            "pull": self._undo_manifests,
+            "pull": self._undo_commit,
             "set": self._undo_manifests,
         }.get(target.command)
         if handler is None:

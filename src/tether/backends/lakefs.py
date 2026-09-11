@@ -69,6 +69,8 @@ class LakeFSBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", MAIN))
 
+    base_branch = _base_branch
+
     def _prefix(self, locator: Locator) -> str:
         return str(locator.get("prefix") or "").strip("/")
 

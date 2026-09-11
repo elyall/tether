@@ -170,16 +170,17 @@ def test_cli_status_is_local_by_default(
     r = runner.invoke(app, ["status", "--json"])
     payload = json.loads(r.output)
     assert payload["fresh"] is False and payload["objects"][0]["state"] == "clean"
-    # --snapshot fans out and sees upstream ahead; the age line disappears.
+    # --snapshot fans out and sees main moved (on the trunk main is the
+    # working ref); the age line disappears.
     r = runner.invoke(app, ["status", "--snapshot"])
-    assert r.exit_code == 0 and "behind" in r.output
+    assert r.exit_code == 0 and "modified" in r.output
     assert "states as fingerprinted" not in r.output
     r = runner.invoke(app, ["status", "--json"])  # cache refreshed by the fan-out
-    assert json.loads(r.output)["objects"][0]["state"] == "behind"
+    assert json.loads(r.output)["objects"][0]["state"] == "modified"
 
-    # commit --pull fingerprints upstream, whatever [snapshot] auto says.
+    # commit fingerprints the working refs, whatever [snapshot] auto says.
     default_store().write(system, "main", {"x": 2})
-    r = runner.invoke(app, ["commit", "-m", "second", "--json", "--pull"])
+    r = runner.invoke(app, ["commit", "-m", "second", "--json"])
     assert r.exit_code == 0 and json.loads(r.output)["pinned"]["db"]
 
     # [snapshot] auto = true restores fan-out on every status.
@@ -191,7 +192,7 @@ def test_cli_status_is_local_by_default(
     default_store().write(system, "main", {"x": 3})
     r = runner.invoke(app, ["status", "--json"])
     assert json.loads(r.output)["fresh"] is True
-    assert json.loads(r.output)["objects"][0]["state"] == "behind"
+    assert json.loads(r.output)["objects"][0]["state"] == "modified"
     # ... and --no-snapshot still wins.
     r = runner.invoke(app, ["status", "--no-snapshot", "--json"])
     assert json.loads(r.output)["fresh"] is False
@@ -252,7 +253,7 @@ def test_cli_plans_dry_run_and_from_plan(
 
     # A stale plan is refused (the object moved after planning).
     store.write(system, "main", {"v": 2})
-    r = runner.invoke(app, ["commit", "-m", "next", "--pull", "--plan", str(plan_file)])
+    r = runner.invoke(app, ["commit", "-m", "next", "--plan", str(plan_file)])
     assert r.exit_code == 0, r.output
     store.write(system, "main", {"v": 3})
     r = runner.invoke(app, ["commit", "--from-plan", str(plan_file)])
@@ -651,12 +652,12 @@ def test_cli_abandon(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
     store.write(system, "main", {"v": 2})
-    r = runner.invoke(app, ["commit", "-m", "v2", "--json", "--pull"])
+    r = runner.invoke(app, ["commit", "-m", "v2", "--json"])
     assert r.exit_code == 0, r.output
     c2 = json.loads(r.output)["vcs_commit"]
     p2 = json.loads(r.output)["pinned"]["db"]
     store.write(system, "main", {"v": 3})
-    assert runner.invoke(app, ["commit", "-m", "v3", "--pull"]).exit_code == 0
+    assert runner.invoke(app, ["commit", "-m", "v3"]).exit_code == 0
 
     r = runner.invoke(app, ["abandon", c2])
     assert r.exit_code == 0, r.output
@@ -718,7 +719,7 @@ def test_cli_restore(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = runner.invoke(app, ["commit", "-m", "v1", "--json"])
     c1 = json.loads(r.output)["vcs_commit"]
     store.write(system, "main", {"v": 2})
-    assert runner.invoke(app, ["commit", "-m", "v2", "--pull"]).exit_code == 0
+    assert runner.invoke(app, ["commit", "-m", "v2"]).exit_code == 0
     r = runner.invoke(app, ["new", "-b", "work", "--eager", "--json"])
     wref = json.loads(r.output)["working_refs"]["db"]
     assert store.resolve(system, wref) != s1
@@ -772,7 +773,7 @@ def test_cli_status_and_ops_flag_vcs_drift(
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
     store.write(system, "main", {"v": 2})
-    r = runner.invoke(app, ["commit", "-m", "v2", "--json", "--pull"])
+    r = runner.invoke(app, ["commit", "-m", "v2", "--json"])
     c2 = json.loads(r.output)["vcs_commit"]
     kind = Repo.find(vcs_root).vcs.kind
     if kind == "jj":
@@ -813,31 +814,29 @@ def test_cli_pull(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
 
+    # On the trunk main *is* the working ref: a fan-out shows it modified and
+    # `pull` commits the head onto main.
     store.write(system, "main", {"v": 2})
     r = runner.invoke(app, ["status", "--snapshot"])
-    assert r.exit_code == 0 and "behind" in r.output
-    r = runner.invoke(app, ["commit", "-m", "nothing", "--dry-run"])
-    assert r.exit_code == 0 and "db: unchanged" in r.output
-
-    assert (
-        runner.invoke(app, ["new", "-b", "work"]).exit_code == 0
-    )  # lazy: fork pending
+    assert r.exit_code == 0 and "modified" in r.output
     r = runner.invoke(app, ["pull"])
     assert r.exit_code == 0, r.output
-    assert "pulled db" in r.output and "commit to pin" in r.output
-    assert "pending working branch will fork from here" in r.output
+    assert "pulled db" in r.output and "committed" in r.output and "on main" in r.output
     r = runner.invoke(app, ["status", "--json"])
-    assert json.loads(r.output)["objects"][0]["state"] == "pulled"
-    r = runner.invoke(app, ["commit", "-m", "take main"])
-    assert r.exit_code == 0 and "pinned db" in r.output
+    assert json.loads(r.output)["objects"][0]["state"] == "clean"
     r = runner.invoke(app, ["pull", "--json"])
-    assert json.loads(r.output)["up_to_date"] == ["db"]
+    payload = json.loads(r.output)
+    assert payload["unchanged"] == ["db"] and payload["vcs_commit"] is None
+    r = runner.invoke(app, ["pull"])
+    assert r.exit_code == 0 and "main is up to date" in r.output
 
+    # Off the trunk, a lazily forked object sits at its pin: nothing to fetch.
+    assert runner.invoke(app, ["new", "-b", "work"]).exit_code == 0
     store.write(system, "main", {"v": 3})
-    r = runner.invoke(app, ["commit", "-m", "in one step", "--pull"])
-    assert r.exit_code == 0 and "pinned db" in r.output
-    r = runner.invoke(app, ["pull", "nope"])
-    assert r.exit_code != 0 and "no such object" in r.output
+    r = runner.invoke(app, ["pull"])
+    assert r.exit_code == 0 and "skipped db: no branch yet" in r.output
+    r = runner.invoke(app, ["pull", "main"])
+    assert r.exit_code != 0 and "tether new main" in r.output
 
 
 def test_cli_set(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

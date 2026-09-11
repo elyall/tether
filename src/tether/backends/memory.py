@@ -123,6 +123,8 @@ class MemoryBackend(ObjectBackend):
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
 
+    base_branch = _base_branch
+
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
         return {"system": self._system(locator)}
