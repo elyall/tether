@@ -9,6 +9,7 @@ expiry, which makes them ideal, GC-proof pins.
 from __future__ import annotations
 
 import contextlib
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -338,32 +339,114 @@ class IcechunkBackend(ObjectBackend):
         out = ObjectDiff(unit="nodes")
         if sid_a == sid_b:
             return out
+        repo = self._repo(locator)
         try:
-            d = self._repo(locator).diff(from_snapshot_id=sid_a, to_snapshot_id=sid_b)
+            d = repo.diff(from_snapshot_id=sid_a, to_snapshot_id=sid_b)
         except ic.IcechunkError as exc:
-            raise BackendError(f"icechunk diff failed: {exc}", kind="icechunk") from exc
-        chunks = dict(getattr(d, "updated_chunks", {}) or {})
-        for path in sorted(d.new_groups):
-            out.add(path, "added", "group")
-        for path in sorted(d.new_arrays):
-            out.add(path, "added", "array")
-        for path in sorted(d.deleted_groups):
-            out.add(path, "removed", "group")
-        for path in sorted(d.deleted_arrays):
-            out.add(path, "removed", "array")
-        for path in sorted(d.updated_groups):
-            out.add(path, "modified", "group metadata")
-        touched = set(d.updated_arrays) | set(chunks)
-        for path in sorted(touched):
-            parts = []
-            if path in d.updated_arrays:
-                parts.append("array metadata")
-            if path in chunks:
-                parts.append(f"{len(chunks[path])} chunks")
-            out.add(path, "modified", ", ".join(parts))
-        for moved in getattr(d, "moved_nodes", []) or []:
-            out.add(f"{moved[0]} -> {moved[1]}", "renamed")
+            # Icechunk only diffs along one line of history. Two branches'
+            # heads share an ancestor: report what either side changed since it.
+            base = self._common_ancestor(repo, sid_a, sid_b)
+            if base is None:
+                raise BackendError(
+                    f"icechunk diff failed: {exc}", kind="icechunk"
+                ) from exc
+            return self._divergent_diff(repo, base, sid_a, sid_b)
+        _collect(out, _entries(d))
         return out
+
+    @staticmethod
+    def _common_ancestor(repo: Any, sid_a: str, sid_b: str) -> str | None:
+        """Newest snapshot in both histories, or `None` if they share none."""
+        in_b = {str(info.id) for info in repo.ancestry(snapshot_id=sid_b)}
+        for info in repo.ancestry(snapshot_id=sid_a):
+            if str(info.id) in in_b:
+                return str(info.id)
+        return None
+
+    @staticmethod
+    def _divergent_diff(repo: Any, base: str, sid_a: str, sid_b: str) -> ObjectDiff:
+        """`a -> b` for snapshots on different branches, via their common base.
+
+        A node only `b` touched keeps `b`'s change; one only `a` touched is
+        reported inverted (what `a` added is absent in `b`); one both touched
+        is `modified`, with both sides' chunk counts summed.
+        """
+        out = ObjectDiff(unit="nodes")
+        side_a = _entries(repo.diff(from_snapshot_id=base, to_snapshot_id=sid_a))
+        side_b = _entries(repo.diff(from_snapshot_id=base, to_snapshot_id=sid_b))
+        inverted = {"added": "removed", "removed": "added"}
+        merged: dict[str, tuple[str, str]] = {}
+        for path in set(side_a) | set(side_b):
+            if path not in side_a:
+                merged[path] = side_b[path]
+            elif path not in side_b:
+                change, detail = side_a[path]
+                merged[path] = (inverted.get(change, change), detail)
+            else:
+                (change_a, detail_a), (change_b, detail_b) = side_a[path], side_b[path]
+                if change_a == "removed" and change_b == "removed":
+                    continue  # gone on both sides
+                if change_b == "removed":
+                    merged[path] = ("removed", detail_b)  # `a` still has it
+                elif change_a == "removed":
+                    merged[path] = ("added", detail_b)  # only `b` has it
+                else:
+                    merged[path] = ("modified", _join_details(detail_a, detail_b))
+        _collect(out, merged)
+        out.note = f"diverged at snapshot {base}; changes on either side"
+        return out
+
+
+def _entries(d: Any) -> dict[str, tuple[str, str]]:
+    """Flatten an `icechunk.Diff` into `path -> (change, detail)`."""
+    chunks = dict(getattr(d, "updated_chunks", {}) or {})
+    entries: dict[str, tuple[str, str]] = {}
+    for path in d.new_groups:
+        entries[path] = ("added", "group")
+    for path in d.new_arrays:
+        entries[path] = ("added", "array")
+    for path in d.deleted_groups:
+        entries[path] = ("removed", "group")
+    for path in d.deleted_arrays:
+        entries[path] = ("removed", "array")
+    for path in d.updated_groups:
+        entries[path] = ("modified", "group metadata")
+    for path in set(d.updated_arrays) | set(chunks):
+        if path in entries:  # a new array's chunks: it is added, not modified
+            continue
+        parts = []
+        if path in d.updated_arrays:
+            parts.append("array metadata")
+        if path in chunks:
+            parts.append(f"{len(chunks[path])} chunks")
+        entries[path] = ("modified", ", ".join(parts))
+    for moved in getattr(d, "moved_nodes", []) or []:
+        entries[f"{moved[0]} -> {moved[1]}"] = ("renamed", "")
+    return entries
+
+
+def _collect(out: ObjectDiff, entries: dict[str, tuple[str, str]]) -> None:
+    order = {"added": 0, "removed": 1, "modified": 2, "renamed": 3}
+    for path, (change, detail) in sorted(
+        entries.items(), key=lambda kv: (order.get(kv[1][0], 9), kv[0])
+    ):
+        out.add(path, change, detail)
+
+
+def _join_details(a: str, b: str) -> str:
+    """Sum `N chunks` across two sides; keep any other wording once."""
+    total = 0
+    words: list[str] = []
+    for detail in (a, b):
+        for part in filter(None, (p.strip() for p in detail.split(","))):
+            m = re.fullmatch(r"(\d+) chunks", part)
+            if m:
+                total += int(m.group(1))
+            elif part not in words:
+                words.append(part)
+    if total:
+        words.append(f"{total} chunks")
+    return ", ".join(words)
 
 
 def _factory(config: dict) -> IcechunkBackend:

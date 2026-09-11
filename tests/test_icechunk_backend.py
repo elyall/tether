@@ -55,6 +55,43 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
+def test_icechunk_diff_across_branches_goes_through_the_common_base(
+    tmp_path: Path,
+) -> None:
+    """Icechunk diffs along one line of history; two heads diff via their base."""
+    from tether.backends.icechunk import IcechunkBackend
+
+    uri = _new_repo(tmp_path / "repo")
+    repo = ic.Repository.open(ic.local_filesystem_storage(uri))
+    base = repo.lookup_branch("main")
+    for branch, value in (("a", 1), ("b", 2)):
+        repo.create_branch(branch, base)
+        session = repo.writable_session(branch)
+        group = zarr.open_group(store=session.store, mode="a")
+        group.attrs["v"] = value
+        if branch == "a":
+            group.create_array("only_a", shape=(2,), dtype="u1")
+        else:
+            group.create_array("only_b", shape=(2,), dtype="u1")
+        session.commit(f"{branch}: v={value}")
+    head_a = {"snapshot_id": repo.lookup_branch("a")}
+    head_b = {"snapshot_id": repo.lookup_branch("b")}
+
+    d = IcechunkBackend().diff({"uri": uri, "branch": "main"}, head_a, head_b)
+    changes = {e.path: e.change for e in d.entries}
+    assert changes["/only_a"] == "removed"  # `a` has it, `b` does not
+    assert changes["/only_b"] == "added"
+    assert changes["/"] == "modified"  # both sides touched the root's metadata
+    assert d.note.startswith(f"diverged at snapshot {base}")
+
+    # Same line of history: the native diff, no note.
+    straight = IcechunkBackend().diff(
+        {"uri": uri, "branch": "main"}, {"snapshot_id": base}, head_a
+    )
+    assert {e.path: e.change for e in straight.entries}["/only_a"] == "added"
+    assert not straight.note
+
+
 def test_icechunk_fork_from_older_snapshot(vcs_root: Path) -> None:
     """Adopt a repo at a non-head snapshot chosen from `history`, then fork it."""
     from tether.backends.base import Capability
