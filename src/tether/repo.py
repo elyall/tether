@@ -4275,7 +4275,7 @@ class Repo:
             a, b = b, a  # b = parent, a = working; present as parent -> working
             resolved_a, resolved_b = resolved_b, None
         elif b is None:
-            b = {}
+            b = self.objects  # `diff REV`: that revision -> the working tree
 
         entries: list[DiffEntry] = []
         for key in sorted(set(a) | set(b)):

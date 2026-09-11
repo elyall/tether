@@ -365,6 +365,21 @@ def test_content_diff_and_listings(vcs_root: Path) -> None:
     assert not orphan.exists()
 
 
+def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
+    """`diff REV` is REV -> working tree, not REV -> nothing."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    r1 = repo.commit("baseline")
+    assert r1.vcs_commit is not None
+    assert all(e.change == "unchanged" for e in repo.diff(r1.vcs_commit))
+
+    default_store().write(system, "main", {"rows": 2})
+    repo.pull(message="moved")  # the working tree's manifest now differs
+    entries = {e.key: e for e in repo.diff(r1.vcs_commit)}
+    assert entries["db"].change == "changed"
+    assert entries["db"].a_pin is not None and entries["db"].b_pin is not None
+
+
 def test_content_diff_reports_backend_failures_per_object(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
