@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -104,12 +105,17 @@ class _HashCache:
     A hit requires all three stat fields to match; a miss hashes the file and
     records it. Without a path (a backend built outside a dataset) the cache
     lives for the process only.
+
+    One cache serves every `file` object of a dataset, and the engine
+    fingerprints objects concurrently, so the table and its file are guarded
+    by a lock; only the hashing itself runs in parallel.
     """
 
     def __init__(self, path: Path | None) -> None:
         self._path = path
         self._entries: dict[str, list[Any]] | None = None
         self._dirty = False
+        self._lock = threading.RLock()
         self.hashed = 0  # files read since construction (tests, diagnostics)
 
     def _load(self) -> dict[str, list[Any]]:
@@ -141,24 +147,23 @@ class _HashCache:
         """Content hash per file, reading only the ones the cache cannot answer."""
         out: dict[Path, str] = {}
         misses: list[tuple[Path, os.stat_result]] = []
-        for path, st in files:
-            known = self.lookup(path, st)
-            if known is None:
-                misses.append((path, st))
-            else:
-                out[path] = known
+        with self._lock:
+            for path, st in files:
+                known = self.lookup(path, st)
+                if known is None:
+                    misses.append((path, st))
+                else:
+                    out[path] = known
         if misses:
-            self.hashed += len(misses)
             if len(misses) == 1:
-                path, st = misses[0]
-                digest = _hash_file(path)
-                self.record(path, st, digest)
-                out[path] = digest
+                digests = [_hash_file(misses[0][0])]
             else:
                 from concurrent.futures import ThreadPoolExecutor
 
                 with ThreadPoolExecutor(max_workers=_HASH_WORKERS) as pool:
                     digests = list(pool.map(lambda m: _hash_file(m[0]), misses))
+            with self._lock:
+                self.hashed += len(misses)
                 for (path, st), digest in zip(misses, digests, strict=True):
                     self.record(path, st, digest)
                     out[path] = digest
@@ -166,15 +171,16 @@ class _HashCache:
         return out
 
     def save(self) -> None:
-        if not self._dirty or self._path is None or self._entries is None:
-            return
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(f".{self._path.name}.tmp")
-        tmp.write_text(
-            json.dumps(self._entries, separators=(",", ":")), encoding="utf-8"
-        )
-        tmp.replace(self._path)
-        self._dirty = False
+        with self._lock:
+            if not self._dirty or self._path is None or self._entries is None:
+                return
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
+            tmp.write_text(
+                json.dumps(self._entries, separators=(",", ":")), encoding="utf-8"
+            )
+            tmp.replace(self._path)
+            self._dirty = False
 
 
 def _dump_listing(rows: ListingRows) -> str:

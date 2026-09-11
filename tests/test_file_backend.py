@@ -315,3 +315,31 @@ def test_hash_cache_rereads_only_changed_files(tmp_path: Path) -> None:
     # Without a cache dir the cache is per process only.
     b3 = FileBackend()
     assert b3.fingerprint(loc, None) == s2 and b3._hashes.hashed == 5
+
+
+def test_hash_cache_is_shared_safely_across_concurrent_fingerprints(
+    tmp_path: Path,
+) -> None:
+    """The engine fingerprints objects concurrently; one cache serves them all.
+
+    Unsynchronised, two objects finishing together raced on the cache's temp
+    file (`rename` of a file the other thread had already moved).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    b = FileBackend()
+    b.configure_cache(tmp_path / "cache")
+    dirs = []
+    for n in range(8):
+        d = tmp_path / f"plate{n}"
+        d.mkdir()
+        for i in range(4):
+            (d / f"{i}.bin").write_bytes(bytes([n * 4 + i]) * 16)
+        dirs.append({"uri": str(d)})
+    for _ in range(3):  # a few rounds to give a race room to show
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            states = list(pool.map(lambda loc: b.fingerprint(loc, None), dirs))
+        assert len({s["digest"] for s in states}) == 8
+    assert b._hashes.hashed == 32  # every file read once, then served from cache
+    cache = json.loads((tmp_path / "cache" / "file-hashes.json").read_text())
+    assert len(cache) == 32
