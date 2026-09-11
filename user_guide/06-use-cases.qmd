@@ -2,11 +2,19 @@
 title: "Use Cases"
 ---
 
-Seven situations tether is built for, each as the commands you would run and
-what they guarantee. They share the dataset the other guides use -- an
-Icechunk store `zarr/imaging`, a Neon database `db/metrics`, a Lance table
-`features`, a directory of raw files `raw/plate1`, and the analysis code
-repository `code` -- and each ends with the guide that explains the mechanics.
+Seven situations tether is built for, told as one story: each section starts
+where the previous one left the dataset, and ends with `jj log` so you can
+see what it did to the repository's history and bookmarks. The dataset is the
+one the other guides use -- an Icechunk store `zarr/imaging`, a Neon database
+`db/metrics`, a Lance table `features`, a directory of raw files `raw/plate1`,
+and the analysis code repository `code` -- and each section ends with the
+guide that explains the mechanics.
+
+The `jj log` output is trimmed to change id, commit id, bookmarks, and
+description; `@` is this checkout's working copy, `◆` the root. Under git,
+read a bookmark as a branch and `@` as `HEAD`.
+
+## 0. Set up
 
 ```bash
 jj git init analysis && cd analysis            # or: git init analysis
@@ -17,6 +25,31 @@ tether add features     --kind lance s3://bucket/features.lance
 tether add raw/plate1   --kind file s3://bucket/raw/plate1/
 tether add code         --kind git ../analysis-code --remote origin
 ```
+
+Nothing has been contacted yet. What the VCS sees is a handful of small TOML
+files -- the config and one manifest per object -- and a `main` bookmark that
+`init` put on the working copy, because `main` is the trunk: the bookmark that
+stands for every object's own `main`.
+
+```bash
+jj status
+```
+
+```
+Working copy changes:
+A .tether/.gitignore
+A .tether/objects/code.toml
+A .tether/objects/db/metrics.toml
+A .tether/objects/features.toml
+A .tether/objects/raw/plate1.toml
+A .tether/objects/zarr/imaging.toml
+A tether.toml
+Working copy  (@) : kmpvtnwq 4f1a2b3c main | (no description set)
+Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+```
+
+`.tether/workspace.toml` and `.tether/ops.jsonl` are not listed: they are
+per-checkout state, ignored by the `.gitignore` that `init` wrote.
 
 ## 1. Reproduce an analysis months later
 
@@ -68,11 +101,18 @@ so at commit time.
 
 This commit was made on the trunk bookmark, `main`, where each object's
 working ref is its own `main`: the inputs are whatever those branches held.
-On a feature bookmark, an object nobody wrote to keeps its pin even while the
-world moves on -- objects you do not touch stay as committed, like files. When
-the next report should read newer inputs, `tether new main` and `tether pull`
-commit the current heads. See
-[Positions](04-branching-and-writing.qmd#positions-and-tether-pull).
+The commit moved the bookmark with it, and jj opened a fresh empty working
+copy on top, as `jj commit` would:
+
+```bash
+jj log
+```
+
+```
+@  xtqmwlkn 3c0dfe12 (empty) (no description set)
+○  kmpvtnwq 8d571984 main | Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
 
 Read next: [Pinning](03-pinning.qmd).
 
@@ -121,7 +161,18 @@ tether diff main --content
                     ... 146 more (use --limit)
 ```
 
-Two endings. Land it:
+```bash
+jj log
+```
+
+```
+@  pmwzlkro 9a4e17b0 (empty) (no description set)
+○  rzpkxwvn 41c0d9e2 relabel-v3 | Relabel plate1 with model v3
+○  kmpvtnwq 8d571984 main | Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
+
+The bookmark moved; `main` did not. Two endings. Land it:
 
 ```bash
 tether promote
@@ -140,19 +191,74 @@ Neon refuses -- there is no way to move `main` onto a child branch -- and says
 what to do instead: run that job on the trunk bookmark so it writes `main`
 directly, or copy the rows across. That refusal is the honest answer, not a
 bug; because of it the trunk bookmark did not move (everything must land for
-`main` to point at the commit).
-
-Or throw it away:
+`main` to point at the commit). Finish the Neon half by hand on the trunk and
+commit there. Pins are content-addressed, so the three objects that
+fast-forwarded get the very pin ids `relabel-v3`'s commit made -- nothing new
+is created in those stores -- and only the database gets a new one:
 
 ```bash
-jj bookmark delete relabel-v3     # the line of work is over
-tether new main                   # back on the trunk
-tether gc --prune-bookmarks       # the bookmark's branches, everywhere it wrote
+tether new main
+pg_dump "$(tether open db/metrics --rev relabel-v3)" | psql "$(tether open db/metrics)"
+tether commit -m "Metrics rewritten for model v3"
 ```
 
-`gc` deletes a branch only when its head is pinned or nothing was written to
-it; the attempt's unpinned writes are kept until you pass `--force-prune`.
-That is the guard against losing an afternoon.
+```
+  pinned code -> tether.0a1b2c3d.9e1c3a0b7d2fe5f6
+  pinned db/metrics -> tether.0a1b2c3d.55e2ab7d9c10e5f6
+  pinned features -> tether.0a1b2c3d.3b7f2e9d0c41e5f6
+  pinned zarr/imaging -> tether.0a1b2c3d.deb4861eb388e5f6
+committed 7f3a2c1d0e5b
+```
+
+```bash
+jj log
+```
+
+```
+@  swqnlvtk d81c9f02 (empty) (no description set)
+○  wknmqzlt 7f3a2c1d main | Metrics rewritten for model v3
+│ ○  rzpkxwvn 41c0d9e2 relabel-v3 | Relabel plate1 with model v3
+├─╯
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
+
+Two lines of history describe the same states now, and the bookmark has done
+its job. Drop the commit and the bookmark; `gc` deletes the branches because
+their heads are pinned (by `main`'s commit, which names the same pins):
+
+```bash
+tether abandon relabel-v3         # the commit; nothing to unpin, main's commit names the same pins
+jj bookmark delete relabel-v3     # the bookmark (tether abandon moved it to the parent)
+tether gc --prune-bookmarks --no-dry-run
+```
+
+```
+abandoned 41c0d9e2b7f3
+deleted 4 branch(es)
+  deleted  code: tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head is pinned
+  deleted  db/metrics: tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head is pinned
+  deleted  features: tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head is pinned
+  deleted  zarr/imaging: tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head is pinned
+```
+
+```bash
+jj log
+```
+
+```
+@  swqnlvtk d81c9f02 (empty) (no description set)
+○  wknmqzlt 7f3a2c1d main | Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
+
+The other ending -- the attempt failed -- is the same three commands without
+the trunk commit in between: `tether abandon relabel-v3 --gc` releases the
+pins only it made, `jj bookmark delete` drops the name, and `gc
+--prune-bookmarks` deletes a branch only when its head is pinned or nothing
+was written to it; the attempt's unpinned writes are kept until you pass
+`--force-prune`. That is the guard against losing an afternoon.
 
 ::: {.callout-note title="Rehearsing a database migration"}
 The same flow rehearses a schema change: `tether new -b migration`, run it
@@ -206,9 +312,9 @@ on bookmark b; working refs set up
 :::
 ::::
 
-**Run and commit.** Each job writes through its own handles; each `commit`
-pins its bookmark's branches, lands a dataset commit in the VCS, and moves
-the bookmark onto it.
+**Run and commit.** Each job labels the imaging store and rewrites the
+feature scores through its own handles; each `commit` pins its bookmark's
+branches, lands a dataset commit in the VCS, and moves the bookmark onto it.
 
 :::: {.columns}
 ::: {.column width="49%"}
@@ -219,7 +325,6 @@ tether commit -m "Labels: candidate A"
 
 ```
   pinned zarr/imaging -> tether.0a1b2c3d.b7e1...
-  pinned db/metrics -> tether.0a1b2c3d.44c0...
   pinned features -> tether.0a1b2c3d.2d9f...
 committed 5a1e9c0d7b2f
 ```
@@ -234,12 +339,30 @@ tether commit -m "Labels: candidate B"
 
 ```
   pinned zarr/imaging -> tether.0a1b2c3d.9c3a...
-  pinned db/metrics -> tether.0a1b2c3d.e08b...
   pinned features -> tether.0a1b2c3d.71d4...
 committed c4d82f1a6e93
 ```
 :::
 ::::
+
+Two bookmarks, two lines of history, one fork point -- and the same shape in
+Icechunk and Lance, where `tether.ws.0a1b2c3d.a` and `tether.ws.0a1b2c3d.b`
+both branch off the pin at `main`. B's working copy shows as `analysis-b@`:
+
+```bash
+jj log
+```
+
+```
+@  ozxwmqtn e7b2c4a1 (empty) (no description set)
+○  vmnzstyq 5a1e9c0d a | Labels: candidate A
+│ ○  lwqrtxsu 3f9d0e6b analysis-b@ (empty) (no description set)
+│ ○  qwrlkupt c4d82f1a b | Labels: candidate B
+├─╯
+○  wknmqzlt 7f3a2c1d main | Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
 
 **Compare** -- from either checkout, as datasets rather than directories:
 
@@ -251,8 +374,6 @@ tether diff a b --content
    modified  zarr/imaging  [1 array changed, 148 chunks]
                     modified  labels/0.0.0
                     ...
-   modified  db/metrics  [1 table changed]
-                    modified  public.metrics  +1200 rows, -1200 rows
    modified  features  [3 fragments added, 3 removed]
 ```
 
@@ -269,7 +390,6 @@ tether promote
 ```
   fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK...'}
   fast-forwarded features -> {'branch': 'main', 'version': 42}
-  fast-forwarded code -> {'sha': '9e1c...'}
 main -> 5a1e9c0d7b2f
 ```
 :::
@@ -305,14 +425,12 @@ forgot workspace 3e9b2c71
   removed  /.../analysis-b/.tether/workspace.toml
   vcs      jj workspace 'analysis-b' forgotten (its directory is left in place)
 abandoned c4d82f1a6e93
-unpinned 3 pin(s)
+unpinned 2 pin(s)
   icechunk: 0a1b2c3d.9c3a...
-  neon: 0a1b2c3d.e08b...
   lance: 0a1b2c3d.71d4...
-deleted 2 branch(es); kept 1
+deleted 2 branch(es)
   deleted  zarr/imaging: tether.ws.0a1b2c3d.b  FORCED although it has unpinned writes
   deleted  features: tether.ws.0a1b2c3d.b  FORCED although it has unpinned writes
-  kept     db/metrics: tether.ws.0a1b2c3d.b  cannot be deleted: pins hang off it
 ```
 :::
 ::: {.column width="2%"}
@@ -324,10 +442,26 @@ remove` already did, for git).
 Without `--force-prune`, `gc` keeps the two branches and says so: B's writes
 are on them and nothing else holds them. Delete the bookmark *before* the
 abandon and `gc` sees pinned heads and deletes them without force -- the
-abandon then only releases the pins. Neon's branch is kept either way while
-pins hang off it.
+abandon then only releases the pins.
 :::
 ::::
+
+```bash
+jj log
+```
+
+```
+@  ozxwmqtn e7b2c4a1 (empty) (no description set)
+○  vmnzstyq 5a1e9c0d a main | Labels: candidate A
+○  wknmqzlt 7f3a2c1d Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
+
+B is gone from history, its pins from the stores, and its branches from
+Icechunk and Lance. `a` and `main` point at the same commit; `jj bookmark
+delete a` and a later `gc --prune-bookmarks` retire the winner's branches the
+same way once nobody works on them.
 
 Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-bookmarks),
 [Reclaiming Storage](05-reclaiming-storage.qmd).
@@ -338,11 +472,26 @@ Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-b
 will change under you eventually, and you would rather hear it from a cron job
 than from a wrong result.*
 
-Register the inventory -- by hand, or from the registry that already lists it:
+Back on the trunk, register the inventory -- by hand, or from the registry
+that already lists it -- and commit it:
 
 ```bash
+tether new main
 tether import inventory.csv       # key, kind, uri, ... one row per object
 tether commit -m "Inventory as of 2026-09-01"
+```
+
+```bash
+jj log
+```
+
+```
+@  hrnpqvxs 0c7e5d3a (empty) (no description set)
+○  nsxkopmv 2b9e4d10 main | Inventory as of 2026-09-01
+○  vmnzstyq 5a1e9c0d a | Labels: candidate A
+○  wknmqzlt 7f3a2c1d Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
 ```
 
 Then schedule two commands:
@@ -375,27 +524,203 @@ manifest says:
 Nothing watches anything. Each run fingerprints the objects (an Icechunk
 snapshot id, a Neon LSN, a Lance version, one `LIST` of the prefix) and
 compares them with the manifests; the cost is one round of metadata calls.
+Neither command touches history. A third one does, when you want the dataset
+to *trail* the world rather than merely watch it: a nightly `tether pull` on
+`main` commits whatever moved, and leaves nothing when nothing did.
+
+```bash
+tether pull
+```
+
+```
+  pulled db/metrics  lsn=0/1A2B3C4D -> lsn=0/1B0000F8
+  pulled raw/plate2  digest=9f2e1c… -> digest=0b7a4d…
+  up to date zarr/imaging
+  up to date features
+  up to date code
+committed 66a1b2c3d4e5 on main
+```
+
+```bash
+jj log
+```
+
+```
+@  gkvsxwmp 5e2a1b9c (empty) (no description set)
+○  tpywqzlo 66a1b2c3 main | pull main: 2 objects
+○  nsxkopmv 2b9e4d10 Inventory as of 2026-09-01
+○  vmnzstyq 5a1e9c0d a | Labels: candidate A
+○  wknmqzlt 7f3a2c1d Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
 
 Read next: [Pinning](03-pinning.qmd#drift), [Registries and SQL](10-registries-and-sql.qmd).
 
-## 5. Publish history to a registry (experimental)
+## 5. Keep the data bill down
+
+*Two weeks of experiments, five commits a day, each pinning a snapshot the
+store must now keep. Only the last one matters.*
+
+Decide at `add` time which objects deserve durable pins, and run the sweep on
+its own bookmark:
+
+```bash
+tether add scratch/features --kind iceberg db.scratch_features --pin record   # no tag; the recorded snapshot lives as long as the table's retention
+tether new -b sweep
+python sweep.py --trial 1 && tether commit -m "sweep: trial 1"
+python sweep.py --trial 2 && tether commit -m "sweep: trial 2"
+python sweep.py --trial 3 && tether commit -m "sweep: trial 3"
+python sweep.py --trial 4 && tether commit -m "sweep: trial 4"
+```
+
+```bash
+jj log -r 'main::@'
+```
+
+```
+@  yqtmxrwo 91d0a3e7 (empty) (no description set)
+○  snyqvxop dd04f1a9 sweep | sweep: trial 4
+○  krlwtmzy cc03e8b2 sweep: trial 3
+○  ptnwqsyu bb02d7c1 sweep: trial 2
+○  ulmxrkzt aa01c6d0 sweep: trial 1
+○  tpywqzlo 66a1b2c3 main | pull main: 2 objects
+~
+```
+
+When the experiment is over, drop the commits that were only tries and see
+what that frees, in one step. Later commits keep their manifests exactly as
+they were (they are snapshots, not patches), so trial 4 still names its own
+pins:
+
+```bash
+tether abandon ptnwqsyu krlwtmzy --gc
+```
+
+```
+abandoned bb02d7c1e9f0, cc03e8b2a7d6
+unpinned 4 pin(s)
+  icechunk: 0a1b2c3d.7d1e0c9a2b34e5f6
+  icechunk: 0a1b2c3d.c48b2f6e1d07a9b0
+  lance: 0a1b2c3d.7d1e0c9a2b34e5f6
+  lance: 0a1b2c3d.c48b2f6e1d07a9b0
+```
+
+```bash
+jj log -r 'main::@'
+```
+
+```
+@  yqtmxrwo 4b8e2f01 (empty) (no description set)
+○  snyqvxop ee05a0c3 sweep | sweep: trial 4
+○  ulmxrkzt aa01c6d0 sweep: trial 1
+○  tpywqzlo 66a1b2c3 main | pull main: 2 objects
+~
+```
+
+Trial 4 was rebased onto trial 1 (new commit id, same change id, same
+manifests), the `sweep` bookmark followed it, and `scratch/features` freed
+nothing -- it had no pins to release, which was the point of `--pin record`.
+Releasing a tag makes the snapshot *eligible*; the store reclaims the bytes on
+its own schedule (`repo.expire_snapshots(...)` then `repo.garbage_collect(...)`
+for Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
+retention show up in `tether verify --all-history` as missing -- that is the
+trade you made with `--pin record`, stated back to you.
+
+Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
+
+## 6. Recover
+
+*Something went wrong. Three kinds of wrong, and what comes back.*
+
+**An unwanted `new`** -- you started a bookmark you did not mean to and forked
+into it. The op log knows what was created:
+
+```bash
+tether new -b scratch --eager
+tether ops
+tether undo
+```
+
+```
+undid 3f1c9a2b7d4e (new: forked db/metrics, zarr/imaging; on scratch)
+  restored   db/metrics: deleted tether.ws.0a1b2c3d.scratch
+  restored   zarr/imaging: deleted tether.ws.0a1b2c3d.scratch
+  restored   workspace.toml restored
+  restored   bookmark scratch deleted
+```
+
+**One object's branch on the wrong state** -- everything else is fine, only
+`zarr/imaging` should go back to what an older commit pinned:
+
+```bash
+tether restore zarr/imaging --from 8d5719841a09
+```
+
+The other branches, the manifests, and the working copy stay put; the next
+`commit` pins what you restored. (Here it was a demonstration, so `tether
+undo` puts the `sweep` branch back to trial 4's head before we go on.)
+
+**A pin deleted by hand, or by a `gc` run on the wrong clone** -- the
+manifests still promise it:
+
+```bash
+tether verify              # drifted / missing
+tether repair              # recreate every missing pin from its recorded state, while the store still has it
+```
+
+```
+repinned  zarr/imaging -> 0a1b2c3d.6674305d5e1fe5f6
+```
+
+And when several things went wrong in a row, `tether undo --to <op id>` walks
+back through every operation newer than that one, stopping -- with everything
+so far reversed -- at the first the store will not allow.
+
+None of this touched history: the `scratch` bookmark came and went without a
+commit, and `restore` and `repair` act on the stores. The log is what section
+5 left, and the workspace is back on `sweep`:
+
+```bash
+jj log -r 'main::@'
+```
+
+```
+@  yqtmxrwo 4b8e2f01 (empty) (no description set)
+○  snyqvxop ee05a0c3 sweep | sweep: trial 4
+○  ulmxrkzt aa01c6d0 sweep: trial 1
+○  tpywqzlo 66a1b2c3 main | pull main: 2 objects
+~
+```
+
+The boundary: `jj undo` and `git reset` move the manifests, never the stores;
+tether's `undo` and `repair` cover tether's side and say exactly what they
+could not do (a pin whose snapshot the store already expired, a `promote`).
+`status` also tells you when a dataset commit vanished from the VCS behind
+tether's back, or a bookmark was deleted, renamed, or moved by hand.
+
+Read next: [CLI Guide](07-cli.qmd#ops-undo-repair), [Concepts](02-concepts.qmd#the-operation-log).
+
+## 7. Publish history to a registry (experimental)
 
 *A dashboard, a training pipeline, and a data catalog all want to know which
 state of which table a run used. None of them should have to clone the
 repository to find out.*
 
-After every merge to `main`, push the history into Postgres:
+Land the sweep first, then push the history into Postgres -- after every
+`promote` to `main`, typically from CI:
 
 ```bash
+tether promote                                   # sweep -> main (fast-forwards; main moves)
 tether publish --to "$REGISTRY_DSN" --schema tether
 ```
 
 ```
-published 27 row(s) to schema 'tether' (0 commit(s) already present)
-  commits               3 row(s)
-  commit_parents        2 row(s)
-  objects              12 row(s)
-  object_states        10 row(s)
+published 41 row(s) to schema 'tether' (0 commit(s) already present)
+  commits               7 row(s)
+  commit_parents        6 row(s)
+  objects              22 row(s)
+  object_states        16 row(s)
 ```
 
 Consumers join their own run log against `tether.object_states`:
@@ -416,94 +741,23 @@ Producers and consumers meet in the middle: the producer commits and
 publishes, the consumer's pipeline runs `tether verify --rev <commit>` before
 training and refuses to start on a pin that is gone.
 
+`publish` writes to Postgres, not to the repository; only the `promote` moved
+anything here. The story ends with every line of work landed on `main`:
+
+```bash
+jj log
+```
+
+```
+@  yqtmxrwo 4b8e2f01 (empty) (no description set)
+○  snyqvxop ee05a0c3 main sweep | sweep: trial 4
+○  ulmxrkzt aa01c6d0 sweep: trial 1
+○  tpywqzlo 66a1b2c3 pull main: 2 objects
+○  nsxkopmv 2b9e4d10 Inventory as of 2026-09-01
+○  vmnzstyq 5a1e9c0d a | Labels: candidate A
+○  wknmqzlt 7f3a2c1d Metrics rewritten for model v3
+○  kmpvtnwq 8d571984 Inputs for the Q3 report
+◆  zzzzzzzz 00000000
+```
+
 Read next: [Registries and SQL](10-registries-and-sql.qmd).
-
-## 6. Keep the data bill down
-
-*Two weeks of experiments, five commits a day, each pinning a snapshot the
-store must now keep. Only the last one matters.*
-
-Decide at `add` time which objects deserve durable pins:
-
-```bash
-tether add scratch/features --kind iceberg db.scratch_features --pin record   # no tag; the recorded snapshot lives as long as the table's retention
-tether add features         --kind lance s3://bucket/features.lance              # native pins: tags the store will not expire
-```
-
-When the experiment is over, drop the commits that were only tries and see
-what that frees, in one step:
-
-```bash
-tether abandon krlwtmzy ptnwqsyu --gc
-```
-
-```
-abandoned 3c1e9f0a2b7d, 8d2f4a1b9c0e
-unpinned 4 pin(s)
-  icechunk: 0a1b2c3d.7d1e0c9a2b34e5f6
-  icechunk: 0a1b2c3d.c48b2f6e1d07a9b0
-  lance: 0a1b2c3d.7d1e0c9a2b34e5f6
-  lance: 0a1b2c3d.c48b2f6e1d07a9b0
-```
-
-Releasing a tag makes the snapshot *eligible*; the store reclaims the bytes on
-its own schedule (`repo.expire_snapshots(...)` then `repo.garbage_collect(...)`
-for Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
-retention show up in `tether verify --all-history` as missing -- that is the
-trade you made with `--pin record`, stated back to you.
-
-Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
-
-## 7. Recover
-
-*Something went wrong. Three kinds of wrong, and what comes back.*
-
-**An unwanted `new`** -- you re-forked and shouldn't have. The op log knows
-what was created and reset:
-
-```bash
-tether ops
-tether undo
-```
-
-```
-undid 3f1c9a2b7d4e (new: forked db/metrics, zarr/imaging)
-  restored   db/metrics: deleted tether.ws.0a1b2c3d.relabel
-  restored   zarr/imaging: tether.ws.0a1b2c3d.relabel back at snapshot_id=K3F7...
-  restored   workspace.toml restored
-  restored   bookmark relabel deleted
-```
-
-**One object's branch on the wrong state** -- everything else is fine, only
-`zarr/imaging` should go back to what an older commit pinned:
-
-```bash
-tether restore zarr/imaging --from 8d5719841a09
-```
-
-The other branches, the manifests, and the working copy stay put; the next
-`commit` pins what you restored.
-
-**A pin deleted by hand, or by a `gc` run on the wrong clone** -- the
-manifests still promise it:
-
-```bash
-tether verify              # drifted / missing
-tether repair              # recreate every missing pin from its recorded state, while the store still has it
-```
-
-```
-repinned  zarr/imaging -> 0a1b2c3d.6674305d5e1fe5f6
-```
-
-And when several things went wrong in a row, `tether undo --to <op id>` walks
-back through every operation newer than that one, stopping -- with everything
-so far reversed -- at the first the store will not allow.
-
-The boundary: `jj undo` and `git reset` move the manifests, never the stores;
-tether's `undo` and `repair` cover tether's side and say exactly what they
-could not do (a pin whose snapshot the store already expired, a `promote`).
-`status` also tells you when a dataset commit vanished from the VCS behind
-tether's back.
-
-Read next: [CLI Guide](07-cli.qmd#ops-undo-repair), [Concepts](02-concepts.qmd#the-operation-log).
