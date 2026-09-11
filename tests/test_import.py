@@ -313,7 +313,7 @@ def test_import_locator_change_drops_the_working_branch(vcs_root: Path) -> None:
     s1, s2 = _system(), _system()
     repo.add("db", "memory", {"system": s1, "branch": "main"})
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     old_ref = repo.workspace.working_refs["db"]
     assert "db" in repo.workspace.base_states and "db" in repo.workspace.fork_points
 

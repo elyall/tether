@@ -52,6 +52,7 @@ from tether.manifest import (
     listing_name,
     manifest_hash,
     ref_for_pin,
+    working_ref_bookmark,
     working_ref_name,
     working_ref_workspace,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "ref_for_pin",
     "testing",
     "vcs",
+    "working_ref_bookmark",
     "working_ref_name",
     "working_ref_workspace",
 ]

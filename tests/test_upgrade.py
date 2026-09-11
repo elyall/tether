@@ -183,7 +183,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     # Both sides agree: verify is clean across history, gc finds nothing to unpin.
     reports = repo.verify(all_history=True)
     assert all(r.status is VerifyStatus.OK for r in reports.values()), reports
-    gc_plan = repo.plan_gc(prune_workspaces=True)
+    gc_plan = repo.plan_gc(prune_bookmarks=True)
     assert not [a for a in gc_plan.actions if a.op == "unpin"]
     # The dead workspace's renamed branch is now judged like any other stray.
     (stray,) = [a for a in gc_plan.actions if a.target == br_dead.target]

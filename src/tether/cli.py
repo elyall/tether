@@ -672,7 +672,22 @@ def commit(
 
 @app.command()
 def new(
-    rev: str | None = typer.Argument(None, help="Revision to fork from."),
+    rev: str | None = typer.Argument(
+        None, help="Bookmark to work on, or a revision to start -b NAME from."
+    ),
+    bookmark: str | None = typer.Option(
+        None,
+        "-b",
+        "--bookmark",
+        help="Create this bookmark at REV (default: here) and work on it: one store "
+        "branch per Forkable object, named after it.",
+    ),
+    shared: bool = typer.Option(
+        False,
+        "--shared",
+        help="Work on a bookmark another live checkout already holds (both then "
+        "write the same store branches).",
+    ),
     keep: bool = typer.Option(
         False, "--keep", help="Keep current working refs; only refresh the baseline."
     ),
@@ -701,17 +716,17 @@ def new(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Start working on top of REV: set up writable branches off its pins.
+    """Start working on a bookmark: its store branches become your working refs.
 
-    Moves the VCS working copy to REV if given, then decides a
-    `tether.ws.<workspace>.<key>` branch per Forkable object. By default the
-    branch is created lazily, on the first writable `open` (workspaces that
-    never write leave nothing behind); `--eager` creates them all now.
-    `pin = "record"` objects always fork now, from their recorded state, so it
-    cannot expire underneath them. Track-policy objects stay on their base
-    branch. A working branch you already have is reset; if it holds writes you
-    never committed, `new` refuses unless you pass `--discard`. `--dry-run` /
-    `--plan` preview; `--from-plan` applies a saved plan.
+    `tether new -b NAME [REV]` creates bookmark NAME (at REV, default here) and
+    forks a `tether.ws.<dataset>.NAME` branch per Forkable object off its
+    pins -- lazily, on the first writable `open`, or now with `--eager`.
+    `tether new NAME` joins an existing bookmark; `tether new main` (the
+    trunk) writes straight to every object's upstream branch; `tether new REV`
+    with no bookmark there is read-only. A bookmark another live checkout holds
+    is refused unless `--shared`. A working branch that holds writes you never
+    committed is not reset unless `--discard`. `--dry-run` / `--plan` preview;
+    `--from-plan` applies a saved plan.
     """
     repo = _repo()
     try:
@@ -719,7 +734,14 @@ def new(
             plan = _load_plan(from_plan, "new")
             repo.apply_new(plan)
         else:
-            plan = repo.plan_new(rev, keep=keep, eager=eager, discard=discard)
+            plan = repo.plan_new(
+                rev,
+                bookmark=bookmark,
+                shared=shared,
+                keep=keep,
+                eager=eager,
+                discard=discard,
+            )
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
@@ -730,6 +752,7 @@ def new(
     if json_out:
         _emit(
             {
+                "bookmark": repo.workspace.bookmark,
                 "working_refs": repo.workspace.working_refs,
                 "pending_forks": repo.workspace.pending_forks,
                 "fork_points": repo.workspace.fork_points,
@@ -737,9 +760,12 @@ def new(
             as_json=True,
         )
         return
-    typer.echo(
-        "kept working refs" if plan.context.get("keep") else "working refs set up"
-    )
+    if repo.workspace.bookmark is None:
+        typer.echo("on no bookmark: read-only (`tether new -b NAME` to write)")
+        return
+    where = "trunk " if repo.on_trunk() else ""
+    verb = "kept working refs" if plan.context.get("keep") else "working refs set up"
+    typer.echo(f"on {where}bookmark {repo.workspace.bookmark}; {verb}")
     for key, ref in sorted(repo.workspace.working_refs.items()):
         typer.echo(f"  {key} -> {ref}")
     for key, ref in sorted(repo.workspace.pending_forks.items()):
@@ -1350,22 +1376,23 @@ def gc(
     dry_run: bool = typer.Option(
         True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."
     ),
-    prune_workspaces: bool = typer.Option(
+    prune_bookmarks: bool = typer.Option(
         False,
-        "--prune-workspaces",
-        help="Also delete `tether.ws.*` branches left by other workspaces.",
+        "--prune-bookmarks",
+        help="Also delete `tether.ws.*` branches of bookmarks that are gone, legacy "
+        "per-workspace branches, and this workspace's unused ones.",
     ),
-    keep_workspace: list[str] = typer.Option(
+    keep_bookmark: list[str] = typer.Option(
         [],
-        "--keep-workspace",
-        help="Extra workspace id (or 8-char prefix) whose branches --prune-workspaces "
-        "must keep, e.g. a checkout on another machine; repeatable. Every live jj "
-        "workspace / git worktree of this repository is kept automatically.",
+        "--keep-bookmark",
+        help="Bookmark whose branches --prune-bookmarks must keep although the VCS "
+        "here does not have it (e.g. it lives on another machine); repeatable. "
+        "Bookmarks the VCS has, or a live checkout works on, are kept automatically.",
     ),
     force_prune: bool = typer.Option(
         False,
         "--force-prune",
-        help="With --prune-workspaces: delete stray branches even when they hold "
+        help="With --prune-bookmarks: delete stray branches even when they hold "
         "unpinned writes, a pin-less recorded state, or are the storage itself "
         "(Neon). Data on them is lost.",
     ),
@@ -1380,15 +1407,15 @@ def gc(
     """Release native pins that no manifest in VCS history references.
 
     Also forgets this workspace's refs for removed objects and deletes
-    unreferenced listings. `--prune-workspaces` evaluates stray
-    `tether.ws.*` branches -- those of workspaces that no longer exist (live jj
-    workspaces / git worktrees are found and kept automatically) and this
-    one's unused: a branch is deleted only if its head is pinned or equals the
-    base head, otherwise kept -- `--force-prune` deletes those too. Dry-run by
-    default: pass `--no-dry-run` (or `--from-plan`) to release.
+    unreferenced listings. `--prune-bookmarks` evaluates stray `tether.ws.*`
+    branches -- those of bookmarks that no longer exist (bookmarks the VCS has
+    or a live checkout works on are kept), legacy per-workspace branches, and
+    this bookmark's unused ones: a branch is deleted only if its head is pinned
+    or equals the base head, otherwise kept -- `--force-prune` deletes those
+    too. Dry-run by default: pass `--no-dry-run` (or `--from-plan`) to release.
     """
-    if force_prune and not prune_workspaces:
-        _fail(TetherError("--force-prune requires --prune-workspaces"))
+    if force_prune and not prune_bookmarks:
+        _fail(TetherError("--force-prune requires --prune-bookmarks"))
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1396,8 +1423,8 @@ def gc(
             report: GcReport = repo.apply_gc(plan)
         else:
             plan = repo.plan_gc(
-                prune_workspaces=prune_workspaces,
-                keep_workspaces=set(keep_workspace) or None,
+                prune_bookmarks=prune_bookmarks,
+                keep_bookmarks=set(keep_bookmark) or None,
                 force_prune=force_prune,
             )
             if dry_run or plan_out is not None:

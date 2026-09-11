@@ -53,6 +53,7 @@ from tether.manifest import (
     Policy,
     RepoConfig,
     State,
+    bookmark_slug,
     compute_pin_id,
     ensure_ignored,
     ensure_layout,
@@ -67,6 +68,7 @@ from tether.manifest import (
     read_workspace,
     ref_for_pin,
     remove_object,
+    working_ref_bookmark,
     working_ref_dataset,
     working_ref_name,
     working_ref_workspace,
@@ -539,7 +541,20 @@ class Repo:
             git_path=config.vcs.get("git_path"),
             prefer=str(config.vcs.get("prefer", "jj")),
         )
+        # The trunk bookmark stands for every object's upstream branch; start
+        # the working copy on it, as a fresh git repository is on `main`. Under
+        # git the branch HEAD is on *is* the trunk, whatever it is called.
+        here = vcs.current_bookmarks()
+        if vcs.kind == "git":
+            if here and here[0] != config.trunk:
+                config.vcs["trunk"] = here[0]
+                write_config(root, config)
+            elif not here:  # detached HEAD: park the dataset on the trunk branch
+                vcs.new_bookmark(config.trunk, None)
+        elif config.trunk not in vcs.bookmarks():
+            vcs.bookmark_set(config.trunk, "@")
         repo = cls(root, config, vcs)
+        repo.workspace.bookmark = config.trunk
         write_workspace(root, repo.workspace)
         return repo
 
@@ -585,10 +600,69 @@ class Repo:
         return backend
 
     def _working_ref_for(self, key: str) -> str:
-        """The working-branch name this workspace uses for `key`."""
-        return working_ref_name(
-            self.config.dataset_id, self.workspace.workspace_id, key
-        )
+        """The store branch this workspace's bookmark stands for (`key` names
+        the object; objects sharing a system share the branch)."""
+        if self.workspace.bookmark is None:
+            raise StaleWorkingCopyError(
+                "this working copy is on no bookmark and is read-only; "
+                "`tether new -b NAME` to start one, or `tether new NAME` to join one"
+            )
+        return working_ref_name(self.config.dataset_id, self.workspace.bookmark)
+
+    def _check_on_bookmark(self) -> None:
+        """Refuse to commit when the VCS working copy has left the workspace's
+        bookmark (a `jj new` / `git switch` behind tether's back): the commit
+        would move the bookmark somewhere its store branches do not describe."""
+        b = self.workspace.bookmark
+        if b is None:
+            return
+        marks = self.vcs.bookmarks()
+        here = self.vcs.current_bookmarks()
+        if b not in marks:
+            if self.vcs.kind == "git" and here == [b]:
+                return  # an unborn branch: HEAD is on it, the first commit births it
+            raise StaleWorkingCopyError(
+                f"bookmark {b!r} no longer exists; `tether new -b {b}` recreates it, "
+                "`tether new NAME` joins another"
+            )
+        ok = self.vcs.is_ancestor(b, "@") if self.vcs.kind == "jj" else here == [b]
+        if not ok:
+            raise StaleWorkingCopyError(
+                f"the working copy is not on bookmark {b!r} (it moved to "
+                f"{', '.join(here) or 'no bookmark'}); run `tether new {b}` to return, "
+                "or `tether new` to work where you are"
+            )
+
+    def _pick_bookmark(self, candidates: list[str]) -> str | None:
+        """Which of the bookmarks on a commit to work on: the one this
+        workspace already has, else the trunk, else the only one, else none."""
+        if self.workspace.bookmark in candidates:
+            return self.workspace.bookmark
+        if self.config.trunk in candidates:
+            return self.config.trunk
+        return candidates[0] if len(candidates) == 1 else None
+
+    def on_trunk(self) -> bool:
+        """Whether this workspace works on the trunk bookmark (`config.trunk`),
+        where every object's working ref is its upstream branch."""
+        return self.workspace.bookmark == self.config.trunk
+
+    def bookmark_holders(self, bookmark: str) -> list[str]:
+        """Workspace ids of *other* live checkouts working on `bookmark`."""
+        rel = self._dataset_rel()
+        held: list[str] = []
+        for root in self.vcs.workspace_roots():
+            path = workspace_path(root / rel)
+            if not path.is_file() or (root / rel).resolve() == self.root.resolve():
+                continue
+            with contextlib.suppress(Exception):
+                ws = read_workspace(root / rel)
+                if (
+                    ws.bookmark == bookmark
+                    and ws.workspace_id != self.workspace.workspace_id
+                ):
+                    held.append(ws.workspace_id[:8])
+        return held
 
     def _working_ref(self, key: str) -> str | None:
         return self.workspace.working_refs.get(key)
@@ -611,6 +685,23 @@ class Repo:
             return self.root.relative_to(self.vcs.root)
         except ValueError:  # pragma: no cover - dataset outside vcs root
             return Path(".")
+
+    def live_bookmarks(self) -> set[str]:
+        """Bookmarks whose store branches must stay: every bookmark the VCS
+        has, plus any a live checkout's `workspace.toml` still works on."""
+        names = set(self.vcs.bookmarks())
+        if self.workspace.bookmark:
+            names.add(self.workspace.bookmark)
+        rel = self._dataset_rel()
+        for root in self.vcs.workspace_roots():
+            path = workspace_path(root / rel)
+            if not path.is_file():
+                continue
+            with contextlib.suppress(Exception):
+                b = read_workspace(root / rel).bookmark
+                if b:
+                    names.add(b)
+        return names
 
     def live_workspace_ids(self) -> set[str]:
         """Workspace ids of every live checkout of this dataset (this one included).
@@ -773,7 +864,7 @@ class Repo:
         keys = set(self.workspace.working_refs) | set(self.workspace.pending_forks)
         for key in sorted(keys):
             m = self.objects.get(key)
-            if m is None or m.policy.write == "direct" or m.state is None:
+            if m is None or self.on_trunk() or m.state is None:
                 continue
             expected = self.workspace.base_states.get(key)
             if expected is None or not self._same(m.kind, m.state, expected):
@@ -1031,8 +1122,8 @@ class Repo:
                 report.skipped[key] = "not committed yet; the first commit reads it"
             elif self.workspace.working_refs.get(key) is not None:
                 ref = self.workspace.working_refs[key]
-                if m.policy.write == "direct":
-                    report.skipped[key] = f"direct: already on {ref}"
+                if self.on_trunk():
+                    report.skipped[key] = f"on trunk: already on {ref}"
                 else:
                     report.skipped[key] = (
                         f"has working branch {ref}; commit it, or `new --discard`"
@@ -1408,6 +1499,8 @@ class Repo:
         if plan.command != "commit":
             raise ConfigError(f"expected a commit plan, got {plan.command!r}")
         message = str(plan.context.get("message", ""))
+        if vcs:
+            self._check_on_bookmark()
         object_actions = [a for a in plan.actions if a.op in ("pin", "record")]
         if verify:
             if plan.context.get("manifest_hash") != self.current_manifest_hash():
@@ -1483,7 +1576,11 @@ class Repo:
         # already dirty in the working tree (an undone commit, an `add`, an
         # `import`): the dataset commit is what makes them history.
         if vcs and (outcomes or self.vcs.dirty(self._vcs_paths())):
-            result.vcs_commit = self.vcs.commit(self._vcs_paths(), message)
+            # The bookmark follows the commit: its store branches' heads are
+            # what the commit pinned.
+            result.vcs_commit = self.vcs.commit(
+                self._vcs_paths(), message, advance=self.workspace.bookmark
+            )
 
         # What this workspace just committed is, by definition, not stale.
         self._mark_base_states(
@@ -1571,17 +1668,31 @@ class Repo:
         self,
         rev: str | None = None,
         *,
+        bookmark: str | None = None,
+        shared: bool = False,
         keep: bool = False,
         eager: bool | None = None,
         discard: bool = False,
     ) -> Plan:
         """Compute what `new` would do without writing anywhere.
 
-        Reads the manifests at `rev` (or the working tree) and decides per
-        `FORK`-capable object: `direct` (use the base branch), `fork` now, or
-        `defer-fork` (create the branch on the first writable `open`), or skip
-        (no committed state yet). `apply_new` moves the VCS working copy to
-        `rev` first when one is given.
+        Decides which dataset *bookmark* this workspace works on, then per
+        `FORK`-capable object what its working ref is. On the trunk bookmark
+        (`config.trunk`, default `main`) every object's working ref is its
+        upstream branch (`trunk`). On any other bookmark it is the store
+        branch named after the bookmark (`working_ref_name`): `fork` now,
+        `defer-fork` (create it on the first writable `open`), or `reuse` when
+        it already sits at the pin. With no bookmark the working copy is
+        read-only. `apply_new` moves the VCS working copy first.
+
+        The bookmark is `bookmark` when given (`-b NAME`: created at `rev`;
+        refused if it exists), else `rev` when `rev` names a bookmark, else
+        one at `rev`'s commit -- the one this workspace already works on,
+        else the trunk, else the only one -- else, with no `rev`, the same
+        choice among the bookmarks the VCS working copy is on. A bookmark
+        another live workspace holds is refused unless `shared`: two checkouts
+        writing one store branch is a choice, not a default. The trunk is
+        never refused.
 
         Forks are deferred by default (`config.new_fork == "lazy"`) when the
         source is a native pin: a pin is durable, so the branch can be created
@@ -1605,10 +1716,34 @@ class Repo:
         """
         objects = self._objects_at(self.vcs.resolve(rev)) if rev else self.objects
         eager = (self.config.new_fork == "eager") if eager is None else eager
+        known = self.vcs.bookmarks()
+        create = False
+        if bookmark is not None:
+            if bookmark in known:
+                raise ConfigError(
+                    f"bookmark {bookmark!r} exists; `tether new {bookmark}` joins it"
+                )
+            create = True
+        elif rev is not None and rev in known:
+            bookmark = rev
+        elif rev is not None:
+            at = [b for b, c in known.items() if c == self.vcs.resolve(rev)]
+            bookmark = self._pick_bookmark(at)
+        elif keep:
+            bookmark = self.workspace.bookmark
+        else:
+            here = self.vcs.current_bookmarks()
+            if self.workspace.bookmark is not None and not here:
+                bookmark = self.workspace.bookmark
+            else:
+                bookmark = self._pick_bookmark(here)
         plan = Plan(
             command="new",
             context={
                 "rev": rev,
+                "bookmark": bookmark,
+                "create": create,
+                "shared": shared,
                 "keep": keep,
                 "eager": eager,
                 "discard": discard,
@@ -1619,16 +1754,43 @@ class Repo:
         if keep:
             plan.notes.append("keep: refresh the baseline only; working refs unchanged")
             return plan
+        if bookmark is None:
+            plan.notes.append(
+                "no bookmark: read-only working copy (`tether new -b NAME` to write)"
+            )
+            return plan
+        trunk = bookmark == self.config.trunk
+        if not trunk and not shared:
+            holders = self.bookmark_holders(bookmark)
+            if holders:
+                plan.actions.append(
+                    Action(
+                        "refuse",
+                        detail=(
+                            f"bookmark {bookmark!r} is held by live workspace(s) "
+                            f"{', '.join(holders)}; pass --shared to write the same "
+                            "store branches from here too"
+                        ),
+                        params={"bookmark": bookmark, "holders": holders},
+                    )
+                )
+                return plan
+        if trunk:
+            plan.notes.append(
+                f"on trunk {bookmark!r}: writes land on each object's upstream branch"
+            )
         for key in sorted(objects):
             m = objects[key]
             backend = self.backend_for(m.kind)
             eff = effective_capabilities(backend, m.locator, m.policy)
             if Capability.FORK not in eff:
                 continue
-            if m.policy.write == "direct":
+            if trunk:
                 branch = str(m.locator.get("branch", "main"))
                 plan.actions.append(
-                    Action("direct", key, m.kind, target=branch, detail="write=direct")
+                    Action(
+                        "trunk", key, m.kind, target=branch, detail="upstream branch"
+                    )
                 )
                 continue
             if m.state is None:
@@ -1636,7 +1798,7 @@ class Repo:
                     f"{key}: nothing committed yet; fork after first commit"
                 )
                 continue
-            name = self._working_ref_for(key)
+            name = working_ref_name(self.config.dataset_id, bookmark)
             # An existing branch of this workspace is reset by the fork (now or
             # when materialized). Record its head so the op log can restore it.
             existing = self.workspace.working_refs.get(key)
@@ -1741,11 +1903,15 @@ class Repo:
             raise ConfigError(f"expected a new plan, got {plan.command!r}")
         refused = [a for a in plan.actions if a.op == "refuse"]
         if refused:
-            raise TetherError(
-                "refusing to reset working branches with unpinned writes:\n"
-                + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
-            )
+            if all(a.key for a in refused):
+                raise TetherError(
+                    "refusing to reset working branches with unpinned writes:\n"
+                    + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
+                )
+            raise TetherError("; ".join(a.detail for a in refused))
         rev = plan.context.get("rev")
+        bookmark = plan.context.get("bookmark")
+        create = bool(plan.context.get("create"))
         if verify:
             # Check the target *before* touching the VCS working copy, so a
             # stale plan leaves the checkout where it was.
@@ -1757,9 +1923,13 @@ class Repo:
                     "manifests at the target differ from the plan; re-run the plan"
                 )
         pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
-        if rev:
+        if create:
+            self.vcs.new_bookmark(str(bookmark), str(rev) if rev else None)
+            self.objects = read_objects(self.root)
+        elif rev:
             self.vcs.new(str(rev))
             self.objects = read_objects(self.root)
+        self.workspace.bookmark = str(bookmark) if bookmark else None
         # `new REV` puts every position at REV's pins, kept branches included;
         # states `pull` took were relative to the manifests we just left.
         self.workspace.pulled = {}
@@ -1776,7 +1946,7 @@ class Repo:
         reused: dict[str, State] = {}
         forks = {a.key: a for a in plan.actions if a.op == "fork"}
         for a in plan.actions:
-            if a.op == "direct":
+            if a.op == "trunk":
                 working_refs[a.key] = a.target
             elif a.op == "defer-fork":
                 pending[a.key] = a.target
@@ -1830,6 +2000,8 @@ class Repo:
             plan=plan,
             result={
                 "vcs": self.vcs.position(),
+                "bookmark": bookmark,
+                "created_bookmark": bookmark if create else None,
                 "created": sorted(k for k in forked if k not in reset),
                 "reset": sorted(reset),
                 "reused": sorted(reused),
@@ -1930,24 +2102,29 @@ class Repo:
         self,
         rev: str | None = None,
         *,
+        bookmark: str | None = None,
+        shared: bool = False,
         keep: bool = False,
         eager: bool | None = None,
         discard: bool = False,
     ) -> None:
-        """Start working on top of `rev`: set up writable refs off its pins.
+        """Start working on a bookmark: set up writable refs off its pins.
 
-        Equivalent to `apply_new(plan_new(...))`. For every `FORK`-capable
-        object, `direct` policy uses the locator's branch; otherwise a branch
-        named `working_ref_name(dataset_id, workspace_id, key)` is forked from the
-        pin -- by default *lazily*, on the first writable `open` (see `plan_new`), or
-        during `new` with `eager`. `pin = "record"` objects always fork now,
-        from their recorded state. Objects with no committed state yet are
-        skipped. Forks run concurrently.
+        Equivalent to `apply_new(plan_new(...))`. On the trunk bookmark every
+        `FORK`-capable object's working ref is its upstream branch; on any
+        other bookmark it is the store branch `working_ref_name(dataset_id,
+        bookmark)`, forked from the pin -- by default *lazily*, on the first
+        writable `open` (see `plan_new`), or during `new` with `eager`.
+        `pin = "record"` objects always fork now, from their recorded state.
+        Objects with no committed state yet are skipped. Forks run
+        concurrently. With no bookmark the working copy is read-only.
 
         Args:
             rev: Move the VCS working copy here first (`jj new`; in git, `switch`
                 to a branch or onto a `tether/<rev12>` branch for a commit)
                 and reload the manifests; `None` keeps the current commit.
+            bookmark: Create this bookmark at `rev` and work on it (`-b`).
+            shared: Work on a bookmark another live workspace holds.
             keep: Only refresh the stale-detection baseline; keep working refs.
             eager: Create every branch now; default `config.new_fork == "eager"`.
             discard: Reset working branches that hold unpinned writes (see
@@ -1959,7 +2136,15 @@ class Repo:
             MultiObjectError: A pin is missing or a fork failed.
         """
         self.apply_new(
-            self.plan_new(rev, keep=keep, eager=eager, discard=discard), verify=False
+            self.plan_new(
+                rev,
+                bookmark=bookmark,
+                shared=shared,
+                keep=keep,
+                eager=eager,
+                discard=discard,
+            ),
+            verify=False,
         )
 
     # -- open ------------------------------------------------------------ #
@@ -2025,6 +2210,11 @@ class Repo:
             if working_ref is None and key in self.workspace.pending_forks:
                 working_ref = self.materialize_fork(key)  # lazy fork: first write
             if working_ref is None:
+                if self.workspace.bookmark is None:
+                    raise StaleWorkingCopyError(
+                        f"no working ref for {key!r}: this working copy is on no "
+                        "bookmark and is read-only; `tether new -b NAME` to write"
+                    )
                 raise StaleWorkingCopyError(
                     f"no working ref for {key!r}; run `tether new` first"
                 )
@@ -2196,8 +2386,8 @@ class Repo:
     def plan_gc(
         self,
         *,
-        prune_workspaces: bool = False,
-        keep_workspaces: set[str] | None = None,
+        prune_bookmarks: bool = False,
+        keep_bookmarks: set[str] | None = None,
         force_prune: bool = False,
     ) -> Plan:
         """Compute what `gc` would release without writing anywhere.
@@ -2208,12 +2398,12 @@ class Repo:
         removed (the native branch is left alone), and `delete-listing` for
         `.tether/listings/` files no manifest names.
 
-        With `prune_workspaces`, every `tether.ws.*` branch in each system is
-        considered: branches of workspaces that no longer exist (every live jj
-        workspace / git worktree of this repository is kept automatically via
-        `live_workspace_ids`; `keep_workspaces` adds ids that are live elsewhere,
-        e.g. on another machine) and this workspace's branches no current
-        object uses. A branch is planned for
+        With `prune_bookmarks`, every `tether.ws.*` branch in each system is
+        considered: branches of bookmarks that no longer exist in the VCS and
+        that no live checkout works on (`keep_bookmarks` adds names to keep,
+        e.g. a bookmark that only exists on another machine), legacy
+        per-workspace branches from before bookmarks, and this workspace's
+        branches no current object uses. A branch is planned for
         `delete-branch` only when nothing on it would be lost: its head state is
         natively pinned by some manifest in history, or equals the base
         branch's head. Otherwise it gets a `keep-branch` note (unpinned writes,
@@ -2249,8 +2439,8 @@ class Repo:
             command="gc",
             context={
                 "workspace_id": self.workspace.workspace_id,
-                "prune_workspaces": prune_workspaces,
-                "keep_workspaces": sorted(keep_workspaces or ()),
+                "prune_bookmarks": prune_bookmarks,
+                "keep_bookmarks": sorted(keep_bookmarks or ()),
                 "force_prune": force_prune,
             },
         )
@@ -2298,22 +2488,19 @@ class Repo:
                     key,
                     target=ref,
                     detail="object removed; branch left in place "
-                    "(gc --prune-workspaces evaluates it)",
+                    "(gc --prune-bookmarks evaluates it)",
                 )
             )
 
-        if prune_workspaces:
-            live = self.live_workspace_ids()
-            keep = set(keep_workspaces or ()) | live
-            plan.context["live_workspaces"] = sorted(w[:8] for w in live)
-            others = sorted(w[:8] for w in live if w != self.workspace.workspace_id)
-            if others:
-                plan.notes.append(f"keeping live workspaces: {', '.join(others)}")
-            self._plan_prune_workspaces(
+        if prune_bookmarks:
+            live = self.live_bookmarks() | set(keep_bookmarks or ())
+            plan.context["live_bookmarks"] = sorted(live)
+            plan.notes.append(f"keeping live bookmarks: {', '.join(sorted(live))}")
+            self._plan_prune_bookmarks(
                 plan,
                 [*all_manifests, *self.objects.values()],
                 key_for,
-                keep,
+                live,
                 force_prune,
             )
 
@@ -2336,28 +2523,28 @@ class Repo:
                 )
         return plan
 
-    def _plan_prune_workspaces(
+    def _plan_prune_bookmarks(
         self,
         plan: Plan,
         manifests: list[ObjectManifest],
         key_for: Callable[[ObjectBackend, dict], str],
-        keep_workspaces: set[str],
+        keep_bookmarks: set[str],
         force: bool,
-        *,
-        only_workspace: str | None = None,
     ) -> None:
         """Add `delete-branch` / `keep-branch` actions for stray `tether.ws.*` branches.
 
-        A branch is safe to delete when its head state is natively pinned by
-        some manifest (a tag holds everything on it) or equals the base
-        branch's head (nothing was written). Anything else -- unpinned writes,
-        a state that is only *recorded* (`pin = "record"`), or a backend whose
-        branches are the storage itself -- is kept unless ``force``.
-        ``only_workspace`` evaluates exactly that workspace's branches (all of
-        them, live or not) and no others -- `forget-workspace` uses it.
+        A branch is stray when its bookmark is gone (not in the VCS and not
+        worked on by any live checkout), when it is a legacy per-workspace
+        branch from before bookmarks, or when it is this workspace's and no
+        current object uses it. It is safe to delete when its head state is
+        natively pinned by some manifest (a tag holds everything on it) or
+        equals the base branch's head (nothing was written). Anything else --
+        unpinned writes, a state that is only *recorded* (`pin = "record"`), or
+        a backend whose branches are the storage itself -- is kept unless
+        ``force``.
         """
-        mine = self.workspace.workspace_id[:8]
-        keep_ids = {w[:8] for w in keep_workspaces} | {mine}
+        keep_slugs = {bookmark_slug(b) for b in keep_bookmarks}
+        live_ws = {w[:8] for w in self.live_workspace_ids()}
         in_use = {
             ref
             for key, ref in self.workspace.working_refs.items()
@@ -2391,24 +2578,27 @@ class Repo:
             base_head: State | None = None
             foreign = 0
             for ref in sorted(backend.list_working_refs(m.locator)):
-                ws = working_ref_workspace(ref)
-                if ws is None:
+                ds = working_ref_dataset(ref)
+                if ds is None:
                     continue
-                if working_ref_dataset(ref) != self.config.dataset_id:
-                    foreign += 1  # another dataset's workspace; not ours to judge
+                if ds != self.config.dataset_id:
+                    foreign += 1  # another dataset's branch; not ours to judge
                     continue
-                if only_workspace is not None:
-                    if ws != only_workspace:
+                slug = working_ref_bookmark(ref)
+                legacy_ws = working_ref_workspace(ref)
+                if ref in in_use:
+                    continue
+                if slug is not None and slug in keep_slugs:
+                    if slug == bookmark_slug(self.workspace.bookmark or ""):
+                        origin = "this bookmark's branch; no object uses it"
+                    else:
                         continue
-                    origin = f"workspace {ws} (being forgotten)"
-                elif ws == mine:
-                    if ref in in_use:
-                        continue
-                    origin = "this workspace's branch; no object uses it"
-                elif ws in keep_ids:
+                elif slug is not None:
+                    origin = f"bookmark {slug} (gone)"
+                elif legacy_ws in live_ws:
                     continue
                 else:
-                    origin = f"workspace {ws} (not kept)"
+                    origin = f"legacy workspace {legacy_ws} branch"
 
                 # Why deleting would be safe -- or why it would not.
                 reason: str | None = None
@@ -2551,31 +2741,31 @@ class Repo:
         self,
         *,
         dry_run: bool = True,
-        prune_workspaces: bool = False,
-        keep_workspaces: set[str] | None = None,
+        prune_bookmarks: bool = False,
+        keep_bookmarks: set[str] | None = None,
         force_prune: bool = False,
     ) -> GcReport:
         """Release native pins that no manifest in VCS history references.
 
         Equivalent to `plan_gc` followed by `apply_gc` unless `dry_run`. Also
         forgets this workspace's working refs for removed objects and deletes
-        `.tether/listings/` files no manifest names. With `prune_workspaces`,
-        stray `tether.ws.*` branches (other workspaces' except
-        `keep_workspaces`, and this workspace's unused ones) are deleted when
+        `.tether/listings/` files no manifest names. With `prune_bookmarks`,
+        stray `tether.ws.*` branches (of bookmarks that are gone, legacy
+        per-workspace ones, and this workspace's unused ones) are deleted when
         their head is pinned or equals the base head, and kept otherwise unless
         `force_prune`.
 
         Args:
             dry_run: Only report what would be released (the report carries the plan).
-            prune_workspaces: Also evaluate stray working branches.
-            keep_workspaces: Extra workspace ids (or 8-char prefixes) to leave
-                alone, beyond the live checkouts found automatically.
+            prune_bookmarks: Also evaluate stray working branches.
+            keep_bookmarks: Bookmark names to leave alone beyond those the VCS
+                and live checkouts know (e.g. one that exists only elsewhere).
             force_prune: Delete stray branches even if they hold unpinned data
                 (or belong to a `BRANCH_IS_STORAGE` backend).
         """
         plan = self.plan_gc(
-            prune_workspaces=prune_workspaces,
-            keep_workspaces=keep_workspaces,
+            prune_bookmarks=prune_bookmarks,
+            keep_bookmarks=keep_bookmarks,
             force_prune=force_prune,
         )
         if dry_run:
@@ -2657,8 +2847,8 @@ class Repo:
             if Capability.FORK not in eff:
                 plan.notes.append(f"{key}: not forkable; nothing to promote")
                 continue
-            if m.policy.write == "direct":
-                plan.notes.append(f"{key}: write=direct; already on the base branch")
+            if self.on_trunk():
+                plan.notes.append(f"{key}: on trunk; already on the base branch")
                 continue
 
             base_locator = {k: v for k, v in m.locator.items() if k != "at"}
@@ -2938,8 +3128,8 @@ class Repo:
             refuse: str | None = None
             if m is None:
                 refuse = f"not registered at {rev}"
-            elif Capability.FORK not in eff or now.policy.write == "direct":
-                refuse = "no working branch to restore (not Forkable, or write=direct)"
+            elif Capability.FORK not in eff or self.on_trunk():
+                refuse = "no working branch to restore (not Forkable, or on trunk)"
             elif m.state is None:
                 refuse = f"nothing committed at {rev}"
             elif m.pin is None and Capability.ADDRESSABLE not in eff:
@@ -3067,18 +3257,19 @@ class Repo:
     ) -> Plan:
         """Compute what forgetting a workspace would do (default: this one).
 
-        `jj workspace forget` / `git worktree remove` and the tether half in
-        one: that workspace's working branches are deleted under the
-        `gc --prune-workspaces` rule (head pinned or equal to the base;
-        `force_prune` for the rest), its `workspace.toml` and `ops.jsonl` are
-        removed when its checkout is known, and the VCS stops tracking the
-        checkout. Forgetting the current workspace leaves the directory in
-        place; the next tether command there starts a fresh workspace.
+        `jj workspace forget` / `git worktree remove` plus tether's half: the
+        workspace's `workspace.toml` and `ops.jsonl` are removed when its
+        checkout is known, and the VCS stops tracking the checkout. Store
+        branches belong to bookmarks, not workspaces, so none are touched:
+        delete the bookmark and run `gc --prune-bookmarks` for that.
+        Forgetting the current workspace leaves the directory in place; the
+        next tether command there starts a fresh workspace.
 
         Args:
             workspace_id: Full or 8-char id (see `tether ops` / `status`);
                 default the current workspace.
-            force_prune: Delete branches even if they hold unpinned data.
+            force_prune: Accepted for compatibility; branches are not judged
+                here any more.
         """
         target = (workspace_id or self.workspace.workspace_id)[:8]
         plan = Plan(
@@ -3088,17 +3279,6 @@ class Repo:
                 "force_prune": force_prune,
                 "current": target == self.workspace.workspace_id[:8],
             },
-        )
-
-        def key_for(backend: ObjectBackend, locator: dict) -> str:
-            ident = backend.identity(locator)
-            return f"{backend.kind}|{_m.canonical_bytes(ident).decode()}"
-
-        manifests: list[ObjectManifest] = list(self.objects.values())
-        for _rev, objects in self._iter_history_objects():
-            manifests.extend(objects.values())
-        self._plan_prune_workspaces(
-            plan, manifests, key_for, set(), force_prune, only_workspace=target
         )
         root = self._workspace_root(target)
         if root is not None:
@@ -3125,10 +3305,7 @@ class Repo:
                 Action("forget-vcs-workspace", target=str(root), detail=detail)
             )
         else:
-            plan.notes.append(
-                f"workspace {target}: no live checkout found; only its branches "
-                "are considered"
-            )
+            plan.notes.append(f"workspace {target}: no live checkout found")
         if not any(a.op in ("delete-branch", "keep-branch") for a in plan.actions):
             plan.notes.append(f"workspace {target}: no working branches in any store")
         return plan
@@ -3199,7 +3376,28 @@ class Repo:
                 branch, dirty tree, or a conflict outside the dataset).
         """
         pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
+        # A bookmark on a commit being abandoned must survive: jj deletes it,
+        # git leaves it on the dropped commit. Move it to the nearest kept
+        # ancestor, the way `jj abandon` treats the working copy.
+        before = self.vcs.bookmarks()
+        targets = {self.vcs.resolve(r) for r in revs}
+        parents = {
+            c.commit_id: c.parents for c in self.vcs.commit_info(sorted(targets))
+        }
+        moved: dict[str, str] = {}
         ids, rewritten = self.vcs.abandon(list(revs), self._objects_reldir())
+        for name, commit in before.items():
+            if commit not in targets:
+                continue
+            dest = commit
+            seen: set[str] = set()
+            while dest in targets and dest not in seen:
+                seen.add(dest)
+                dest = (parents.get(dest) or [""])[0]
+            dest = rewritten.get(dest, dest)
+            if dest:
+                self.vcs.bookmark_set(name, dest)
+                moved[name] = dest
         self._manifest_cache.clear()
         self.objects = read_objects(self.root)
         gc_plan = self.plan_gc()
@@ -3209,6 +3407,7 @@ class Repo:
             result={
                 "abandoned": ids,
                 "rewritten_commits": rewritten,
+                "bookmarks_moved": moved,
                 "unreferenced": [a.target for a in gc_plan.actions if a.op == "unpin"],
             },
             pre=pre,
@@ -3566,7 +3765,8 @@ class Repo:
         self._restore_workspace(entry, report)
         before, after = entry.pre.get("vcs"), r.get("vcs")
         plan_ctx = (entry.plan or {}).get("context") or {}
-        if plan_ctx.get("rev") and before and after:
+        made = r.get("created_bookmark")
+        if (plan_ctx.get("rev") or made) and before and after:
             if self.vcs.position().get("id") == after.get("id"):
                 self.vcs.goto(before)
                 self.objects = read_objects(self.root)
@@ -3575,6 +3775,15 @@ class Repo:
                 report.skipped.append(
                     "VCS working copy has moved since; not returning it"
                 )
+        if made and after:
+            marks = self.vcs.bookmarks()
+            if made in marks and marks[made] == (
+                after.get("parent") or after.get("commit")
+            ):
+                self.vcs.bookmark_delete(str(made))
+                report.restored.append(f"bookmark {made} deleted")
+            elif made in marks:
+                report.skipped.append(f"bookmark {made} has moved since; kept")
 
     def _undo_fork(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         key, ref = str(entry.result.get("key")), str(entry.result.get("ref"))
@@ -3717,7 +3926,7 @@ class Repo:
 
         for key, ref in sorted(self.workspace.working_refs.items()):
             m = self.objects.get(key)
-            if m is None or m.policy.write == "direct" or m.state is None:
+            if m is None or self.on_trunk() or m.state is None:
                 continue
             backend = self.backend_for(m.kind)
             if Capability.FORK not in effective_capabilities(

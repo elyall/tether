@@ -147,31 +147,50 @@ def slugify_key(key: str) -> str:
 WORKING_REF_PREFIX = f"{REF_PREFIX}ws."
 
 
-def working_ref_name(dataset_id: str, workspace_id: str, key: str) -> str:
-    """Working-branch name; datasets, workspaces, and keys never collide.
+def bookmark_slug(bookmark: str) -> str:
+    """A bookmark name as a ref fragment every store accepts.
 
-    ``tether.ws.<dataset8>.<workspace8>.<slug>-<key6>``: the dataset id is the
-    namespace ``gc`` stays inside, the slug keeps the name readable, the 6-hex
-    key digest keeps ``zarr/imaging`` and ``zarr-imaging`` apart.
+    Letters, digits, ``_`` and ``-`` pass through; anything else (``/``, ``.``,
+    spaces) becomes ``-`` and a 6-hex digest of the original is appended so
+    ``feat/x`` and ``feat.x`` stay apart.
     """
-    digest = _blake(canonical_bytes(key), size=8)[:6]
+    slug = re.sub(r"[^0-9A-Za-z_-]+", "-", bookmark).strip("-")
+    if slug == bookmark:
+        return slug
+    return f"{slug or 'bm'}-{_blake(canonical_bytes(bookmark), size=8)[:6]}"
+
+
+def key_digest6(key: str) -> str:
+    """The 6-hex key digest legacy working-ref names end in (v2 migration)."""
+    return _blake(canonical_bytes(key), size=8)[:6]
+
+
+def working_ref_name(dataset_id: str, bookmark: str) -> str:
+    """The store branch that stands for a dataset bookmark.
+
+    ``tether.ws.<dataset8>.<bookmark>``: one branch per bookmark in each
+    Forkable system (objects sharing a system share it). The dataset id is
+    the namespace ``gc`` stays inside; ``tether.ws.`` is what backends list
+    as working refs.
+    """
     return (
-        f"{WORKING_REF_PREFIX}{dataset_id[:DATASET_ID_LEN]}.{workspace_id[:8]}."
-        f"{slugify_key(key)}-{digest}"
+        f"{WORKING_REF_PREFIX}{dataset_id[:DATASET_ID_LEN]}.{bookmark_slug(bookmark)}"
     )
 
 
-def _working_ref_parts(ref: str) -> tuple[str, str] | None:
+def _working_ref_parts(ref: str) -> tuple[str, str, str | None] | None:
+    """``(dataset, bookmark slug, legacy workspace id | None)`` for a working ref."""
     if not ref.startswith(WORKING_REF_PREFIX):
         return None
     rest = ref[len(WORKING_REF_PREFIX) :]
     ds, _, rest = rest.partition(".")
-    ws, _, _ = rest.partition(".")
-    # Both ids are 8 hex; a pre-namespace name (`tether.ws.<ws8>.<slug>`) has a
-    # slug in the second position and is not one of ours.
-    if not is_dataset_id(ds) or not is_dataset_id(ws):
+    if not is_dataset_id(ds) or not rest:
         return None
-    return ds, ws
+    head, dot, tail = rest.partition(".")
+    if dot and tail and is_dataset_id(head):
+        # Pre-bookmark name: `tether.ws.<ds8>.<ws8>.<slug>-<key6>`.
+        return ds, tail, head
+    return ds, rest, None
 
 
 def working_ref_dataset(ref: str) -> str | None:
@@ -180,10 +199,18 @@ def working_ref_dataset(ref: str) -> str | None:
     return parts[0] if parts else None
 
 
-def working_ref_workspace(ref: str) -> str | None:
-    """The 8-char workspace id embedded in a working ref name, if it is one."""
+def working_ref_bookmark(ref: str) -> str | None:
+    """The bookmark slug a working ref stands for; ``None`` for legacy
+    per-workspace names (see `working_ref_workspace`) and foreign refs."""
     parts = _working_ref_parts(ref)
-    return parts[1] if parts else None
+    return parts[1] if parts and parts[2] is None else None
+
+
+def working_ref_workspace(ref: str) -> str | None:
+    """The 8-char workspace id in a *legacy* working ref name (before
+    bookmarks); ``None`` for bookmark-named refs."""
+    parts = _working_ref_parts(ref)
+    return parts[2] if parts else None
 
 
 def _drop_nulls(obj: Any) -> Any:
@@ -372,6 +399,13 @@ class RepoConfig:
     import_query: str | None = None
     """`[import] query`: default SQL for `tether import` (holds no credentials)."""
 
+    @property
+    def trunk(self) -> str:
+        """`[vcs] trunk` (default `main`): the dataset bookmark that stands for
+        every object's upstream branch (`locator.branch`). Working on it writes
+        to those branches directly; any other bookmark forks."""
+        return str(self.vcs.get("trunk", "main"))
+
     def to_toml(self) -> str:
         doc = tomlkit.document()
         tether_tbl = tomlkit.table()
@@ -446,13 +480,17 @@ class WorkspaceState:
     created on the first writable ``open``). ``fork_points`` maps object key ->
     the state its working branch was created from; ``promote`` compares the
     base branch against it to tell a fast-forward from a divergence.
-    ``pulled`` maps object key -> an upstream state taken by ``pull`` that the
+    ``bookmark`` is the dataset bookmark this checkout works on: its store
+    branches are this workspace's working refs (``None``: read-only, no
+    working refs). ``pulled`` maps object key -> an upstream state taken by
+    ``pull`` that the
     next ``commit`` will pin in place of the previous one (the object's
     position moved without a working branch). ``last_snapshot`` caches the
     most recent fan-out fingerprints.
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    bookmark: str | None = None
     base_states: dict[str, State] = field(default_factory=dict)
     working_refs: dict[str, str] = field(default_factory=dict)
     pending_forks: dict[str, str] = field(default_factory=dict)
@@ -464,6 +502,8 @@ class WorkspaceState:
     def to_toml(self) -> str:
         doc = tomlkit.document()
         doc["workspace_id"] = self.workspace_id
+        if self.bookmark is not None:
+            doc["bookmark"] = self.bookmark
         if self.last_snapshot_at is not None:
             doc["last_snapshot_at"] = self.last_snapshot_at
         if self.working_refs:
@@ -491,6 +531,7 @@ class WorkspaceState:
         data = _loads_plain(text)
         return cls(
             workspace_id=str(data.get("workspace_id", uuid.uuid4().hex)),
+            bookmark=str(data["bookmark"]) if data.get("bookmark") else None,
             base_states={
                 str(k): dict(v) for k, v in (data.get("base_states") or {}).items()
             },

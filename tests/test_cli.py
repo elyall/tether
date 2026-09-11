@@ -57,7 +57,7 @@ def test_cli_end_to_end(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None
     commit_payload = json.loads(r.output)
     assert commit_payload["pinned"]["db"] is not None
 
-    r = runner.invoke(app, ["new"])
+    r = runner.invoke(app, ["new", "-b", "work"])
     assert r.exit_code == 0, r.output
 
     r = runner.invoke(app, ["open", "db", "--json"])
@@ -263,10 +263,10 @@ def test_cli_plans_dry_run_and_from_plan(
     assert r.exit_code == 1 and "expected 'new'" in r.output
 
     # `new --dry-run` shows the pin-less fork; applying it forks from state.
-    r = runner.invoke(app, ["new", "--dry-run"])
+    r = runner.invoke(app, ["new", "-b", "work", "--dry-run"])
     assert r.exit_code == 0, r.output
     assert "fork" in r.output and "recorded state" in r.output
-    r = runner.invoke(app, ["new", "--json"])
+    r = runner.invoke(app, ["new", "-b", "work", "--json"])
     assert r.exit_code == 0, r.output
     wref = json.loads(r.output)["working_refs"]["db"]
     assert wref.startswith("tether.ws.")
@@ -275,36 +275,34 @@ def test_cli_plans_dry_run_and_from_plan(
     # gc: dry run by default, plan file, prune other workspaces.
     branches = store.system(system).branches
     ds = Repo.find(vcs_root).config.dataset_id
-    branches[f"tether.ws.{ds}.deadbeef.db"] = branches["main"]  # no writes: safe
-    branches[f"tether.ws.{ds}.0badf00d.db"] = branches["main"]
-    store.write(system, f"tether.ws.{ds}.0badf00d.db", {"v": 7})  # has data: kept
+    branches[f"tether.ws.{ds}.deadbeef"] = branches["main"]  # no writes: safe
+    branches[f"tether.ws.{ds}.0badf00d"] = branches["main"]
+    store.write(system, f"tether.ws.{ds}.0badf00d", {"v": 7})  # has data: kept
     # Another dataset's branch in the same store: never gc's business.
-    branches["tether.ws.ffffffff.deadbeef.db"] = branches["main"]
+    branches["tether.ws.ffffffff.deadbeef"] = branches["main"]
     r = runner.invoke(app, ["gc"])
     assert r.exit_code == 0, r.output
-    assert "deadbeef" not in r.output  # not without --prune-workspaces
+    assert "deadbeef" not in r.output  # not without --prune-bookmarks
     r = runner.invoke(app, ["gc", "--force-prune"])
-    assert r.exit_code == 1 and "requires --prune-workspaces" in r.output
+    assert r.exit_code == 1 and "requires --prune-bookmarks" in r.output
     gc_plan = vcs_root / "gc.json"
-    r = runner.invoke(app, ["gc", "--prune-workspaces", "--plan", str(gc_plan)])
+    r = runner.invoke(app, ["gc", "--prune-bookmarks", "--plan", str(gc_plan)])
     assert r.exit_code == 0, r.output
-    assert "delete-branch" in r.output and f"tether.ws.{ds}.deadbeef.db" in r.output
-    assert "keep-branch" in r.output and f"tether.ws.{ds}.0badf00d.db" in r.output
-    assert f"tether.ws.{ds}.deadbeef.db" in branches  # plan only
+    assert "delete-branch" in r.output and f"tether.ws.{ds}.deadbeef" in r.output
+    assert "keep-branch" in r.output and f"tether.ws.{ds}.0badf00d" in r.output
+    assert f"tether.ws.{ds}.deadbeef" in branches  # plan only
     r = runner.invoke(app, ["gc", "--from-plan", str(gc_plan), "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["deleted_working_refs"] == {"db": [f"tether.ws.{ds}.deadbeef.db"]}
-    assert payload["kept_working_refs"] == {"db": [f"tether.ws.{ds}.0badf00d.db"]}
-    assert f"tether.ws.{ds}.deadbeef.db" not in branches
-    assert f"tether.ws.{ds}.0badf00d.db" in branches
-    assert "tether.ws.ffffffff.deadbeef.db" in branches  # foreign, untouched
+    assert payload["deleted_working_refs"] == {"db": [f"tether.ws.{ds}.deadbeef"]}
+    assert payload["kept_working_refs"] == {"db": [f"tether.ws.{ds}.0badf00d"]}
+    assert f"tether.ws.{ds}.deadbeef" not in branches
+    assert f"tether.ws.{ds}.0badf00d" in branches
+    assert "tether.ws.ffffffff.deadbeef" in branches  # foreign, untouched
     assert wref in branches  # ours survives
-    r = runner.invoke(
-        app, ["gc", "--prune-workspaces", "--force-prune", "--no-dry-run"]
-    )
+    r = runner.invoke(app, ["gc", "--prune-bookmarks", "--force-prune", "--no-dry-run"])
     assert r.exit_code == 0, r.output
-    assert f"tether.ws.{ds}.0badf00d.db" not in branches
+    assert f"tether.ws.{ds}.0badf00d" not in branches
     assert wref in branches
 
 
@@ -479,7 +477,7 @@ def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
-    r = runner.invoke(app, ["new", "--json"])
+    r = runner.invoke(app, ["new", "-b", "work", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["pending_forks"]["db"].startswith("tether.ws.")
     assert runner.invoke(app, ["open", "db"]).exit_code == 0  # materializes the fork
@@ -547,7 +545,7 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "baseline"]).exit_code == 0
-    r = runner.invoke(app, ["new", "--eager", "--json"])
+    r = runner.invoke(app, ["new", "-b", "work", "--eager", "--json"])
     assert r.exit_code == 0, r.output
     wref = json.loads(r.output)["working_refs"]["db"]
     assert wref in store.system(system).branches
@@ -580,7 +578,7 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     stray = f"tether.ws.{ds}.deadbeef.db-000000"
     store.system(system).branches[stray] = store.system(system).branches["main"]
-    r = runner.invoke(app, ["gc", "--no-dry-run", "--prune-workspaces"])
+    r = runner.invoke(app, ["gc", "--no-dry-run", "--prune-bookmarks"])
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["undo"])
     assert r.exit_code == 2, r.output
@@ -689,7 +687,7 @@ def test_cli_undo_to(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     anchor = json.loads(runner.invoke(app, ["ops", "-n", "1", "--json"]).output)[0][
         "id"
     ]
-    assert runner.invoke(app, ["new", "--eager"]).exit_code == 0
+    assert runner.invoke(app, ["new", "-b", "work", "--eager"]).exit_code == 0
     r = runner.invoke(
         app, ["add", "x", "--kind", "memory", "--set", f"system={system}"]
     )
@@ -721,7 +719,7 @@ def test_cli_restore(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     c1 = json.loads(r.output)["vcs_commit"]
     store.write(system, "main", {"v": 2})
     assert runner.invoke(app, ["commit", "-m", "v2", "--pull"]).exit_code == 0
-    r = runner.invoke(app, ["new", "--eager", "--json"])
+    r = runner.invoke(app, ["new", "-b", "work", "--eager", "--json"])
     wref = json.loads(r.output)["working_refs"]["db"]
     assert store.resolve(system, wref) != s1
     r = runner.invoke(app, ["restore", "db", "--from", c1, "--dry-run"])
@@ -744,20 +742,18 @@ def test_cli_forget_workspace(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -
     )
     assert r.exit_code == 0, r.output
     assert runner.invoke(app, ["commit", "-m", "v1"]).exit_code == 0
-    r = runner.invoke(app, ["new", "--eager", "--json"])
+    r = runner.invoke(app, ["new", "-b", "work", "--eager", "--json"])
     wref = json.loads(r.output)["working_refs"]["db"]
     ws8 = Repo.find(vcs_root).workspace.workspace_id[:8]
     r = runner.invoke(app, ["forget-workspace", "--dry-run"])
-    assert r.exit_code == 0 and "delete-branch" in r.output and wref in r.output
-    assert wref in store.system(system).branches
+    assert r.exit_code == 0 and "delete-file" in r.output
+    assert "delete-branch" not in r.output  # branches belong to the bookmark
     r = runner.invoke(app, ["forget-workspace", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["workspace"] == ws8 and payload["deleted_working_refs"] == {
-        "db": [wref]
-    }
+    assert payload["workspace"] == ws8 and payload["deleted_working_refs"] == {}
     assert any(p.endswith("workspace.toml") for p in payload["removed_files"])
-    assert wref not in store.system(system).branches
+    assert wref in store.system(system).branches  # until the bookmark goes and gc runs
 
 
 def test_cli_status_and_ops_flag_vcs_drift(
@@ -823,7 +819,9 @@ def test_cli_pull(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = runner.invoke(app, ["commit", "-m", "nothing", "--dry-run"])
     assert r.exit_code == 0 and "db: unchanged" in r.output
 
-    assert runner.invoke(app, ["new"]).exit_code == 0  # lazy: fork pending
+    assert (
+        runner.invoke(app, ["new", "-b", "work"]).exit_code == 0
+    )  # lazy: fork pending
     r = runner.invoke(app, ["pull"])
     assert r.exit_code == 0, r.output
     assert "pulled db" in r.output and "commit to pin" in r.output

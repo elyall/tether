@@ -87,7 +87,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, _jj_config: Path) -> None:
 
 
 def _git_init(path: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "t@e.st"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "tether"], cwd=path, check=True)
 

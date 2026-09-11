@@ -37,7 +37,7 @@ def test_full_lifecycle(vcs_root: Path) -> None:
     assert pin1.id in backend.list_pins({"system": system})
 
     # `new` only decides the branch name (lazy); the first writable open forks.
-    repo.new()
+    repo.new(bookmark="work")
     assert "db" not in repo.workspace.working_refs
     assert repo.workspace.pending_forks["db"].startswith("tether.ws.")
     handle = repo.open("db")
@@ -149,7 +149,7 @@ def test_stale_working_copy_blocks_writes(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     repo.commit("baseline")
-    repo.new()
+    repo.new(bookmark="work")
     assert not repo.is_stale()
 
     # Someone else's commit changes db's committed state underneath us.
@@ -177,14 +177,11 @@ def test_stale_working_copy_blocks_writes(vcs_root: Path) -> None:
     reloaded.commit("mine")
     assert not reloaded.is_stale()
 
-    # Track-policy objects write to the base and are never stale.
-    tracked = f"sys-{uuid.uuid4().hex[:8]}"
-    default_store().system(tracked)
-    reloaded.add("t", "memory", {"system": tracked}, policy=Policy(write="direct"))
-    reloaded.commit("direct")
-    reloaded.new()
+    # On trunk every object writes to its upstream branch and is never stale.
+    reloaded.new("main")
+    assert reloaded.on_trunk()
     _someone_else_commits(
-        reloaded, "t", {"snapshot_id": default_store().write(tracked, "main", {"x": 1})}
+        reloaded, "db", {"snapshot_id": default_store().write(system, "main", {"x": 1})}
     )
     assert Repo.find(vcs_root).stale_keys() == []
 
@@ -202,14 +199,23 @@ def test_immutable_file_drift_is_error(vcs_root: Path) -> None:
         repo.status()
 
 
-def test_track_mode_uses_base_branch(vcs_root: Path) -> None:
+def test_trunk_uses_base_branch(vcs_root: Path) -> None:
+    """On the trunk bookmark every object's working ref is its upstream."""
     repo = Repo.init(vcs_root)
     _mem_object(repo)
-    # Switch policy to direct before committing.
-    repo.objects["db"].policy = Policy(write="direct")
     repo.commit("baseline")
+    assert repo.workspace.bookmark == "main"
     repo.new()
-    assert repo.workspace.working_refs["db"] == "main"
+    assert repo.on_trunk() and repo.workspace.working_refs["db"] == "main"
+    plan = repo.plan_new()
+    assert [a.op for a in plan.actions] == ["trunk"]
+    # Off trunk, the same object forks.
+    repo.new(bookmark="work")
+    assert not repo.on_trunk()
+    assert (
+        repo.workspace.pending_forks["db"]
+        == "tether.ws." + repo.config.dataset_id + ".work"
+    )
 
 
 def test_lazy_forking(vcs_root: Path) -> None:
@@ -225,7 +231,7 @@ def test_lazy_forking(vcs_root: Path) -> None:
     repo.add("scratch", "memory", {"system": recorded}, policy=Policy(pin="record"))
     repo.commit("baseline")
 
-    plan = repo.plan_new()
+    plan = repo.plan_new(bookmark="work")
     ops = {a.key: a.op for a in plan.actions}
     # The pinned object defers; the pin-less one forks now -- nothing else would
     # stop its recorded snapshot from expiring before the first write.
@@ -283,7 +289,7 @@ def test_lazy_forking(vcs_root: Path) -> None:
     eager = Repo.init(vcs_root / "eager", config=RepoConfig(new_fork="eager"))
     _mem_object(eager)
     eager.commit("baseline")
-    eager.new()
+    eager.new(bookmark="eager-work")
     assert eager.workspace.working_refs["db"].startswith("tether.ws.")
     assert not eager.workspace.pending_forks
 
@@ -385,7 +391,7 @@ def test_commit_keeps_the_working_branch(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     repo.commit("baseline")
-    repo.new()
+    repo.new(bookmark="work")
     handle = repo.open("db")
     assert isinstance(handle, MemoryHandle)
     branch = handle.ref
@@ -423,7 +429,7 @@ def test_history_and_detached_base(vcs_root: Path) -> None:
     res = repo.commit("adopt at s1")
     pin = res.pinned["db"]
     assert pin is not None and store.system(system).tags[pin.ref] == s1
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     assert store.system(system).branches[wref] == s1
     assert store.system(system).branches["main"] == s2  # untouched
@@ -462,10 +468,10 @@ def test_pinless_record_policy_forks_from_state(vcs_root: Path) -> None:
     assert repo.objects["db"].state == {"snapshot_id": s1}
     assert repo.objects["db"].recoverable
 
-    new_plan = repo.plan_new()
+    new_plan = repo.plan_new(bookmark="work")
     (fork,) = [a for a in new_plan.actions if a.op == "fork"]
     assert fork.params == {"state": {"snapshot_id": s1}}
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     assert store.system(system).branches[wref] == s1
 
@@ -535,34 +541,37 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
         {"system": tracked, "branch": "main"},
         policy=Policy(write="direct"),
     )
-    plan = repo.plan_new()
+    plan = repo.plan_new(bookmark="work")
     assert plan.is_empty  # nothing committed yet
     assert any("nothing committed yet" in n for n in plan.notes)
 
     res = repo.commit("baseline")
-    plan = repo.plan_new()
+    plan = repo.plan_new(bookmark="work")
     ops = {a.key: a.op for a in plan.actions}
-    assert ops == {"db": "defer-fork", "tracked": "direct"}
+    assert ops == {"db": "defer-fork", "tracked": "defer-fork"}
     assert plan.is_empty  # nothing is written by a lazy new
+    assert plan.context["bookmark"] == "work" and plan.context["create"]
     assert (
         "first writable open" in next(a for a in plan.actions if a.key == "db").detail
     )
-    plan_eager = repo.plan_new(eager=True)
-    assert {a.key: a.op for a in plan_eager.actions} == {
-        "db": "fork",
-        "tracked": "direct",
-    }
-    assert not plan_eager.is_empty
     assert not any(
         b.startswith("tether.ws.") for b in default_store().system(system).branches
     )
 
     repo.apply_new(Plan.from_json(plan.to_json()))
-    assert repo.workspace.working_refs["tracked"] == "main"
-    assert repo.workspace.pending_forks["db"].startswith("tether.ws.")
+    assert repo.workspace.bookmark == "work" and "work" in repo.vcs.bookmarks()
+    assert (
+        repo.workspace.pending_forks["db"] == f"tether.ws.{repo.config.dataset_id}.work"
+    )
     assert not any(
         b.startswith("tether.ws.") for b in default_store().system(system).branches
     )
+    plan_eager = repo.plan_new(eager=True)
+    assert {a.key: a.op for a in plan_eager.actions} == {
+        "db": "fork",
+        "tracked": "fork",
+    }
+    assert not plan_eager.is_empty
     repo.apply_new(Plan.from_json(plan_eager.to_json()))
     assert repo.workspace.working_refs["db"].startswith("tether.ws.")
     assert not repo.workspace.pending_forks
@@ -571,7 +580,12 @@ def test_new_plan_and_apply(vcs_root: Path) -> None:
     assert res.vcs_commit is not None
     plan_at = repo.plan_new(res.vcs_commit)
     assert plan_at.context["rev"] == res.vcs_commit
-    assert {a.key for a in plan_at.actions} == {"db", "tracked"}
+    # Both `main` and `work` sit on that commit; the one this workspace is on
+    # wins, and its branches already sit at the pins.
+    assert plan_at.context["bookmark"] == "work"
+    assert {a.key: a.op for a in plan_at.actions} == {"db": "reuse", "tracked": "reuse"}
+    repo.new("main")
+    assert repo.on_trunk() and repo.workspace.working_refs["db"] == "main"
 
 
 def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> None:
@@ -582,55 +596,61 @@ def test_gc_prunes_stray_branches_only_when_nothing_is_lost(vcs_root: Path) -> N
     repo.commit("baseline")  # pins s1
     s2 = store.write(system, "main", {"v": 2})
     repo.commit("update")  # pins s2; main head is s2
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     mine = repo.workspace.working_refs["db"]
     branches = store.system(system).branches
     s3 = store.write(system, "main", {"v": 3})  # main moved on; s3 is not pinned
 
-    # Stray branches of dead workspaces, in every situation the rule covers.
+    # Stray branches of bookmarks that are gone, in every situation the rule
+    # covers -- plus a legacy per-workspace branch from before bookmarks.
     ds = repo.config.dataset_id
-    branches[f"tether.ws.{ds}.aaaa0001.db"] = s3  # equals base head: safe
-    branches[f"tether.ws.{ds}.aaaa0002.db"] = s1  # pinned by the first commit: safe
-    branches[f"tether.ws.{ds}.aaaa0003.db"] = s2
-    store.write(system, f"tether.ws.{ds}.aaaa0003.db", {"v": 99})  # unpinned: keep
-    branches[f"tether.ws.{ds}.cafef00d.db"] = s2  # live workspace: never considered
-    branches["tether.ws.ffffffff.aaaa0001.db"] = s3  # another dataset's: not ours
+    branches[f"tether.ws.{ds}.old-a"] = s3  # equals base head: safe
+    branches[f"tether.ws.{ds}.old-b"] = s1  # pinned by the first commit: safe
+    branches[f"tether.ws.{ds}.old-c"] = s2
+    store.write(system, f"tether.ws.{ds}.old-c", {"v": 99})  # unpinned: keep
+    branches[f"tether.ws.{ds}.elsewhere"] = s2  # a bookmark on another machine
+    branches[f"tether.ws.{ds}.aaaa0001.db-9f2e1c"] = s1  # legacy, dead workspace
+    branches["tether.ws.ffffffff.old-a"] = s3  # another dataset's: not ours
     branches["feature-x"] = s2  # not a tether branch: never considered
 
     # Default gc never touches branches.
     plan = repo.plan_gc()
     assert not [a for a in plan.actions if a.op in ("delete-branch", "keep-branch")]
 
-    plan = repo.plan_gc(prune_workspaces=True, keep_workspaces={"cafef00d"})
+    plan = repo.plan_gc(prune_bookmarks=True, keep_bookmarks={"elsewhere"})
     by_ref = {a.target: a for a in plan.actions if a.op.endswith("-branch")}
-    assert by_ref[f"tether.ws.{ds}.aaaa0001.db"].op == "delete-branch"
-    assert "equals the base branch" in by_ref[f"tether.ws.{ds}.aaaa0001.db"].detail
-    assert by_ref[f"tether.ws.{ds}.aaaa0002.db"].op == "delete-branch"
-    assert "head is pinned" in by_ref[f"tether.ws.{ds}.aaaa0002.db"].detail
-    assert by_ref[f"tether.ws.{ds}.aaaa0003.db"].op == "keep-branch"
-    assert "unpinned writes" in by_ref[f"tether.ws.{ds}.aaaa0003.db"].detail
-    assert f"tether.ws.{ds}.cafef00d.db" not in by_ref and "feature-x" not in by_ref
+    assert by_ref[f"tether.ws.{ds}.old-a"].op == "delete-branch"
+    assert "equals the base branch" in by_ref[f"tether.ws.{ds}.old-a"].detail
+    assert "bookmark old-a (gone)" in by_ref[f"tether.ws.{ds}.old-a"].detail
+    assert by_ref[f"tether.ws.{ds}.old-b"].op == "delete-branch"
+    assert "head is pinned" in by_ref[f"tether.ws.{ds}.old-b"].detail
+    assert by_ref[f"tether.ws.{ds}.old-c"].op == "keep-branch"
+    assert "unpinned writes" in by_ref[f"tether.ws.{ds}.old-c"].detail
+    legacy = by_ref[f"tether.ws.{ds}.aaaa0001.db-9f2e1c"]
+    assert legacy.op == "delete-branch" and "legacy workspace aaaa0001" in legacy.detail
+    assert f"tether.ws.{ds}.elsewhere" not in by_ref and "feature-x" not in by_ref
     assert mine not in by_ref  # in use by this workspace
-    assert len(plan.writes) == 2  # keep-branch is not a write
+    assert len(plan.writes) == 3  # keep-branch is not a write
 
-    report = repo.gc(dry_run=False, prune_workspaces=True, keep_workspaces={"cafef00d"})
-    assert f"tether.ws.{ds}.aaaa0001.db" not in branches
-    assert f"tether.ws.{ds}.aaaa0002.db" not in branches
-    assert f"tether.ws.{ds}.aaaa0003.db" in branches  # kept: has data
-    assert f"tether.ws.{ds}.cafef00d.db" in branches and "feature-x" in branches
-    assert "tether.ws.ffffffff.aaaa0001.db" in branches  # foreign: untouched
+    report = repo.gc(dry_run=False, prune_bookmarks=True, keep_bookmarks={"elsewhere"})
+    assert f"tether.ws.{ds}.old-a" not in branches
+    assert f"tether.ws.{ds}.old-b" not in branches
+    assert f"tether.ws.{ds}.aaaa0001.db-9f2e1c" not in branches
+    assert f"tether.ws.{ds}.old-c" in branches  # kept: has data
+    assert f"tether.ws.{ds}.elsewhere" in branches and "feature-x" in branches
+    assert "tether.ws.ffffffff.old-a" in branches  # foreign: untouched
     assert mine in branches
-    assert report.kept_working_refs == {"db": [f"tether.ws.{ds}.aaaa0003.db"]}
+    assert report.kept_working_refs == {"db": [f"tether.ws.{ds}.old-c"]}
 
     # --force-prune deletes the one with data too, and says so.
-    plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
-    (forced,) = [a for a in plan.actions if a.target == f"tether.ws.{ds}.aaaa0003.db"]
+    plan = repo.plan_gc(prune_bookmarks=True, force_prune=True)
+    (forced,) = [a for a in plan.actions if a.target == f"tether.ws.{ds}.old-c"]
     assert forced.op == "delete-branch" and forced.params["forced"] is True
     assert "FORCED" in forced.detail
     repo.apply_gc(plan)
-    assert f"tether.ws.{ds}.aaaa0003.db" not in branches
-    assert f"tether.ws.{ds}.cafef00d.db" not in branches  # no keep list this time
-    assert "tether.ws.ffffffff.aaaa0001.db" in branches  # even --force-prune
+    assert f"tether.ws.{ds}.old-c" not in branches
+    assert f"tether.ws.{ds}.elsewhere" not in branches  # no keep list this time
+    assert "tether.ws.ffffffff.old-a" in branches  # even --force-prune
     assert mine in branches
 
 
@@ -655,10 +675,10 @@ def test_gc_keeps_pinless_recorded_states_and_storage_branches(
     repo.commit("update")  # records s2; main head is s2
     branches = store.system(system).branches
     ds = repo.config.dataset_id
-    branches[f"tether.ws.{ds}.aaaa0001.db"] = s1  # the only thing keeping s1 alive
+    branches[f"tether.ws.{ds}.old"] = s1  # the only thing keeping s1 alive
 
-    plan = repo.plan_gc(prune_workspaces=True)
-    (a,) = [x for x in plan.actions if x.target == f"tether.ws.{ds}.aaaa0001.db"]
+    plan = repo.plan_gc(prune_bookmarks=True)
+    (a,) = [x for x in plan.actions if x.target == f"tether.ws.{ds}.old"]
     assert a.op == "keep-branch" and "pin-less recorded state" in a.detail
 
     # A backend whose branches *are* the storage is never pruned without force.
@@ -666,14 +686,12 @@ def test_gc_keeps_pinless_recorded_states_and_storage_branches(
     monkeypatch.setattr(
         backend, "capabilities", backend.capabilities | Capability.BRANCH_IS_STORAGE
     )
-    branches[f"tether.ws.{ds}.aaaa0002.db"] = branches[
-        "main"
-    ]  # would otherwise be safe
-    plan = repo.plan_gc(prune_workspaces=True)
+    branches[f"tether.ws.{ds}.old2"] = branches["main"]  # would otherwise be safe
+    plan = repo.plan_gc(prune_bookmarks=True)
     ops = {x.target: x for x in plan.actions if x.op.endswith("-branch")}
-    assert ops[f"tether.ws.{ds}.aaaa0002.db"].op == "keep-branch"
-    assert "branch is storage" in ops[f"tether.ws.{ds}.aaaa0002.db"].detail
-    plan = repo.plan_gc(prune_workspaces=True, force_prune=True)
+    assert ops[f"tether.ws.{ds}.old2"].op == "keep-branch"
+    assert "branch is storage" in ops[f"tether.ws.{ds}.old2"].detail
+    plan = repo.plan_gc(prune_bookmarks=True, force_prune=True)
     assert all(
         x.op == "delete-branch" for x in plan.actions if x.op.endswith("-branch")
     )
@@ -684,7 +702,7 @@ def test_gc_forgets_removed_objects_refs_without_deleting(vcs_root: Path) -> Non
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     mine = repo.workspace.working_refs["db"]
 
     repo.remove("db")
@@ -698,10 +716,10 @@ def test_gc_forgets_removed_objects_refs_without_deleting(vcs_root: Path) -> Non
     assert "db" not in repo.workspace.working_refs
     assert mine in store.system(system).branches  # the branch itself survives
 
-    # Re-register the object: the stray branch becomes this workspace's orphan
-    # and --prune-workspaces evaluates it like any other.
+    # Re-register the object: the stray branch becomes this bookmark's orphan
+    # and --prune-bookmarks evaluates it like any other.
     repo.add("db", "memory", {"system": system, "branch": "main"})
-    plan = repo.plan_gc(prune_workspaces=True)
+    plan = repo.plan_gc(prune_bookmarks=True)
     (a,) = [x for x in plan.actions if x.target == mine]
     assert a.op == "delete-branch" and "no object uses it" in a.detail
 
@@ -758,7 +776,7 @@ def test_prune_keeps_live_workspaces_automatically(
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     mine = repo.workspace.working_refs["db"]
 
     # A second live checkout of the same repository, with its own tether workspace.
@@ -778,25 +796,35 @@ def test_prune_keeps_live_workspaces_automatically(
             capture_output=True,
         )
     other = Repo.find(other_root)
-    other.new(eager=True)
+    other.new(bookmark="theirs", eager=True)
     theirs = other.workspace.working_refs["db"]
-    assert theirs != mine
+    assert theirs != mine and theirs.endswith(".theirs")
     assert repo.live_workspace_ids() == {
         repo.workspace.workspace_id,
         other.workspace.workspace_id,
     }
+    assert {"main", "work", "theirs"} <= repo.live_bookmarks()
 
-    # A branch from a workspace that no longer exists, at the base head (safe).
-    stray = f"tether.ws.{repo.config.dataset_id}.deadbeef.db-000000"
+    # A bookmark another live checkout works on is refused here unless shared.
+    plan = repo.plan_new("theirs")
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert "held by live workspace" in refuse.detail and "--shared" in refuse.detail
+    with pytest.raises(TetherError, match="held by live workspace"):
+        repo.new("theirs")
+    assert repo.plan_new("theirs", shared=True).context["shared"] is True
+    assert not [
+        a for a in repo.plan_new("theirs", shared=True).actions if a.op == "refuse"
+    ]
+
+    # A branch of a bookmark that no longer exists, at the base head (safe).
+    stray = f"tether.ws.{repo.config.dataset_id}.deadbeef"
     store.system(system).branches[stray] = store.system(system).branches["main"]
-    plan = repo.plan_gc(prune_workspaces=True)
+    plan = repo.plan_gc(prune_bookmarks=True)
     ops = {a.target: a.op for a in plan.actions if a.op.endswith("-branch")}
     assert ops == {stray: "delete-branch"}
-    assert theirs not in ops and mine not in ops  # both live, no --keep-workspace
-    assert plan.context["live_workspaces"] == sorted(
-        w[:8] for w in (repo.workspace.workspace_id, other.workspace.workspace_id)
-    )
-    assert any("keeping live workspaces" in n for n in plan.notes)
+    assert theirs not in ops and mine not in ops  # both bookmarks are live
+    assert {"main", "work", "theirs"} <= set(plan.context["live_bookmarks"])
+    assert any("keeping live bookmarks" in n for n in plan.notes)
 
 
 def test_partial_fork_records_what_succeeded(
@@ -819,7 +847,7 @@ def test_partial_fork_records_what_succeeded(
 
     monkeypatch.setattr(backend, "fork", flaky_fork)
     with pytest.raises(MultiObjectError, match="could not fork working refs for bad"):
-        repo.new(eager=True)
+        repo.new(bookmark="work", eager=True)
 
     # The branch that was created is known to the workspace, with its bookkeeping.
     ws = Repo.find(vcs_root).workspace
@@ -868,7 +896,7 @@ def test_two_datasets_sharing_a_store_do_not_gc_each_other(
     a.commit("a: v1")
     store.write(system, "main", {"v": 2})
     b.commit("b: v2")  # a different state, so a different pin
-    b.new(eager=True)
+    b.new(bookmark="work", eager=True)
     b_ref = b.workspace.working_refs["db"]
     b_pin = b.objects["db"].pin
     a_pin = a.objects["db"].pin
@@ -879,11 +907,11 @@ def test_two_datasets_sharing_a_store_do_not_gc_each_other(
 
     # From A's point of view B's pin and branch are unreferenced strays -- and
     # off limits. Even --force-prune stays inside A's namespace.
-    plan = a.plan_gc(prune_workspaces=True, force_prune=True)
+    plan = a.plan_gc(prune_bookmarks=True, force_prune=True)
     targets = {x.target for x in plan.actions}
     assert not any(b_pin.id in t or t == b_ref for t in targets), targets
     assert any("of other datasets left alone" in n for n in plan.notes)
-    a.gc(dry_run=False, prune_workspaces=True, force_prune=True)
+    a.gc(dry_run=False, prune_bookmarks=True, force_prune=True)
     backend = a.backend_for("memory")
     assert b_pin.id in backend.list_pins({"system": system})
     assert b_ref in store.system(system).branches
@@ -909,13 +937,15 @@ def test_op_log_records_every_store_write(vcs_root: Path) -> None:
     store = default_store()
     repo.commit("baseline")
     baseline = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 2})
     repo.commit("second")
-    # Back onto the baseline pin: the branch is not at it, so the fork is
-    # deferred (lazy) and the existing branch's head is recorded.
-    repo.new(baseline)
+    # The bookmark is moved back onto the baseline commit by hand; `new` then
+    # finds the branch away from the pin, so the fork is deferred (lazy) and
+    # the existing branch's head is recorded.
+    repo.vcs.bookmark_set("work", baseline)
+    repo.new("work")
     repo.open("db", read_only=False)  # materializes -> "fork" op
     repo.remove("db")
     repo.gc(dry_run=False)
@@ -971,7 +1001,7 @@ def test_new_refuses_to_discard_unpinned_writes(vcs_root: Path) -> None:
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
 
     # Nothing written: a second new resets the branch without complaint.
@@ -1066,7 +1096,7 @@ def test_undo_new_deletes_created_branches_and_restores_the_workspace(
     repo.commit("baseline")
     ws_before = repo.workspace.to_toml()
 
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     assert wref in store.system(system).branches
     report = repo.undo()
@@ -1074,9 +1104,10 @@ def test_undo_new_deletes_created_branches_and_restores_the_workspace(
     assert wref not in store.system(system).branches
     assert repo.workspace.to_toml() == ws_before
     assert "db" not in repo.workspace.working_refs
+    assert "work" not in repo.vcs.bookmarks()  # the bookmark `new -b` made is gone
 
     # A branch that gained writes since the new is not deleted silently.
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     store.write(system, wref, {"v": "scratch"})
     with pytest.raises(TetherError, match="gained writes"):
         repo.undo()
@@ -1085,7 +1116,7 @@ def test_undo_new_deletes_created_branches_and_restores_the_workspace(
     assert report.complete and wref not in store.system(system).branches
 
     # Lazy: the fork op (materialize) is undone the same way.
-    repo.new()
+    repo.new(bookmark="work")
     assert "db" in repo.workspace.pending_forks
     repo.open("db", read_only=False)
     assert repo.ops()[0].command == "fork" and wref in store.system(system).branches
@@ -1104,14 +1135,16 @@ def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
     store = default_store()
     repo.commit("baseline")
     c1 = repo.vcs.current_rev() if repo.vcs.kind == "git" else repo.vcs.resolve("@-")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     s_work = store.write(system, wref, {"v": "work"})
     repo.commit("work")  # pins the branch head; the branch is the only copy
-    pos_after_commit = repo.vcs.position()
 
-    # new REV moves the working copy and resets the branch onto the old pin.
-    repo.new(c1, eager=True)
+    # The bookmark is moved back by hand (git: this moves HEAD too); `new` onto
+    # it moves the working copy and resets the branch onto the old pin.
+    repo.vcs.bookmark_set("work", c1)
+    pos_before_new = repo.vcs.position()
+    repo.new("work", eager=True)
     assert store.resolve(system, wref) != s_work
     entry = repo.ops()[0]
     assert entry.command == "new" and entry.result["reset"] == ["db"]
@@ -1120,14 +1153,17 @@ def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
     report = repo.undo()
     assert report.complete, report
     assert store.resolve(system, wref) == s_work  # head re-pointed
-    # Working copy back: git returns to the branch/commit; jj cannot revive the
-    # abandoned empty change, so it opens a fresh one on the same parent.
+    # Working copy back where it was before `new`: git returns to the
+    # branch/commit; jj cannot revive the abandoned empty change, so it opens
+    # a fresh one on the same parent.
     if repo.vcs.kind == "git":
-        assert repo.vcs.position()["id"] == pos_after_commit["id"]
+        assert repo.vcs.position()["id"] == pos_before_new["id"]
     else:
-        assert repo.vcs.position()["parent"] == pos_after_commit["parent"]
+        assert repo.vcs.position()["parent"] == pos_before_new["parent"]
     assert repo.workspace.working_refs["db"] == wref
-    assert not repo.is_stale()
+    # jj is back on top of the "work" commit; git's hand-moved branch left the
+    # checkout at c1, so the workspace (which last committed "work") is stale.
+    assert repo.is_stale() == (repo.vcs.kind == "git")
 
 
 def test_undo_gc_recreates_branches_but_not_pins(vcs_root: Path) -> None:
@@ -1143,7 +1179,7 @@ def test_undo_gc_recreates_branches_but_not_pins(vcs_root: Path) -> None:
     stray = f"tether.ws.{repo.config.dataset_id}.deadbeef.db-000000"
     store.system(system).branches[stray] = sid  # equals base head: deletable
 
-    repo.gc(dry_run=False, prune_workspaces=True)
+    repo.gc(dry_run=False, prune_bookmarks=True)
     assert (
         orphan not in backend.list_pins(locator)
         and stray not in store.system(system).branches
@@ -1193,7 +1229,7 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
     assert repo.objects["db"] == manifest
 
     # promote cannot be undone; the previous head is reported.
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 2})
     repo.commit("work")
@@ -1223,7 +1259,7 @@ def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:
     repo.commit("v2", pull=True)
     pin2 = repo.objects["db"].pin
     assert pin1 is not None and pin2 is not None
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
 
     plan = repo.plan_repair()
@@ -1311,7 +1347,7 @@ def test_undo_to_walks_back_through_several_operations(vcs_root: Path) -> None:
     anchor = repo.ops()[0]  # the state right after this commit is the goal
     manifest = repo.objects["db"]
 
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 2})
     repo.commit("work")
@@ -1338,7 +1374,7 @@ def test_undo_to_walks_back_through_several_operations(vcs_root: Path) -> None:
 
     # A non-undoable op (promote) stops the walk; what came before it in the
     # walk stays undone and the report says where it stopped.
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)  # the undo deleted the bookmark too
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 3})
     repo.commit("more work")
@@ -1365,7 +1401,7 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     s2 = store.write(system, "main", {"v": 2})
     store.write(other, "main", {"o": 2})
     repo.commit("v2", pull=True)
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["db"]
     oref = repo.workspace.working_refs["other"]
     assert store.resolve(system, wref) == s2
@@ -1439,44 +1475,48 @@ def test_forget_workspace_deletes_its_branches_files_and_checkout(
     system = _mem_object(repo)
     store = default_store()
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     mine = repo.workspace.working_refs["db"]
 
     other_root = tmp_path / "other-checkout"
     other = _second_checkout(repo, vcs_root, other_root)
-    other.new(eager=True)
+    other.new(bookmark="theirs", eager=True)
     theirs = other.workspace.working_refs["db"]
     other_id = other.workspace.workspace_id
     assert other_id in repo.live_workspace_ids()
     ws_file = other_root / ".tether" / "workspace.toml"
     assert ws_file.exists()
 
-    # Forget the other checkout from here: branch (idle at base: safe), files, VCS.
+    # Forget the other checkout from here: its files and the VCS checkout go;
+    # its bookmark's branch stays -- branches belong to bookmarks, not
+    # workspaces -- until the bookmark is deleted and gc prunes it.
     plan = repo.plan_forget_workspace(other_id)
     ops = {a.op for a in plan.actions}
-    assert {"delete-branch", "delete-file", "forget-vcs-workspace"} <= ops
-    (br,) = [a for a in plan.actions if a.op == "delete-branch"]
-    assert br.target == theirs and "being forgotten" in br.detail
+    assert ops == {"delete-file", "forget-vcs-workspace"}
     report = repo.apply_forget_workspace(plan)
     assert not report.failed, report.failed
-    assert report.deleted_working_refs == {"db": [theirs]}
-    assert theirs not in store.system(system).branches
-    assert mine in store.system(system).branches  # not ours to touch
+    assert report.deleted_working_refs == {}
+    assert theirs in store.system(system).branches
+    assert mine in store.system(system).branches
     assert not ws_file.exists()
     assert report.vcs and other_id not in repo.live_workspace_ids()
     assert not any(
         r.resolve() == other_root.resolve() for r in repo.vcs.workspace_roots()
     )
     assert repo.ops()[0].command == "forget-workspace" and not repo.ops()[0].undoable
+    # The bookmark is still live (the VCS has it), so gc keeps its branch...
+    assert "theirs" in repo.live_bookmarks()
+    assert not [
+        a for a in repo.plan_gc(prune_bookmarks=True).actions if a.target == theirs
+    ]
+    # ...until the bookmark itself is deleted.
+    repo.vcs.bookmark_delete("theirs")
+    (a,) = [x for x in repo.plan_gc(prune_bookmarks=True).actions if x.target == theirs]
+    assert a.op == "delete-branch" and "bookmark theirs (gone)" in a.detail
 
-    # A branch with unpinned data is kept unless forced.
-    store.write(system, mine, {"v": "scratch"})
-    plan = repo.plan_forget_workspace()  # the current workspace
-    (kept,) = [a for a in plan.actions if a.op == "keep-branch"]
-    assert kept.target == mine
-    report = repo.forget_workspace(force_prune=True)
-    assert report.deleted_working_refs == {"db": [mine]}
-    assert mine not in store.system(system).branches
+    # Forgetting the current workspace: state files go, branch stays.
+    report = repo.forget_workspace()
+    assert mine in store.system(system).branches
     assert not (vcs_root / ".tether" / "workspace.toml").exists()
     # The main checkout stays; the next command here is a fresh workspace.
     fresh = Repo.find(vcs_root)
@@ -1484,7 +1524,7 @@ def test_forget_workspace_deletes_its_branches_files_and_checkout(
         fresh.workspace.workspace_id != repo.workspace.workspace_id
         or not repo.workspace.working_refs
     )
-    assert fresh.workspace.working_refs == {}
+    assert fresh.workspace.working_refs == {} and fresh.workspace.bookmark is None
 
 
 def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -> None:
@@ -1512,6 +1552,12 @@ def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -
             capture_output=True,
         )
     repo = Repo.find(vcs_root)
+    if repo.vcs.kind == "jj":
+        # jj deletes a bookmark whose commit is abandoned; the user puts it back.
+        assert "main" not in repo.vcs.bookmarks()
+        with pytest.raises(StaleWorkingCopyError, match="no longer exists"):
+            repo.commit("blocked")
+        repo.vcs.bookmark_set("main", "@-")
     (drift,) = repo.vcs_drift()
     assert drift.commit == c2 and drift.op.command == "commit"
     # The manifests reverted with the commit, so v2's pin is unreferenced.
@@ -1561,17 +1607,13 @@ def test_prune_plans_undeletable_branches_as_kept(
         lambda locator, ref: "2 branch(es) hang off it" if ref == stray else None,
     )
     for force in (False, True):
-        plan = repo.plan_gc(prune_workspaces=True, force_prune=force)
+        plan = repo.plan_gc(prune_bookmarks=True, force_prune=force)
         (a,) = [x for x in plan.actions if x.target == stray]
         assert a.op == "keep-branch" and "cannot be deleted" in a.detail
         assert a.params.get("blocked") is True
-    report = repo.gc(dry_run=False, prune_workspaces=True, force_prune=True)
+    report = repo.gc(dry_run=False, prune_bookmarks=True, force_prune=True)
     assert report.kept_working_refs == {"db": [stray]}
     assert stray in store.system(system).branches
-    # forget-workspace goes through the same rule.
-    plan = repo.plan_forget_workspace("deadbeef")
-    (a,) = [x for x in plan.actions if x.target == stray]
-    assert a.op == "keep-branch" and "cannot be deleted" in a.detail
 
 
 def test_positions_commit_unchanged_until_pull(
@@ -1655,7 +1697,7 @@ def test_positions_commit_unchanged_until_pull(
     repo.config.commit_pull = False
 
     # A working branch is what moves; pull refuses to step on it.
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     assert repo.moving_keys() == ["db"]
     wref = repo.workspace.working_refs["db"]
     store.write(system, wref, {"v": 5})
@@ -1690,7 +1732,7 @@ def test_pull_then_write_forks_from_the_pulled_state(vcs_root: Path) -> None:
     store.write(system, "main", {"v": 1})
     repo.add("db", "memory", {"system": system, "branch": "main"})
     repo.commit("adopt")
-    repo.new()  # lazy: the fork is decided, not created
+    repo.new(bookmark="work")  # lazy: the fork is decided, not created
     assert "db" in repo.workspace.pending_forks
 
     s2 = store.write(system, "main", {"v": 2})
@@ -1738,7 +1780,7 @@ def test_add_at_is_the_initial_position_only(vcs_root: Path) -> None:
     assert "at" not in repo.objects["db"].locator
 
 
-def test_set_policy_switches_write_mode_in_place(vcs_root: Path) -> None:
+def test_set_policy_changes_file_and_pin_in_place(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     store = default_store()
     system = f"sys-{uuid.uuid4().hex[:8]}"
@@ -1746,47 +1788,74 @@ def test_set_policy_switches_write_mode_in_place(vcs_root: Path) -> None:
     store.write(system, "main", {"v": 1})
     repo.add("db", "memory", {"system": system, "branch": "main"})
     repo.commit("baseline")
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     branch = repo.workspace.working_refs["db"]
 
-    # fork -> direct: the manifest changes, the workspace lets go of the branch
-    # (left in the store), and `new` puts the working ref on main.
-    report = repo.set_policy(["db"], write="direct")
-    assert report.changed == {"db": {"write": ("fork", "direct")}}
-    assert report.released == {"db": branch}
-    assert repo.objects["db"].policy.write == "direct"
-    assert "db" not in repo.workspace.working_refs
-    assert branch in store.system(system).branches
-    assert Repo.find(vcs_root).objects["db"].policy.write == "direct"
-    repo.new()
-    assert repo.workspace.working_refs["db"] == "main"
-    assert (
-        repo.ops()[1].command == "set"
-        and "write=fork->direct" in repo.ops()[1].summary()
-    )
-
-    # Nothing to change is reported, not logged; bad values refuse.
-    report = repo.set_policy(["db"], write="direct")
-    assert report.unchanged == ["db"] and not report.changed
-    assert repo.ops()[0].command == "new"
-    with pytest.raises(ConfigError, match=r"invalid policy\.write"):
-        repo.set_policy(["db"], write="sideways")
-    with pytest.raises(ConfigError, match="nothing to set"):
-        repo.set_policy(["db"])
-    with pytest.raises(ConfigError, match="no such object"):
-        repo.set_policy(["nope"], write="fork")
-
-    # pin-only changes keep the workspace's hold; undo restores the manifest.
+    # pin changes keep the workspace's hold; undo restores the manifest.
     report = repo.set_policy(["db"], pin="record")
     assert (
         report.changed == {"db": {"pin": ("native", "record")}} and not report.released
     )
-    assert repo.workspace.working_refs["db"] == "main"
+    assert repo.workspace.working_refs["db"] == branch
+    assert Repo.find(vcs_root).objects["db"].policy.pin == "record"
+    assert (
+        repo.ops()[0].command == "set"
+        and "pin=native->record" in repo.ops()[0].summary()
+    )
     repo.undo()
     assert repo.objects["db"].policy.pin == "native"
 
-    # direct -> fork: the next `new` forks a branch off the pin.
-    repo.set_policy(["db"], write="fork")
-    assert "db" not in repo.workspace.working_refs
-    repo.new(eager=True)
-    assert repo.workspace.working_refs["db"].startswith("tether.ws.")
+    # Nothing to change is reported, not logged; bad values refuse.
+    report = repo.set_policy(["db"], pin="native")
+    assert report.unchanged == ["db"] and not report.changed
+    assert repo.ops()[0].command == "undo"
+    with pytest.raises(ConfigError, match=r"invalid policy\.pin"):
+        repo.set_policy(["db"], pin="sideways")
+    with pytest.raises(ConfigError, match="nothing to set"):
+        repo.set_policy(["db"])
+    with pytest.raises(ConfigError, match="no such object"):
+        repo.set_policy(["nope"], pin="record")
+
+
+def test_bookmarks_shape_the_working_copy(vcs_root: Path) -> None:
+    """The dataset bookmark and the stores' branches are one shape: init puts
+    the working copy on the trunk, `new -b` names a branch per system after the
+    bookmark, commit moves the bookmark, and no bookmark means read-only."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    assert repo.workspace.bookmark == "main" == repo.config.trunk
+    c1 = repo.commit("baseline").vcs_commit
+    assert c1 is not None and repo.vcs.bookmarks()["main"] == c1
+
+    # A bookmark: one store branch named after it, and the bookmark follows
+    # the commits made on it while `main` stays put.
+    repo.new(bookmark="feature", eager=True)
+    ds = repo.config.dataset_id
+    assert repo.workspace.working_refs["db"] == f"tether.ws.{ds}.feature"
+    assert repo.vcs.bookmarks()["feature"] == c1
+    store.write(system, f"tether.ws.{ds}.feature", {"v": 2})
+    c2 = repo.commit("on feature").vcs_commit
+    assert c2 is not None and repo.vcs.bookmarks() == {"main": c1, "feature": c2}
+    with pytest.raises(ConfigError, match="exists"):
+        repo.new(bookmark="feature")
+
+    # Leave the bookmark behind with the VCS: commit refuses until `new`.
+    repo.vcs.new("main")
+    with pytest.raises(StaleWorkingCopyError, match="not on bookmark 'feature'"):
+        repo.commit("astray")
+    repo.new("main")
+    assert repo.on_trunk() and repo.workspace.working_refs["db"] == "main"
+    assert repo.plan_commit("nothing").is_empty
+
+    # A revision with no bookmark is read-only (git parks it on a `tether/*`
+    # branch, which is not a bookmark either).
+    repo.vcs.bookmark_set("main", c2)  # free c1 of its bookmark
+    repo.new(c1)
+    assert repo.workspace.bookmark is None and repo.workspace.working_refs == {}
+    with pytest.raises(StaleWorkingCopyError, match="read-only"):
+        repo.open("db", read_only=False)
+    ro = repo.open("db", read_only=True)
+    assert isinstance(ro, MemoryHandle) and ro.read_only
+    assert repo.plan_new().context["bookmark"] is None
+    assert repo.plan_commit("ro").is_empty  # nothing this checkout can move

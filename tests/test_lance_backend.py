@@ -62,7 +62,7 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
         b.pin(loc, {"branch": "main", "version": 0}, pid)
 
     # A fresh fork reports the parent's address, so a no-op commit is a no-op.
-    name = working_ref_name("d5d5d5d5", "ws0123abcd", "tables/x")
+    name = working_ref_name("d5d5d5d5", "feature")
     wref = b.fork(loc, pin, name)
     assert wref == name
     assert b.fingerprint(loc, wref) == state

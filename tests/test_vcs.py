@@ -276,11 +276,16 @@ def test_bookmarks(vcs_root: Path) -> None:
     # jj: both bookmarks sit on c1 until the first commit; git: HEAD is definite.
     assert "feature" in vcs.current_bookmarks()
     _write(vcs_root, "tether.toml", "v=2\n")
-    c2 = vcs.commit(["tether.toml"], "second")
-    if vcs.kind == "jj":
-        assert vcs.bookmarks()["feature"] == c1  # jj bookmarks do not follow
-        vcs.bookmark_set("feature", c2)
+    c2 = vcs.commit(["tether.toml"], "second", advance="feature")
     assert vcs.bookmarks()["feature"] == c2 and vcs.bookmarks()["main"] == c1
+    if vcs.kind == "jj":
+        # One operation: the commit and the bookmark move undo together.
+        import subprocess
+
+        subprocess.run(["jj", "undo"], cwd=vcs_root, check=True, capture_output=True)
+        assert vcs.bookmarks()["feature"] == c1 and c2 not in vcs.history_revs()
+        c2 = vcs.commit(["tether.toml"], "second, again", advance="feature")
+        assert vcs.bookmarks()["feature"] == c2
     assert vcs.current_bookmarks() == ["feature"]
     assert vcs.is_ancestor(c1, c2) and not vcs.is_ancestor(c2, c1)
     assert vcs.is_ancestor(c2, c2)

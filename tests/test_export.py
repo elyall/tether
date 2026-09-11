@@ -124,7 +124,7 @@ def test_export_rev_subset_listings_and_workspace(
     vcs_root: Path, tmp_path: Path
 ) -> None:
     repo, _system, commits = _dataset(vcs_root)
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     bundle = repo.export([commits[0]], listings=True, workspace=True)
     assert bundle.row_counts()["commits"] == 1
     assert bundle.row_counts()["objects"] == 2

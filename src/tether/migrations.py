@@ -17,6 +17,7 @@ clone has to re-sync afterwards.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -29,12 +30,12 @@ from tether.manifest import (
     Pin,
     canonical_bytes,
     compute_pin_id,
+    is_dataset_id,
+    key_digest6,
     new_dataset_id,
     pin_dataset,
     ref_for_pin,
     slugify_key,
-    working_ref_dataset,
-    working_ref_name,
 )
 from tether.plan import Action, Plan
 
@@ -109,7 +110,25 @@ def _system_key(repo: Repo, m: ObjectManifest) -> str:
 
 
 def _key6(key: str) -> str:
-    return working_ref_name("00000000", "00000000", key).rsplit("-", 1)[1]
+    return key_digest6(key)
+
+
+def _is_v1_branch(ref: str, slugs: dict[str, str]) -> bool:
+    """A pre-namespace working branch: ``tether.ws.<ws8>.<key slug>``.
+
+    Bookmark-named branches of *other* datasets look the same
+    (``tether.ws.<ds8>.<bookmark>``), so only tails that are one of this
+    dataset's key slugs count -- v1 never produced anything else.
+    """
+    if not ref.startswith(WORKING_REF_PREFIX):
+        return False
+    ws8, dot, tail = ref[len(WORKING_REF_PREFIX) :].partition(".")
+    if not dot or not is_dataset_id(ws8) or "." in tail:
+        return False
+    if tail in slugs:
+        return True  # `tether.ws.<ws8>.<slug>` (a1-a5)
+    slug, dash, digest = tail.rpartition("-")  # `<slug>-<key6>` (a6-a7)
+    return bool(dash) and slug in slugs and bool(re.fullmatch(r"[0-9a-f]{6}", digest))
 
 
 def _new_branch_name(ref: str, dataset_id: str, slugs: dict[str, str]) -> str:
@@ -204,7 +223,7 @@ def _plan_v2(repo: Repo, plan: Plan) -> None:
             plan.notes.append(f"{key}: could not list working branches ({exc})")
             continue
         for ref in sorted(refs):
-            if not ref.startswith(WORKING_REF_PREFIX) or working_ref_dataset(ref):
+            if not _is_v1_branch(ref, slugs):
                 continue
             plan.actions.append(
                 Action(
@@ -345,7 +364,7 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     for table in ("working_refs", "pending_forks"):
         refs: dict[str, str] = getattr(repo.workspace, table)
         for key, ref in list(refs.items()):
-            if ref.startswith(WORKING_REF_PREFIX) and not working_ref_dataset(ref):
+            if _is_v1_branch(ref, slugs):
                 refs[key] = _new_branch_name(ref, dataset_id, slugs)
     write_workspace(repo.root, repo.workspace)
     repo.config.version = 2

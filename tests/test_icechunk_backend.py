@@ -89,7 +89,7 @@ def test_icechunk_fork_from_older_snapshot(vcs_root: Path) -> None:
     assert pin is not None
     ic_repo = ic.Repository.open(ic.local_filesystem_storage(uri))
     assert ic_repo.lookup_tag(pin.ref) == older.id
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["zarr/imaging"]
     assert ic_repo.lookup_branch(wref) == older.id
     handle = repo.open("zarr/imaging")
@@ -127,7 +127,7 @@ def test_icechunk_engine_lifecycle(vcs_root: Path) -> None:
     assert pin.id in backend.list_pins({"uri": uri})
 
     # Fork a working branch and confirm it starts at the pinned snapshot.
-    repo.new(eager=True)
+    repo.new(bookmark="work", eager=True)
     wref = repo.workspace.working_refs["zarr/imaging"]
     assert wref and wref != "main"
     handle = repo.open("zarr/imaging")

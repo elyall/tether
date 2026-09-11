@@ -421,8 +421,16 @@ class VcsAdapter(Protocol):
         ``ignore_immutable`` (jj) rewrites commits jj considers immutable.
         """
 
-    def commit(self, relpaths: list[str], message: str) -> str:
-        """Commit the given paths with ``message``; return the new commit id."""
+    def commit(
+        self, relpaths: list[str], message: str, *, advance: str | None = None
+    ) -> str:
+        """Commit the given paths with ``message``; return the new commit id.
+
+        ``advance`` names a bookmark / branch to move onto the new commit as
+        part of the same operation (jj: one op-log entry, so ``jj undo`` takes
+        the commit and the bookmark move back together; git: the checked-out
+        branch moves by itself, any other is updated afterwards).
+        """
 
     def position(self) -> dict[str, Any]:
         """Where the working copy is, as data `goto` can return to.
@@ -681,6 +689,11 @@ class JjAdapter:
         return infos
 
     def bookmarks(self) -> dict[str, str]:
+        # --ignore-working-copy keeps this consistent with `history_revs` and
+        # `refs` inside one export; a bookmark that sits on the working-copy
+        # change itself (only right after `init`) may therefore report the
+        # pre-snapshot id -- callers that need the live answer pass the
+        # bookmark *name* to `is_ancestor` instead of this id.
         out = self._jj(
             "bookmark",
             "list",
@@ -722,14 +735,19 @@ class JjAdapter:
         return sorted(at)
 
     def new_bookmark(self, name: str, rev: str | None) -> None:
-        self._jj("new", rev if rev is not None else "@")
+        # Start from `rev`, or from where the working copy already is: an
+        # empty @ is kept (a fresh one would leave an empty, bookmarked commit
+        # in history), a non-empty one is finalized first by `jj new`.
+        if rev is not None:
+            self._jj("new", rev)
+        elif not self.position().get("empty"):
+            self._jj("new", "@")
         self._jj("bookmark", "set", name, "-r", "@-", "--allow-backwards")
 
     def is_ancestor(self, ancestor: str, rev: str) -> bool:
         out = self._jj(
             "log",
             "--no-graph",
-            "--ignore-working-copy",
             "-r",
             f"({ancestor})::({rev})",
             "--limit",
@@ -808,12 +826,29 @@ class JjAdapter:
         out = self._jj("diff", "--summary", "-r", "@", *relpaths)
         return bool(out.stdout.strip())
 
-    def commit(self, relpaths: list[str], message: str) -> str:
+    def commit(
+        self, relpaths: list[str], message: str, *, advance: str | None = None
+    ) -> str:
         # jj auto-snapshots the working copy; scope the commit to our paths so
         # unrelated working-copy edits stay put. `jj commit` finalizes the
-        # current @ (which becomes @-) and opens a fresh empty @ on top.
-        self._jj("commit", "-m", message, *relpaths)
-        return self.resolve("@-")
+        # current @ (which becomes @-) and opens a fresh empty @ on top. With
+        # `advance`, jj's advance-bookmarks setting moves that bookmark from
+        # the parent onto the new commit inside the same operation.
+        args = ["commit", "-m", message]
+        if advance is not None:
+            args += [
+                "--config",
+                f"experimental-advance-branches.enabled-branches={[advance]!r}".replace(
+                    "'", '"'
+                ),
+            ]
+        self._jj(*args, *relpaths)
+        commit = self.resolve("@-")
+        if advance is not None and self.bookmarks().get(advance) != commit:
+            # The bookmark was not on the parent (or the setting is gone in
+            # this jj): move it explicitly.
+            self.bookmark_set(advance, commit)
+        return commit
 
     def position(self) -> dict[str, Any]:
         out = self._jj(
@@ -1101,10 +1136,15 @@ class GitAdapter:
         out = self._git("status", "--porcelain", "--", *relpaths)
         return bool(out.stdout.strip())
 
-    def commit(self, relpaths: list[str], message: str) -> str:
+    def commit(
+        self, relpaths: list[str], message: str, *, advance: str | None = None
+    ) -> str:
         self._git("add", "--", *relpaths)
         self._git("commit", "-m", message, "--", *relpaths)
-        return self.current_rev()
+        commit = self.current_rev()
+        if advance is not None and self.bookmarks().get(advance) != commit:
+            self.bookmark_set(advance, commit)
+        return commit
 
     def position(self) -> dict[str, Any]:
         # An unborn branch (no commits yet) has a symbolic HEAD but no commit.
@@ -1168,16 +1208,22 @@ class GitAdapter:
         raise VcsError(f"too many tether/{sha[:12]} branches")  # pragma: no cover
 
     def bookmarks(self) -> dict[str, str]:
+        # `tether/<sha12>` branches only park a checked-out commit so it stays
+        # reachable (see `new`); they are not bookmarks the dataset works on.
         return {
             r.name: r.commit_id
             for r in _git_refs(self._exe, self.root, None)
-            if r.kind == "branch"
+            if r.kind == "branch" and not r.name.startswith("tether/")
         }
 
     def bookmark_set(self, name: str, rev: str) -> None:
-        # update-ref moves the current branch too (HEAD is symbolic) without
-        # touching the working tree, which is what `commit` and `pull` want.
-        self._git("update-ref", f"refs/heads/{name}", self.resolve(rev))
+        commit = self.resolve(rev)
+        if self.current_bookmarks() == [name]:
+            # The checked-out branch: move HEAD *and* the tree (`--keep`
+            # refuses rather than overwrite local edits).
+            self._git("reset", "--keep", commit)
+            return
+        self._git("update-ref", f"refs/heads/{name}", commit)
 
     def bookmark_delete(self, name: str) -> None:
         self._git("branch", "-D", name)
@@ -1185,7 +1231,7 @@ class GitAdapter:
     def current_bookmarks(self) -> list[str]:
         out = self._git("symbolic-ref", "--short", "-q", "HEAD", check=False)
         name = out.stdout.strip()
-        return [name] if name else []
+        return [name] if name and not name.startswith("tether/") else []
 
     def new_bookmark(self, name: str, rev: str | None) -> None:
         args = ["switch", "-c", name]

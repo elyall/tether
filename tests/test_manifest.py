@@ -81,25 +81,37 @@ def test_pin_id_deterministic_and_state_sensitive() -> None:
 
 
 def test_ref_and_slug_helpers() -> None:
-    from tether.manifest import working_ref_dataset, working_ref_workspace
+    from tether.manifest import (
+        bookmark_slug,
+        working_ref_bookmark,
+        working_ref_dataset,
+        working_ref_workspace,
+    )
 
     assert ref_for_pin("abc") == "tether.abc"
     assert slugify_key("zarr/imaging") == "zarr-imaging"
-    name = working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr/imaging")
-    assert name.startswith("tether.ws.0a1b2c3d.abcd1234.zarr-imaging-")
-    assert "." not in name.removeprefix("tether.ws.0a1b2c3d.abcd1234.")
-    assert working_ref_workspace(name) == "abcd1234"
+    # A bookmark-named working ref: one per bookmark per system.
+    name = working_ref_name("0a1b2c3d", "feature")
+    assert name == "tether.ws.0a1b2c3d.feature"
     assert working_ref_dataset(name) == "0a1b2c3d"
+    assert working_ref_bookmark(name) == "feature"
+    assert working_ref_workspace(name) is None
+    assert working_ref_name("ffffffff", "feature") != name
+    # Bookmark names the stores would not accept are slugged and disambiguated.
+    assert bookmark_slug("feature") == "feature"
+    odd = working_ref_name("0a1b2c3d", "feat/x.1")
+    assert odd.startswith("tether.ws.0a1b2c3d.feat-x-1-") and "." not in odd[19:]
+    assert odd != working_ref_name("0a1b2c3d", "feat.x/1")
+    # Legacy per-workspace names are still recognised as ours, for gc.
+    legacy = "tether.ws.0a1b2c3d.abcd1234.zarr-imaging-9f2e1c"
+    assert working_ref_dataset(legacy) == "0a1b2c3d"
+    assert working_ref_workspace(legacy) == "abcd1234"
+    assert working_ref_bookmark(legacy) is None
     assert working_ref_dataset("tether.ws.not-hex.abcd1234.zarr-x") is None
-    assert working_ref_dataset("tether.ws.abcd1234.zarr-x") is None  # pre-namespace
-    assert working_ref_workspace("tether.ws.abcd1234.zarr-x") is None
+    assert (
+        working_ref_dataset("tether.ws.abcd1234.zarr-x") == "abcd1234"
+    )  # bookmark zarr-x
     assert working_ref_workspace("feature-x") is None
-    # Keys that slugify identically still get distinct branches.
-    assert name != working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr-imaging")
-    assert slugify_key("zarr/imaging") == slugify_key("zarr-imaging")
-    assert working_ref_name("0a1b2c3d", "abcd1234efgh", "zarr/imaging") == name
-    # Another dataset, same workspace id and key: a different branch.
-    assert working_ref_name("ffffffff", "abcd1234efgh", "zarr/imaging") != name
 
 
 def test_key_path_mapping() -> None:

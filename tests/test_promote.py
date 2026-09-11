@@ -27,7 +27,7 @@ def _mem(repo: Repo, key: str = "db") -> str:
 def _forked(repo: Repo, key: str = "db") -> str:
     """Commit, `new`, and open writable so the working branch exists."""
     repo.commit("baseline")
-    repo.new()
+    repo.new(bookmark="work")
     handle = repo.open(key)
     assert isinstance(handle, MemoryHandle)
     return handle.ref
@@ -83,7 +83,7 @@ def test_fork_points_are_recorded_by_both_fork_paths(vcs_root: Path) -> None:
     s1 = default_store().system(system).branches["main"]
     repo.commit("baseline")
 
-    repo.new()  # lazy: no fork point until the branch exists
+    repo.new(bookmark="work")  # lazy: no fork point until the branch exists
     assert "db" not in repo.workspace.fork_points
     repo.open("db")
     assert repo.workspace.fork_points["db"] == {"snapshot_id": s1}
@@ -207,10 +207,11 @@ def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
     assert c2 is not None
 
     # --rev: promote what a dataset commit pinned; no fork point -> ancestry check.
+    # `tracked` was never written to on this bookmark: its branch sits at the
+    # pin, so there is nothing to move.
     plan = repo.plan_promote(rev=c2)
     ops = {a.key: a.op for a in plan.actions}
-    assert ops == {"db": "fast-forward"}
-    assert any("tracked: write=direct" in n for n in plan.notes)
+    assert ops.get("db") == "fast-forward" and ops.get("tracked") != "fast-forward"
     assert "pin" in plan.actions[0].params["source"]
     report = repo.apply_promote(plan)
     pinned = repo.objects["db"].state
@@ -334,7 +335,7 @@ def test_icechunk_promote(tmp_path: Path, vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     repo.add("zarr", "icechunk", {"uri": str(path), "branch": "main"})
     repo.commit("baseline")
-    repo.new()
+    repo.new(bookmark="work")
     handle = repo.open("zarr")
     wref = repo.workspace.working_refs["zarr"]
     assert handle.branch == wref if hasattr(handle, "branch") else True

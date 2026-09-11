@@ -126,7 +126,7 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
 def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None:
     b = h.backend
     pin = b.pin(loc, state, pid)
-    name = working_ref_name(CONFORMANCE_DATASET, "ws012345", "conformance/obj")
+    name = working_ref_name(CONFORMANCE_DATASET, "conformance")
     wref = b.fork(loc, pin, name)
     assert isinstance(wref, str) and wref, "fork must return a working ref"
     forked = b.fingerprint(loc, wref)
@@ -149,7 +149,7 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     b.delete_working_ref(loc, wref)
     assert wref not in b.list_working_refs(loc), "deleted working ref still listed"
     # Pin-less fork: straight from the recorded state (policy.pin = "record").
-    name2 = working_ref_name(CONFORMANCE_DATASET, "ws012345", "conformance/pinless")
+    name2 = working_ref_name(CONFORMANCE_DATASET, "conformance-pinless")
     wref2 = b.fork(loc, state, name2)
     assert b.fingerprint(loc, wref2) == state, "fork from state must start there"
     b.delete_working_ref(loc, wref2)
