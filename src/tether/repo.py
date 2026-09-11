@@ -548,22 +548,40 @@ class Repo:
             git_path=config.vcs.get("git_path"),
             prefer=str(config.vcs.get("prefer", "jj")),
         )
-        # The trunk bookmark stands for every object's upstream branch; start
-        # the working copy on it, as a fresh git repository is on `main`. Under
-        # git the branch HEAD is on *is* the trunk, whatever it is called.
-        here = vcs.current_bookmarks()
-        if vcs.kind == "git":
-            if here and here[0] != config.trunk:
-                config.vcs["trunk"] = here[0]
-                write_config(root, config)
-            elif not here:  # detached HEAD: park the dataset on the trunk branch
-                vcs.new_bookmark(config.trunk, None)
-        elif config.trunk not in vcs.bookmarks():
-            vcs.bookmark_set(config.trunk, "@")
         repo = cls(root, config, vcs)
-        repo.workspace.bookmark = config.trunk
+        repo.workspace.bookmark = repo.adopt_trunk()
         write_workspace(root, repo.workspace)
         return repo
+
+    def adopt_trunk(self) -> str:
+        """Put this working copy on a bookmark and return its name.
+
+        The trunk bookmark stands for every object's upstream branch, so a
+        fresh dataset starts there, as a fresh git repository is on `main`.
+        Under git the branch HEAD is on *is* the trunk, whatever it is called
+        (`[vcs] trunk` is written to say so); a detached HEAD is parked on the
+        trunk branch. Under jj the trunk bookmark is created at `@` when the
+        repository has none; when it has bookmarks but not the trunk, the one
+        the working copy is on is used if it is unambiguous, else the trunk is
+        created. Used by `init` and by the v3 upgrade.
+        """
+        vcs = self.vcs
+        trunk = self.config.trunk
+        here = vcs.current_bookmarks()
+        if vcs.kind == "git":
+            if here and here[0] != trunk:
+                self.config.vcs["trunk"] = here[0]
+                write_config(self.root, self.config)
+                return here[0]
+            if not here:  # detached HEAD: park the dataset on the trunk branch
+                vcs.new_bookmark(trunk, None)
+            return trunk
+        if trunk in vcs.bookmarks():
+            return trunk if trunk in here or len(here) != 1 else here[0]
+        if len(here) == 1:
+            return here[0]
+        vcs.bookmark_set(trunk, "@")
+        return trunk
 
     @classmethod
     def find(cls, path: Path | str = ".", *, allow_outdated: bool = False) -> Repo:

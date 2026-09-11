@@ -113,22 +113,48 @@ def _key6(key: str) -> str:
     return key_digest6(key)
 
 
-def _is_v1_branch(ref: str, slugs: dict[str, str]) -> bool:
+def _is_v1_branch(
+    ref: str, slugs: dict[str, str], foreign: frozenset[str] = frozenset()
+) -> bool:
     """A pre-namespace working branch: ``tether.ws.<ws8>.<key slug>``.
 
     Bookmark-named branches of *other* datasets look the same
-    (``tether.ws.<ds8>.<bookmark>``), so only tails that are one of this
-    dataset's key slugs count -- v1 never produced anything else.
+    (``tether.ws.<ds8>.<bookmark>``), so two checks: the tail must be one of
+    this dataset's key slugs (v1 never produced anything else), and the 8-hex
+    segment must not be a dataset id seen in that store's pins (``foreign``):
+    a dataset that has a bookmark branch there has pinned there too.
     """
     if not ref.startswith(WORKING_REF_PREFIX):
         return False
     ws8, dot, tail = ref[len(WORKING_REF_PREFIX) :].partition(".")
-    if not dot or not is_dataset_id(ws8) or "." in tail:
+    if not dot or not is_dataset_id(ws8) or "." in tail or ws8 in foreign:
         return False
     if tail in slugs:
         return True  # `tether.ws.<ws8>.<slug>` (a1-a5)
     slug, dash, digest = tail.rpartition("-")  # `<slug>-<key6>` (a6-a7)
     return bool(dash) and slug in slugs and bool(re.fullmatch(r"[0-9a-f]{6}", digest))
+
+
+def _foreign_dataset_ids(repo: Repo, m: ObjectManifest, ours: str) -> frozenset[str]:
+    """Dataset ids other than ``ours`` that have pinned in ``m``'s system.
+
+    Namespaced pins are ``<ds8>.<hash16>``; a bookmark branch
+    ``tether.ws.<ds8>.<name>`` whose ``ds8`` is one of these belongs to that
+    dataset and is not a v1 branch of this one.
+    """
+    backend = repo.backend_for(m.kind)
+    if Capability.PIN not in backend.capabilities:
+        return frozenset()
+    try:
+        pins = backend.list_pins(m.locator)
+    except TetherError:
+        return frozenset()
+    ids: set[str] = set()
+    for pin_id in pins:
+        ds, dot, _rest = pin_id.partition(".")
+        if dot and is_dataset_id(ds) and ds != ours:
+            ids.add(ds)
+    return frozenset(ids)
 
 
 def _new_branch_name(ref: str, dataset_id: str, slugs: dict[str, str]) -> str:
@@ -222,8 +248,9 @@ def _plan_v2(repo: Repo, plan: Plan) -> None:
         except TetherError as exc:
             plan.notes.append(f"{key}: could not list working branches ({exc})")
             continue
+        foreign = _foreign_dataset_ids(repo, m, dataset_id)
         for ref in sorted(refs):
-            if not _is_v1_branch(ref, slugs):
+            if not _is_v1_branch(ref, slugs, foreign):
                 continue
             plan.actions.append(
                 Action(
@@ -435,6 +462,12 @@ def _plan_v3(repo: Repo, plan: Plan) -> None:
             "v3: no local file objects to re-fingerprint and no manifests carrying "
             "a write policy"
         )
+    if repo.workspace.bookmark is None:
+        plan.notes.append(
+            f"v3: this workspace will work on the trunk bookmark "
+            f"{repo.config.trunk!r} (created if the VCS has none), or on the "
+            "bookmark its working copy is on"
+        )
     plan.actions.append(
         Action(
             "vcs-commit",
@@ -457,6 +490,7 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         write_config,
         write_listing,
         write_object,
+        write_workspace,
     )
 
     root = objects_dir(repo.root)
@@ -497,6 +531,12 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
             + ", ".join(sorted(k.split(" ", 1)[1] for k in report.failed))
             + " (the paths must exist and be readable); fix and re-run `tether upgrade`"
         )
+    # Before bookmarks, a workspace had no notion of which one it worked on.
+    # Put it where `init` would: on the trunk (created if the VCS has no such
+    # bookmark), or on the single bookmark the VCS working copy is on.
+    if repo.workspace.bookmark is None:
+        repo.workspace.bookmark = repo.adopt_trunk()
+        write_workspace(repo.root, repo.workspace)
     repo.config.version = 3
     write_config(repo.root, repo.config)
 

@@ -95,6 +95,10 @@ def _v1_dataset(root: Path) -> tuple[str, str, str, str, str]:
     write_workspace(root, ws)
     sys_.branches["tether.ws.7c1e0a4d.db-c0ffee"] = s2
     sys_.branches["tether.ws.deadbeef.db"] = s1
+    # Another dataset's bookmark branch, named like one of our key slugs, in
+    # the same store -- and that dataset's pin, which is how we tell.
+    sys_.branches["tether.ws.0ther0ds.db"] = s1
+    sys_.tags["tether.0ther0ds.0123456789abcdef"] = s1
     return system, s1, s2, pin1, pin2
 
 
@@ -131,6 +135,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     ]
     assert br_mine.target == f"tether.ws.{ds}.7c1e0a4d.db-c0ffee"  # digest kept
     assert br_dead.target.startswith(f"tether.ws.{ds}.deadbeef.db-")  # digest added
+    assert not any("0ther0ds" in a.target for a in plan.actions)  # not ours
     # Nothing has been written by planning.
     assert f"tether.{pin1}" in sys_.tags and repo.config.version == 1
 
@@ -145,8 +150,11 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
         "tether.ws.deadbeef.db",
     }
 
-    # Stores: old names gone, new names point where the old ones did.
+    # Stores: old names gone, new names point where the old ones did; the
+    # other dataset's bookmark branch and pin are untouched.
     assert f"tether.{pin1}" not in sys_.tags and f"tether.{pin2}" not in sys_.tags
+    assert sys_.branches["tether.ws.0ther0ds.db"] == s1
+    assert "tether.0ther0ds.0123456789abcdef" in sys_.tags
     new1, new2 = (
         report.renamed_pins[f"tether.{pin1}"],
         report.renamed_pins[f"tether.{pin2}"],
@@ -429,9 +437,15 @@ def test_upgrade_v3_drops_the_write_policy(vcs_root: Path) -> None:
     assert [(a.op, a.key) for a in plan.actions if a.op == "rewrite-manifest"] == [
         ("rewrite-manifest", "db/prod")
     ]
+    assert repo.workspace.bookmark is None
+    assert any("trunk bookmark" in n for n in plan.notes)
     report = repo.apply_upgrade(plan)
     assert report.rewritten_manifests == ["db/prod"] and report.to_version == 3
     repo = Repo.find(vcs_root)
     assert "write" not in (vcs_root / ".tether/objects/db/prod.toml").read_text()
     assert repo.objects["db/prod"].policy == Policy()
     assert repo.plan_upgrade().is_empty
+    # The upgraded working copy works on the trunk, as a fresh init would.
+    assert repo.workspace.bookmark == "main" and "main" in repo.vcs.bookmarks()
+    assert repo.on_trunk()  # ...so commit works without a `tether new` first
+    assert [a.op for a in repo.plan_commit("first pin").actions if a.key] == ["pin"]
