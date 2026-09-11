@@ -1,0 +1,6 @@
+on bookmark sweep; working refs set up
+  scratch/embeddings -> tether.ws.0a1b2c3d.sweep
+  code -> tether.ws.0a1b2c3d.sweep  (created on first writable open)
+  features -> tether.ws.0a1b2c3d.sweep  (created on first writable open)
+  qc/focus -> tether.ws.0a1b2c3d.sweep  (created on first writable open)
+  zarr/imaging -> tether.ws.0a1b2c3d.sweep  (created on first writable open)

@@ -314,6 +314,12 @@ working branch this workspace expects but the store lost is forked again.
 that exist but point elsewhere are reported as notes, never overwritten. It is
 a plan/apply command like the others.
 
+One store will not cooperate: Icechunk keeps a tombstone for every deleted tag
+and never lets the name be reused, so a deleted Icechunk pin cannot come back
+under its id -- `repair` reports the failure (exit `2`). The recorded snapshot
+is still readable while the store has it: `open --rev` and `new` fall back to
+it when the tag is gone.
+
 ## `upgrade`
 
 `tether.toml` carries `[tether] version`. A dataset made by an older tether is

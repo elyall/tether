@@ -1,0 +1,1 @@
+tether import ../inventory.csv

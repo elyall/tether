@@ -108,6 +108,9 @@ module-name = "tether"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
+# Snippets the use-cases guide includes, written by tests/test_use_cases.py
+# exactly as they ran; not modules.
+extend-exclude = ["user_guide/_generated"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TID", "RUF"]
@@ -119,6 +122,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TID", "RUF"]
 
 [tool.ty.environment]
 python-version = "3.11"
+
+[tool.ty.src]
+exclude = ["user_guide/_generated"]  # guide snippets, not modules (see ruff)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

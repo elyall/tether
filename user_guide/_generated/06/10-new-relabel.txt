@@ -1,0 +1,4 @@
+on bookmark relabel-v3; working refs set up
+  code -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
+  features -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
+  zarr/imaging -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)

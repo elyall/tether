@@ -1,0 +1,4 @@
+forgot workspace e4077898
+  removed  ~/analysis-b/.tether/workspace.toml
+  removed  ~/analysis-b/.tether/ops.jsonl
+  vcs      jj workspace 'analysis-b' forgotten (its directory is left in place)

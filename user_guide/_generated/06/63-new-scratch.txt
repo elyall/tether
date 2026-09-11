@@ -1,0 +1,6 @@
+on bookmark scratch; working refs set up
+  code -> tether.ws.0a1b2c3d.scratch
+  features -> tether.ws.0a1b2c3d.scratch
+  qc/focus -> tether.ws.0a1b2c3d.scratch
+  scratch/embeddings -> tether.ws.0a1b2c3d.scratch
+  zarr/imaging -> tether.ws.0a1b2c3d.scratch

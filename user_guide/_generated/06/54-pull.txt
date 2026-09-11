@@ -1,0 +1,8 @@
+  pulled code  sha=7247f96ae1b29996… dirty=False -> sha=68610dc2b2ea1ca3… dirty=False
+  pulled features  branch=main version=2 -> branch=main version=3
+  up to date qc/focus
+  up to date raw/plate1
+  up to date raw/plate2
+  up to date raw/plate3
+  up to date zarr/imaging
+committed 3d94692cbc21 on main

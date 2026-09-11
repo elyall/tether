@@ -1,0 +1,4 @@
+on trunk bookmark main; working refs set up
+  code -> main
+  features -> main
+  zarr/imaging -> main

@@ -1,0 +1,5 @@
+unpinned 0 pin(s)
+deleted 1 working branch(es)
+  zarr/imaging: tether.ws.0a1b2c3d.relabel-v3
+kept 1 working branch(es) holding unpinned data (--force-prune deletes)
+  features: tether.ws.0a1b2c3d.relabel-v3

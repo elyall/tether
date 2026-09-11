@@ -1,0 +1,4 @@
+on bookmark b; working refs set up
+  code -> tether.ws.0a1b2c3d.b  (created on first writable open)
+  features -> tether.ws.0a1b2c3d.b  (created on first writable open)
+  zarr/imaging -> tether.ws.0a1b2c3d.b  (created on first writable open)

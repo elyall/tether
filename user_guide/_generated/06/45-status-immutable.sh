@@ -1,0 +1,1 @@
+tether status --snapshot

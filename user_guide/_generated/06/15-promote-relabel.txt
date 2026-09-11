@@ -1,0 +1,4 @@
+  fast-forwarded zarr/imaging -> {'snapshot_id': 'RJL5IZZDMBO5QO75LEAH'}
+  skipped        code
+  skipped        raw/plate1
+  refused        features: the lance backend cannot move a branch; Lance cannot move a branch head; write the result onto the base branch (or keep reading the fork) -- there is no branch merge or fast-forward yet

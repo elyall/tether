@@ -1,0 +1,5 @@
+  pinned code -> tether.0a1b2c3d.cd0006c590b9435c
+  pinned features -> tether.0a1b2c3d.ee78ce6240ad74c9
+  pinned zarr/imaging -> tether.0a1b2c3d.83df68a53a600331
+  recorded raw/plate1 (not recoverable)
+committed 695fe286e11b

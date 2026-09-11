@@ -1,0 +1,2 @@
+  pinned zarr/imaging -> tether.0a1b2c3d.4f2ff54c238bea8f
+committed 785a58aa9c09

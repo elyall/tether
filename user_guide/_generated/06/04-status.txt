@@ -1,0 +1,9 @@
+Working copy changes:
+A .tether/.gitignore
+A .tether/objects/code.toml
+A .tether/objects/features.toml
+A .tether/objects/raw/plate1.toml
+A .tether/objects/zarr/imaging.toml
+A tether.toml
+Working copy  (@) : wttkmnpn 8049f3df main | (no description set)
+Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)

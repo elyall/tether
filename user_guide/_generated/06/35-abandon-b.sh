@@ -1,0 +1,1 @@
+tether abandon b --gc

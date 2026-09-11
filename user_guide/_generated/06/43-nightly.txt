@@ -1,0 +1,15 @@
+dataset a864ece136f3; on trunk bookmark main
+      clean  code  [git/forkable]
+      clean  features  [lance/forkable]
+      clean  qc/focus  [lance/forkable]
+      clean  raw/plate1  [file/observed] unrecoverable
+      clean  raw/plate2  [file/observed] unrecoverable
+      clean  raw/plate3  [file/observed] unrecoverable
+      clean  zarr/imaging  [icechunk/forkable]
+        ok  code  
+        ok  features  
+        ok  qc/focus  
+        ok  raw/plate1  
+        ok  raw/plate2  
+        ok  raw/plate3  
+        ok  zarr/imaging

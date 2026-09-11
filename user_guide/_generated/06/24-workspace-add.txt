@@ -1,0 +1,4 @@
+Created workspace in "../analysis-b"
+Working copy  (@) now at: nrlrltqp 89866d49 (empty) (no description set)
+Parent commit (@-)      : toqmypkw e1fc77e4 main | Features rebuilt for model v3
+Added 7 files, modified 0 files, removed 0 files

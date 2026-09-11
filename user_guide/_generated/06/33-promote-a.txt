@@ -1,0 +1,5 @@
+  fast-forwarded zarr/imaging -> {'snapshot_id': 'CVQNZW3XBIOVWIPOLW4M'}
+  skipped        code
+  skipped        features
+  skipped        raw/plate1
+main -> 785a58aa9c09

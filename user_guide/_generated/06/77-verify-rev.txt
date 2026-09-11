@@ -1,0 +1,8 @@
+        ok  code  
+        ok  features  
+        ok  qc/focus  
+        ok  raw/plate1  
+        ok  raw/plate2  
+        ok  raw/plate3  
+        ok  scratch/embeddings  
+        ok  zarr/imaging

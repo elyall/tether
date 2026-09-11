@@ -1,0 +1,1 @@
+jj bookmark delete b

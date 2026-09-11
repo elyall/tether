@@ -1,0 +1,4 @@
+  pinned qc/focus -> tether.0a1b2c3d.e1d708f361c4f9cf
+  recorded raw/plate2 (not recoverable)
+  recorded raw/plate3 (not recoverable)
+committed 0a8a92e7f529

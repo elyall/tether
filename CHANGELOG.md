@@ -65,6 +65,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registry; keep the data bill down; recover -- each as the commands you run,
   what they guarantee, and the guide that explains the mechanics. The README
   lists them. Later guides are renumbered (`07-cli` ... `11-extending`).
+  The scenarios are one running story, with `jj log` after each step, and
+  the whole page is **executed, not written**: `tests/test_use_cases.py`
+  runs every command against local Icechunk, Lance, file, and git objects
+  (and the ephemeral Postgres the publish tests use; without one the story
+  stops before section 7) and writes the command and output blocks the guide
+  includes (`user_guide/_generated/06/`), with per-run ids replaced by stable
+  stand-ins and the operation log on a fixed clock; the test fails when a
+  fresh run differs, and `TETHER_UPDATE_DOCS=1` rewrites the files. Running
+  it found the fixes below.
 
 ### Changed
 
@@ -111,6 +120,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `ForgetWorkspaceReport` was listed in `tether.__all__` but never imported,
   which broke the docs build; a test now checks `__all__` against the module.
+- `tether diff REV` (one revision) compared REV with nothing and reported
+  every object `removed`; it now compares REV with the working tree, as its
+  help always said.
+- `tether diff --content` between two Icechunk snapshots on different
+  branches failed with Icechunk's "ancestry doesn't include" error, since it
+  diffs along one line of history. The backend now finds the snapshot the two
+  diverged from and reports what either side changed since it (a node only
+  one side touched keeps that side's change, inverted for the `from` side;
+  one both touched is `modified`), with a note naming the base.
+- Fingerprinting several local `file` objects at once (`commit`, `status
+  --snapshot`, `pull` fan out concurrently) could fail with `No such file or
+  directory: .file-hashes.json.tmp`: the shared content-hash cache was written
+  by two threads through one temp file. The cache is now locked around its
+  table and its save; hashing itself still runs in parallel.
+- A deleted Icechunk pin: `repair` crashed with Icechunk's `RefNotFoundError`
+  when re-creating the tag, because Icechunk keeps a tombstone for every
+  deleted tag and never lets the name be reused. The backend now raises a
+  `BackendError` that says so and `repair` reports the failure (exit 2).
+  `open --rev` at such a commit crashed the same way; `Repo.open` (at a
+  revision or at the object's position) and `new`'s fork now fall back to the
+  recorded state when the pin's native ref is gone and the backend is
+  Addressable, so the snapshot stays readable and forkable while the store
+  has it.
+- `tether new -b NEW` from a commit on bookmark `OLD` handed `NEW` the store
+  branches of `OLD` wherever they sat exactly at the pin ("already at pin;
+  kept"), so two bookmarks shared a branch and `NEW`'s writes landed on
+  `OLD`'s -- a leftover of the per-workspace naming. `new` now looks only at
+  the branch named after the bookmark it is starting: kept if it exists at
+  the pin, reset (recorded for `undo`) if it exists elsewhere, refused if it
+  holds writes since the last commit -- or if its head cannot be read, since
+  a fork would then reset it blind -- and forked otherwise. Another
+  bookmark's branch is never touched.
 
 ## [0.1.0a8] - 2026-09-09
 

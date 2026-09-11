@@ -1,0 +1,5 @@
+added 3, updated 0, removed 0, unchanged 0
+  added   qc/focus
+  added   raw/plate2
+  added   raw/plate3
+run `tether commit` to record their states

@@ -30,6 +30,13 @@ snapshot still exists), a `promote` is refused with the previous heads printed.
 A branch that gained writes is never reset or deleted without `--discard` --
 by `undo` or by `new`.
 
+**Icechunk never reuses a deleted tag name.** A `tether.*` tag deleted by
+hand, or released by a `gc` you then regret, cannot be recreated under the
+same id: Icechunk keeps a tombstone. `repair` reports it; `verify
+--all-history` keeps flagging the commit; reads and forks at that commit fall
+back to the recorded snapshot while the store has it. Protect the tag
+namespace and run `gc` with `--dry-run` first.
+
 **Pin-then-commit ordering.** Pins are created before the VCS commit; if the
 commit never lands, the pins leak until `gc` (which scans VCS history plus the
 current workspace). Re-run `tether verify` after merging manifests across

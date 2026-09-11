@@ -1,0 +1,9 @@
+undid 569de0890973 (new: forked code, features, qc/focus, scratch/embeddings, zarr/imaging)
+  restored   code: deleted tether.ws.0a1b2c3d.scratch
+  restored   features: deleted tether.ws.0a1b2c3d.scratch
+  restored   qc/focus: deleted tether.ws.0a1b2c3d.scratch
+  restored   scratch/embeddings: deleted tether.ws.0a1b2c3d.scratch
+  restored   zarr/imaging: deleted tether.ws.0a1b2c3d.scratch
+  restored   workspace.toml restored
+  restored   VCS working copy back where it was
+  restored   bookmark scratch deleted
