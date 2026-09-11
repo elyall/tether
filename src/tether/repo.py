@@ -1880,15 +1880,40 @@ class Repo:
                 )
                 continue
             name = working_ref_name(self.config.dataset_id, bookmark)
-            # An existing branch of this workspace is reset by the fork (now or
-            # when materialized). Record its head so the op log can restore it.
-            existing = self.workspace.working_refs.get(key)
+            # The bookmark's branch may already exist in this system -- joining
+            # a bookmark, or `new` again on the one we are on. Its head decides
+            # whether it is kept, reset (recorded so the op log can restore it),
+            # or refused. Another bookmark's branch, whatever this workspace
+            # wrote through before, is never touched: branches belong to
+            # bookmarks, not to checkouts.
+            existing: str | None = None
             head: State | None = None
-            if existing is not None and existing != m.locator.get("branch", "main"):
+            try:
+                if name in backend.list_working_refs(m.locator):
+                    existing = name
+            except TetherError as exc:
+                plan.notes.append(f"{key}: could not list branches ({exc})")
+            if existing is not None:
                 try:
                     head = backend.fingerprint(m.locator, existing)
-                except TetherError:
-                    existing = None  # gone already; nothing to reset
+                except TetherError as exc:
+                    # The branch is there but its head is unknown; a fork would
+                    # reset it blind. Refuse rather than guess -- `--discard`
+                    # does not apply, since what would be lost is unknown too.
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            m.kind,
+                            target=existing,
+                            detail=(
+                                f"{existing} exists but its head could not be "
+                                f"read ({exc}); a fork would reset it blind"
+                            ),
+                            params={"existing": existing},
+                        )
+                    )
+                    continue
             if m.pin is not None:
                 source = {"pin": m.pin.to_dict()}
                 detail = f"from pin {m.pin.ref}"

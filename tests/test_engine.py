@@ -7,13 +7,14 @@ import pytest
 
 from tether.backends.memory import default_store
 from tether.errors import (
+    BackendError,
     ConfigError,
     ImmutableObjectModified,
     StaleWorkingCopyError,
     TetherError,
 )
 from tether.handles import MemoryHandle
-from tether.manifest import Pin, Policy, ref_for_pin
+from tether.manifest import Locator, Pin, Policy, State, ref_for_pin
 from tether.repo import Repo
 
 
@@ -1842,6 +1843,69 @@ def test_bookmarks_shape_the_working_copy(vcs_root: Path) -> None:
     assert isinstance(ro, MemoryHandle) and ro.read_only
     assert repo.plan_new().context["bookmark"] is None
     assert repo.plan_commit("ro").is_empty  # nothing this checkout can move
+
+
+def test_new_bookmark_never_reuses_another_bookmarks_branch(vcs_root: Path) -> None:
+    """Branches belong to bookmarks. Starting a second bookmark from the first
+    one's commit forks its own branch and leaves the first one's alone, even
+    though that branch sits exactly at the pin (the old "reuse" shortcut)."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    ds = repo.config.dataset_id
+
+    repo.new(bookmark="sweep", eager=True)
+    store.write(system, f"tether.ws.{ds}.sweep", {"v": 2})
+    repo.commit("trial")  # sweep's branch now sits exactly at sweep's pin
+
+    repo.new(bookmark="scratch", eager=True)
+    assert repo.workspace.working_refs["db"] == f"tether.ws.{ds}.scratch"
+    heads = store.system(system)
+    assert (
+        heads.branches[f"tether.ws.{ds}.scratch"]
+        == heads.branches[f"tether.ws.{ds}.sweep"]
+    )
+    store.write(system, f"tether.ws.{ds}.scratch", {"v": 3})
+    assert store.read(system, f"tether.ws.{ds}.sweep") == {"v": 2}  # untouched
+
+    # Undo deletes only the branch the second bookmark created (it refuses
+    # while that branch holds writes; --discard throws them away).
+    with pytest.raises(TetherError, match="gained writes"):
+        repo.undo()
+    repo.undo(discard=True)
+    assert f"tether.ws.{ds}.scratch" not in heads.branches
+    assert store.read(system, f"tether.ws.{ds}.sweep") == {"v": 2}
+    assert repo.workspace.bookmark == "sweep"
+
+
+def test_new_refuses_when_the_bookmarks_branch_head_cannot_be_read(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch that exists but cannot be fingerprinted is not reset blind:
+    `new` refuses instead of planning a fork over writes it cannot see."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    ds = repo.config.dataset_id
+    repo.new(bookmark="sweep", eager=True)
+    branch = f"tether.ws.{ds}.sweep"
+    store.write(system, branch, {"v": 2})  # uncommitted writes on the branch
+
+    backend = repo.backend_for("memory")
+    real = backend.fingerprint
+
+    def flaky(locator: Locator, ref: str | None) -> State:
+        if ref == branch:
+            raise BackendError("store unreachable", kind="memory")
+        return real(locator, ref)
+
+    monkeypatch.setattr(backend, "fingerprint", flaky)
+    with pytest.raises(TetherError, match="could not be read"):
+        repo.new("sweep")
+    monkeypatch.undo()
+    assert store.read(system, branch) == {"v": 2}  # nothing was reset
 
 
 def test_status_reports_bookmark_drift(vcs_root: Path) -> None:
