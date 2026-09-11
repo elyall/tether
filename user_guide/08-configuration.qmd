@@ -14,7 +14,7 @@ title: "Configuration"
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
                               #   states (so `diff --content` can compare them); pruned by gc
-    workspace.toml            # untracked: workspace_id, working refs, pending forks, base states, fork points, last snapshot
+    workspace.toml            # untracked: workspace_id, bookmark, working refs, pending forks, base states, fork points, last snapshot
     ops.jsonl                 # untracked: the operation log -- every store write, what it did, what it replaced
 ```
 
@@ -49,16 +49,13 @@ on_status = false    # also run a cheap verify of each committed object in statu
 [new]
 fork = "lazy"        # "lazy": create a working branch on first writable open; "eager": during `new`
 
-[commit]
-pull = false          # true: every commit also pulls objects without a working branch
-
 [defaults]           # policy for objects added without an explicit one
-write = "fork"       # fork | direct
 file = "immutable"   # immutable | versioned
 pin = "native"       # native | record
 
 [vcs]
 prefer = "jj"        # which adapter to use when both .jj and .git exist
+trunk = "main"       # the bookmark that stands for every object's upstream branch
 # jj_path = "/opt/jj/bin/jj"
 # git_path = "/usr/bin/git"
 
@@ -76,7 +73,7 @@ init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
 
 `init` generates `[dataset] id`; `tether.toml` is committed, so every clone
 shares it. Every native ref carries it -- pins `tether.<id>.<hash>`, working
-branches `tether.ws.<id>.<workspace>.<key>` -- and `gc` stays inside that
+branches `tether.ws.<id>.<bookmark>` -- and `gc` stays inside that
 namespace, so datasets can share one Icechunk repo or Neon project without
 being able to delete each other's pins. Datasets from before the id existed get
 one from `tether upgrade`.
@@ -94,12 +91,15 @@ one from `tether upgrade`.
 ## Policies
 
 A `Policy` is stored per object (`[policy]` in its manifest), set with the
-`--write`, `--file`, `--pin` options of `tether add` (or `Repo.add(policy=...)`)
-and changed in place with `tether set KEY... --write|--file|--pin`.
+`--file` and `--pin` options of `tether add` (or `Repo.add(policy=...)`)
+and changed in place with `tether set KEY... --file|--pin`. Whether writes
+fork a branch or land on the upstream branch is not a policy: it is which
+bookmark the working copy is on (the trunk writes upstream; any other
+bookmark forks). Manifests from before 0.1.0a9 carry a `write` key; it is read
+and ignored, and `tether upgrade` drops it.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `write` | `fork` (default), `direct` | `fork`: `new` creates a fresh per-workspace branch off the pin. `direct`: the working ref is the locator's branch (e.g. `main`); use for production branches that must not be forked. |
 | `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
 | `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming storage](05-reclaiming-storage.qmd). |
 
@@ -131,20 +131,18 @@ checkout / per jj workspace:
 
 ```toml
 workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
+bookmark = "relabel"                 # the dataset bookmark this checkout works on (absent: read-only)
 last_snapshot_at = "2026-09-04T22:10:03.118Z"
 
-[working_refs]                       # branches that exist
-"zarr/imaging" = "tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0"
-"db/metrics" = "tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d"
+[working_refs]                       # branches that exist (on the trunk: the upstream branches)
+"zarr/imaging" = "tether.ws.0a1b2c3d.relabel"
+"db/metrics" = "tether.ws.0a1b2c3d.relabel"
 
 [pending_forks]                      # decided by `new`, created on first writable open
-"features" = "tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f"
+"features" = "tether.ws.0a1b2c3d.relabel"
 
 [base_states."zarr/imaging"]         # committed state this working ref corresponds to
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
-
-[pulled."db/metrics"]                # taken by `pull`; the next commit pins it
-lsn = "0/1A2B3C4D"
 
 [fork_points."zarr/imaging"]         # base state when the branch was forked (for promote)
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"

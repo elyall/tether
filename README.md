@@ -62,30 +62,29 @@ plus the generated API and CLI reference.
 
 ## The model
 
-A dataset is a git/jj repository with one small manifest per object. Two
-things are versioned, and they live in different places:
+A dataset is a git/jj repository with one small manifest per object, and its
+bookmarks and the stores' branches are one shape:
 
 - **Commits hold references.** Each dataset commit records, per object, an
   exact state and -- where the system allows it -- a *pin*: a native,
   GC-proof ref (an Icechunk tag, a protected Neon branch, a git tag) that
-  holds that state. A commit is therefore a complete, reproducible position
-  for every object at once, and `tether open KEY --rev C` reads it.
-- **The working copy holds branches.** `tether new` gives each Forkable
-  object a per-workspace *working branch* off its pin -- decided at once,
-  created lazily on the first write (`--eager` creates them now). Writes go
-  there; `main` in every system is untouched until `tether promote`. An
-  object nobody here is writing to has no branch and simply keeps its pin.
+  holds that state. A commit is a complete, reproducible position for every
+  object at once; `tether open KEY --rev C` reads it.
+- **Bookmarks hold branches.** The trunk bookmark (`main`) stands for every
+  object's upstream branch: working on it writes there. Any other bookmark
+  stands for one branch per system, named after it (`tether.ws.<dataset>.feature`),
+  forked from the pins of the commit it started at -- decided by
+  `tether new -b feature`, created on the first write. A working copy on no
+  bookmark is read-only.
 
-`commit` fingerprints the working branches and pins their heads; it does not
-contact objects that have no branch, because their position cannot have
-moved -- like files you did not edit. Unlike `jj commit`, it does not start
-anything new: your branches stay, and the next write lands on them. When the world has moved (someone
-committed to Icechunk's `main`, a table gained a version, a directory
-changed), `tether status --snapshot` says `behind`, and `tether pull` is the
-explicit step that takes the new state for the next commit -- the dataset's
-fetch + rebase. `--at` is only where a new object starts.
+`commit` pins the heads of your bookmark's branches and moves the bookmark to
+the new commit, the way a git branch follows its commits. `promote` lands a
+bookmark on the trunk: each system's upstream branch fast-forwards (or
+merges) to the bookmark's branch, then `main` moves to the bookmark's commit.
+`pull` is the fetch: on `main` it reads every object's upstream branch (and,
+for systems without branches, the object itself) and commits what moved.
 
-Everything history-shaped (commits, branches, workspaces, sharing, undo of
+Everything history-shaped (commits, bookmarks, workspaces, sharing, undo of
 the manifests) is the VCS's. What the VCS cannot see -- what tether did to
 the *stores* -- is in tether's own operation log (`tether ops`, `tether
 undo`).
@@ -138,11 +137,11 @@ tether add db/metrics   --kind neon --project-id prj-123 --database neondb --rol
 tether add raw/plate1   --kind file s3://bucket/raw/plate1/
 
 tether status                       # clean / modified / drifted per object (local; --snapshot re-fingerprints)
-tether commit -m "Baseline"         # pin each object natively, write the manifests, jj/git commit
-tether new main                     # start working: a writable branch per object, created on first write
-tether open db/metrics              # postgresql://... on this workspace's fork
-tether commit -m "Relabel plate1"   # pins the forks; untouched objects keep their pin (tether pull moves them)
-tether promote                      # move each system's main to the fork: fast-forward, native merge, or refuse with a recipe
+tether commit -m "Baseline"         # on main: pin each object's upstream branch, write the manifests, jj/git commit
+tether new -b relabel               # a bookmark: one branch per system, named after it, forked on first write
+tether open db/metrics              # postgresql://... on the relabel branch
+tether commit -m "Relabel plate1"   # pins the branches' heads and moves the bookmark
+tether promote                      # land it: each system's main fast-forwards (or merges), then main moves to the commit
 tether verify --all-history         # every pin any commit ever named still resolves
 ```
 
@@ -150,7 +149,7 @@ tether verify --all-history         # every pin any commit ever named still reso
 from tether import Repo
 
 repo = Repo.find(".")
-h = repo.open("zarr/imaging")  # writable IcechunkHandle on this workspace's fork
+h = repo.open("zarr/imaging")  # writable IcechunkHandle on this bookmark's branch
 ro = repo.open(
     "zarr/imaging", rev="main"
 )  # read-only at main's pin; TETHER_REV=<rev> makes this the default
@@ -166,13 +165,14 @@ command.
 ## jj or tether?
 
 A tether command exists where an operation has two halves -- one in the VCS,
-one in the stores -- that must happen together: `commit` (pin, then commit),
-`new` (move the working copy, then decide working branches), `restore`,
-`abandon`, `forget-workspace`, and `undo` / `repair` for what tether itself
-did. Everything that only touches files and history -- describe, squash,
-rebase, merge, bookmarks, push, `jj undo` of a non-tether operation -- is the
-VCS's, and tether notices what it needs to: a moved working copy makes objects
-stale, a vanished dataset commit shows up in `status`. The
+one in the stores -- that must happen together: `commit` (pin, commit, move
+the bookmark), `new` (create or join a bookmark, then its branches), `pull`,
+`promote`, `restore`, `abandon`, `forget-workspace`, and `undo` / `repair`
+for what tether itself did. Everything that only touches files and history --
+describe, squash, rebase, push, `jj undo` of a non-tether operation -- is the
+VCS's, and tether notices what it needs to: a bookmark deleted, renamed, or
+moved by hand shows up in `status` with what to do, as does a vanished dataset
+commit. The
 [concepts guide](https://evanlyall.com/tether/user-guide/concepts.html#jj-or-tether)
 has the table.
 

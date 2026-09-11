@@ -37,7 +37,7 @@ a Postgres schema have the same columns. JSON columns are `TEXT` in SQLite and
 | `objects` | `commit_id, key` | one manifest at one commit: `kind`, `uri`, `locator_json`, `identity_json`, `identity_hash`, `policy_*`, `state_json`, `state_hash`, `pin_id`, `pin_ref`, `recoverable`, `captured_at` |
 | `object_states` | `kind, identity_hash, state_hash` | one distinct (system, state): the *versions* a registry keys on, with `first_commit_id` |
 | `listings`, `listing_entries` | `listing_name` (`, path`) | per-file listings for directory / prefix objects (`--listings`) |
-| `workspace` | `workspace_id, key` | this checkout's working refs, fork points, and last snapshot (`--workspace`) |
+| `workspace` | `workspace_id, key` | this checkout's bookmark branches (working refs), fork points, and last snapshot (`--workspace`) |
 | `tether_meta` | `key` | `schema_version`, `exported_at`, `head`, `vcs`, `tether_version` |
 
 Two views come along: `objects_head` (the objects at the exported head) and
@@ -154,7 +154,7 @@ the manifests. Rows must have tether's canonical columns:
 | `kind` | yes | backend kind |
 | `uri` | one of | becomes `locator.uri` |
 | `locator_json` | `uri` / `locator_json` | full locator as a JSON object (merged over `uri`) |
-| `policy_write`, `policy_file`, `policy_pin` | no | default from `[defaults]` in `tether.toml` |
+| `policy_file`, `policy_pin` | no | default from `[defaults]` in `tether.toml` |
 | `at` | no | initial position, exactly like `add --at` |
 
 Other columns are ignored (and named in the plan). The mapping from your
@@ -211,7 +211,7 @@ edited and imported back:
 tether export snap.sqlite
 sqlite3 snap.sqlite "UPDATE objects SET policy_pin = 'record' WHERE key LIKE 'scratch/%'"
 tether import snap.sqlite --sync --query "
-  SELECT key, kind, locator_json, policy_write, policy_file, policy_pin
+  SELECT key, kind, locator_json, policy_file, policy_pin
   FROM objects_head
 "
 ```

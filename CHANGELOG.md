@@ -8,32 +8,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`tether set KEY... | --all [--write] [--file] [--pin]`** changes a
-  registered object's policy in place (`Repo.set_policy`, `SetReport`):
-  manifest-only, logged, undoable. Changing `write` releases the workspace's
-  hold on the object's working branch (left for `gc --prune-workspaces`) so
-  the next `new` decides the new one. Until now this took `remove` + `add`
-  (losing the committed state) or an `import` from a registry.
-- **Positions and `tether pull`.** An object with no working branch now keeps
-  its pin from commit to commit -- `commit` does not contact its store -- the
-  way an untouched file stays as the parent commit had it. `tether pull
-  [KEY]...` is the explicit step that moves such objects to their upstream
-  branch head (`locator.branch`): the state is held in the workspace
-  (`workspace.toml [pulled]`, `status` shows `pulled`) until the next commit
-  pins it, a writable `open` before then forks from it (a fork `new` left
-  pending is retargeted, and `pull` says so), and `undo` drops it.
-  `commit --pull` (or `[commit] pull = true`) folds the pull into every
-  commit for datasets that should trail `main`. `status --snapshot` reports
-  such an object as `behind` when upstream has moved past its pin, and a
-  read-only `open` reads the pin, not the upstream head. The rule holds for
-  systems without branches too (file, iceberg, delta, ducklake): `pull` reads
-  the current version or path, and refuses a `file = "immutable"` object
-  that changed. Only `direct` objects and objects not yet committed are
-  fingerprinted on every commit (`Repo.moving_keys`). `--at` is an object's
-  *initial* position only: after
-  the first commit the pin is the position and `pull` drops `at` from the
-  manifest. `PullReport`; the `add --branch` help now calls it the upstream.
-
+- **Bookmark-shaped branches.** The dataset's jj/git bookmarks and the
+  stores' branches are now one shape. The trunk bookmark (`main`;
+  `[vcs] trunk`) stands for every object's upstream branch (`locator.branch`):
+  working on it writes there. Any other bookmark stands for one branch per
+  Forkable system, named after it -- `tether.ws.<dataset>.<bookmark>` --
+  forked from the pins of the commit it started at. A working copy on no
+  bookmark is read-only. In detail:
+  - `tether new -b NAME [REV]` creates a bookmark and its branches (lazily, as
+    before); `tether new NAME` joins one; `tether new REV` takes the bookmark
+    at that commit or goes read-only. A bookmark another live checkout works
+    on is refused unless `--shared`. `init` creates the trunk bookmark (jj) or
+    adopts HEAD's branch (git) and starts there. `WorkspaceState.bookmark`.
+  - `commit` moves the bookmark onto the new commit -- in the same jj
+    operation, so `jj undo` takes both back -- and refuses when the VCS
+    working copy has left the bookmark. `undo` of a `new -b` deletes the
+    bookmark it made. `abandon` moves a bookmark off a dropped commit to the
+    nearest kept one instead of losing it (jj deletes them).
+  - `tether pull [BOOKMARK]` is the fetch: it reads the heads of the bookmark's
+    branches -- on the trunk every upstream branch and every branch-less
+    object -- pins what moved, and commits it on the bookmark, which moves.
+    Nothing moved: no commit. `PullReport` (`bookmark`, `committed`,
+    `unchanged`, `skipped`, `vcs_commit`, `pinned`). Replaces the held
+    `[pulled]` workspace state, the `pulled` status label, `commit --pull`,
+    and `[commit] pull`.
+  - `promote` also moves the trunk bookmark to the bookmark's commit when
+    every object fast-forwarded and nothing was refused
+    (`PromoteReport.trunk_moved`); after a merge, commit and promote again.
+  - `gc --prune-bookmarks` (was `--prune-workspaces`) judges the branches of
+    bookmarks the VCS no longer has and no live checkout works on, legacy
+    per-workspace branches, and this bookmark's unused ones, with the same
+    verdicts; `--keep-bookmark NAME`. `forget-workspace` removes state files
+    and forgets the checkout only: branches belong to bookmarks.
+  - `status` names the bookmark (`on trunk bookmark main`; `on no bookmark:
+    read-only`) and warns when the VCS deleted, renamed, moved, or left it,
+    with what to do (`Repo.bookmark_drift`, `StatusReport.bookmark`,
+    `.trunk`, `.bookmark_drift`).
+  - `VcsAdapter` gains `bookmarks`, `bookmark_set`, `bookmark_delete`,
+    `current_bookmarks`, `new_bookmark`, `is_ancestor`, and
+    `commit(advance=)`; `ObjectBackend.base_branch`; `working_ref_name(dataset,
+    bookmark)`, `working_ref_bookmark`, `bookmark_slug`.
+- **`tether set KEY... | --all [--file] [--pin]`** changes a registered
+  object's policy in place (`Repo.set_policy`, `SetReport`): manifest-only,
+  logged, undoable. Until now this took `remove` + `add` (losing the
+  committed state) or an `import` from a registry.
 - A **Caveats and Performance** guide, holding what the README used to: the
   limits of the model (per-system promotion, no cross-system atomicity, what
   `undo` can and cannot do, pin-then-commit ordering, lazy forks, storage
@@ -55,14 +73,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sits at the pin, it had stopped doing anything. `commit` leaves working
   branches where they are, and the docs now say so (Concepts: "Where tether
   is not jj").
-- **The write policy `track` is now `direct`** (`--write direct`,
-  `[defaults] write = "direct"`, `policy_write = "direct"` in registries): writes
-  land on the base branch instead of a forked working branch. Same behaviour,
-  new word -- `track` would otherwise be read as "follow upstream", which
-  is what `pull` is for.
-  The v3 migration (`tether upgrade`) rewrites `write = "track"` in the
-  working-tree manifests alongside the content-hash re-fingerprint. Manifests
-  in history keep the old spelling and stay readable.
+- **The `write` policy is gone.** Whether writes fork a branch or land on
+  the upstream branch was `write = fork | direct` (formerly `track`) per
+  object; it is now which bookmark the working copy is on. `Policy` is `file`
+  and `pin`; `--write`, `set --write`, `[defaults] write`, the `policy_write`
+  registry column, and `WriteMode` are removed. A manifest carrying `write`
+  is read and ignored, and the v3 migration (`tether upgrade`) drops the line
+  from the working tree alongside the content-hash re-fingerprint. Neon
+  databases that must receive writes on `main` are written on the trunk
+  bookmark.
 - **`tether status` is local by default.** It shows the last snapshot of each
   object's state with its age (`states as fingerprinted 2h ago; --snapshot to
   refresh`) and contacts nothing, so it is cheap enough to run as often as
@@ -70,7 +89,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no snapshot yet always does. `[snapshot] auto` now defaults to `false`
   (`true` restores fingerprinting on every `status`; `--no-snapshot` wins).
   `verify` always fingerprints regardless of the setting; `commit` fingerprints
-  what this checkout can have moved (see positions).
+  the bookmark's branches.
   `StatusReport` gains `fresh` and `snapshot_at`, and the JSON output the same.
 - Local files are fingerprinted by **content hash**, not mtime. A file's state
   is `{size, sha256}` and a directory's digest is over its files' sha256s, so

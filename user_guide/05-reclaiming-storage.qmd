@@ -219,21 +219,20 @@ system decides when. Icechunk needs `repo.expire_snapshots(...)` then
 `cleanup_old_versions`; Neon frees the branch's history on its own schedule.
 Those are the system's operations, not tether's.
 
-### Working branches from dead workspaces
+### Branches of bookmarks that are gone
 
-Every workspace gets its own `tether.ws.<dataset>.<workspace>.<key>-<hash>`
-branch per Forkable object it writes to. Forgotten workspaces, wiped machines,
-and `jj workspace forget` leave those branches behind, each holding whatever
-it wrote. A plain `gc` never deletes a branch, so a branch you forgot about is
-never why data disappears.
+Every bookmark gets a `tether.ws.<dataset>.<bookmark>` branch in each Forkable
+system it writes to. A bookmark deleted with `jj bookmark delete`, renamed, or
+left behind on a wiped machine leaves those branches behind, each holding
+whatever it wrote. A plain `gc` never deletes a branch, so a branch you forgot
+about is never why data disappears.
 
-Two commands retire them. `tether forget-workspace [ID]` is for a checkout you
-know you are done with: it judges that workspace's branches, removes its state
-files, and forgets the jj workspace / removes the git worktree in one step.
-`gc --prune-workspaces` is the sweep for everything left behind: it finds the
-`tether.ws.*` branches in each system, keeps those of every *live* checkout
-(discovered through `jj workspace list` / git worktrees) and of any id on the
-keep list, and judges the rest by their head:
+`gc --prune-bookmarks` is the sweep. It finds the `tether.ws.*` branches in
+each system, keeps those of every bookmark the VCS still has or a live
+checkout still works on (plus any `--keep-bookmark NAME`, for a bookmark that
+only exists on another machine), and judges the rest by their head. Branches
+from before bookmarks existed -- one per workspace and object -- are judged
+the same way:
 
 | Head state | Decision |
 | --- | --- |
@@ -244,33 +243,37 @@ keep list, and judges the rest by their head:
 | on a backend whose branches *are* the storage (Neon) | `keep-branch` |
 
 ```bash
-tether gc --prune-workspaces                        # live checkouts here are kept automatically
-tether gc --prune-workspaces --keep-workspace 7e21d0ab   # plus a checkout on another machine
+jj bookmark delete relabel                        # the line of work is over
+tether gc --prune-bookmarks                       # its branches, everywhere
+tether gc --prune-bookmarks --keep-bookmark hpc   # a bookmark that lives only on the cluster
 ```
 
 ```
 plan: gc (1 write(s))
-       delete-branch  zarr/imaging  [icechunk] tether.ws.0a1b2c3d.c0ffee42.zarr-imaging-3fa1c0  workspace c0ffee42 (not kept); head is pinned
-         keep-branch  features      [lance] tether.ws.0a1b2c3d.c0ffee42.features-9b2e4f  workspace c0ffee42 (not kept); kept: has unpinned writes (branch=tether.ws.c0ffee42… version=9) (--force-prune deletes)
-         keep-branch  db/metrics    [neon] tether.ws.0a1b2c3d.c0ffee42.db-metrics-77e21d  workspace c0ffee42 (not kept); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
-                      keeping live workspaces: 7c1e0a4d
+       delete-branch  zarr/imaging  [icechunk] tether.ws.0a1b2c3d.relabel  bookmark relabel (gone); head is pinned
+         keep-branch  features      [lance] tether.ws.0a1b2c3d.relabel  bookmark relabel (gone); kept: has unpinned writes (branch=tether.ws.… version=9) (--force-prune deletes)
+         keep-branch  db/metrics    [neon] tether.ws.0a1b2c3d.relabel  bookmark relabel (gone); kept: branch is storage; deleting reclaims its data (--force-prune deletes)
+                      keeping live bookmarks: hpc, main
 ```
 
 Add `--no-dry-run` to apply. The kept branches are the decision that is yours
-to make: pin what is on them (`tether add ... --at`, then `commit`), or decide
-the data is disposable and pass `--force-prune`, which deletes every stray
-branch regardless -- the plan marks those `FORCED although it has unpinned
-writes` so the loss is explicit before it happens:
+to make: pin what is on them (`tether new -b NAME` on a commit, then `commit`),
+or decide the data is disposable and pass `--force-prune`, which deletes every
+stray branch regardless -- the plan marks those `FORCED although it has
+unpinned writes` so the loss is explicit before it happens:
 
 ```bash
-tether gc --prune-workspaces --force-prune --no-dry-run
+tether gc --prune-bookmarks --force-prune --no-dry-run
 ```
 
-`tether remove` never deletes anything either: it leaves the object's working
-ref in `.tether/workspace.toml`, a plain `gc` forgets the ref, and the branch
-itself is evaluated by the next `--prune-workspaces` like any other stray.
-(Lance refuses to delete a branch a tag still points at; tether leaves it and
-moves on.)
+`tether forget-workspace [ID]` retires a *checkout*: its `workspace.toml` and
+`ops.jsonl` go and the VCS forgets it. Branches belong to bookmarks, not
+checkouts, so it touches none; the bookmark it was on stays live for `gc` as
+long as the VCS has it. `tether remove` never deletes anything either: it
+leaves the object's working ref in `.tether/workspace.toml`, a plain `gc`
+forgets the ref, and the branch itself is evaluated by the next
+`--prune-bookmarks` like any other stray. (Lance refuses to delete a branch a
+tag still points at; tether leaves it and moves on.)
 
 ## Recap
 
@@ -281,7 +284,7 @@ moves on.)
 - Drop commits with `jj squash` / `jj abandon` / `git rebase -i`; tether reads
   the VCS's idea of history, so what you cannot see it does not protect.
 - `gc` releases orphaned pins and listings and never deletes a branch on its
-  own; `--prune-workspaces` deletes dead workspaces' branches only when a tag
+  own; `--prune-bookmarks` deletes gone bookmarks' branches only when a tag
   already holds their head (or nothing was written), `--force-prune` deletes
   them regardless; reclaiming the bytes is the system's own expiry/cleanup
   step.

@@ -66,14 +66,13 @@ collect; the raw prefix was *recorded* (size, count, etag digest) and `verify`
 reports whether it still matches, but files cannot be pinned -- the line says
 so at commit time.
 
-And what later commits will *not* do: as long as nobody in this checkout
-forks a working branch for `zarr/imaging`, it keeps this pin even while
-`main` moves on -- objects you do not touch stay as committed, like files.
-When the next report should read newer inputs, `tether pull` moves them onto
-upstream and the next commit pins that (`commit --pull` in one step;
-`[commit] pull = true` for a dataset that should trail `main` on every
-commit). See
-[Positions](04-branching-and-writing.qmd#positions-what-the-next-commit-records).
+This commit was made on the trunk bookmark, `main`, where each object's
+working ref is its own `main`: the inputs are whatever those branches held.
+On a feature bookmark, an object nobody wrote to keeps its pin even while the
+world moves on -- objects you do not touch stay as committed, like files. When
+the next report should read newer inputs, `tether new main` and `tether pull`
+commit the current heads. See
+[Positions](04-branching-and-writing.qmd#positions-and-tether-pull).
 
 Read next: [Pinning](03-pinning.qmd).
 
@@ -83,19 +82,21 @@ Read next: [Pinning](03-pinning.qmd).
 Production readers must not see a half-done state, and the attempt may fail.*
 
 ```bash
-tether new main
+tether new -b relabel-v3
 ```
 
 ```
-working refs set up
-  code          -> tether.ws.0a1b2c3d.7c1e0a4d.code-2f8a1c          (created on first writable open)
-  db/metrics    -> tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d    (created on first writable open)
-  features      -> tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f      (created on first writable open)
-  zarr/imaging  -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0  (created on first writable open)
+on bookmark relabel-v3; working refs set up
+  code          -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
+  db/metrics    -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
+  features      -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
+  zarr/imaging  -> tether.ws.0a1b2c3d.relabel-v3  (created on first writable open)
 ```
 
-Nothing was created yet. The job opens what it writes, and the branch for
-that object appears in its system at that moment, forked from the pin:
+A `relabel-v3` bookmark now sits where `main` is, and every system will get a
+branch of the same name. Nothing was created yet: the job opens what it
+writes, and the branch for that object appears in its system at that moment,
+forked from the pin:
 
 ```python
 repo = Repo.find(".")
@@ -103,7 +104,8 @@ h = repo.open("zarr/imaging", read_only=False)   # the Icechunk branch is create
 ...                                               # write through h.session, then h.session.commit(...)
 ```
 
-`main` in every system is untouched throughout. When the job is done:
+`main` -- the bookmark and every system's branch -- is untouched throughout.
+When the job is done, commit pins the branches and moves `relabel-v3`:
 
 ```bash
 tether commit -m "Relabel plate1 with model v3"
@@ -129,30 +131,34 @@ tether promote
   fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK2M9A1B7C8D4E'}
   fast-forwarded features -> {'branch': 'main', 'version': 42}
   fast-forwarded code -> {'sha': '9e1c3a0b...'}
-  refused        db/metrics: Neon cannot promote a child branch into its parent; use `--write direct` for branches that must receive writes, or copy the data with pg_dump/psql
+  refused        db/metrics: Neon cannot promote a child branch into its parent; work on the trunk bookmark for databases that must receive writes on main, or copy the data with pg_dump/psql
 ```
 
-Icechunk, Lance, and git base branches moved to the forks because nothing else
-had touched them since the fork point (a fast-forward). Neon refuses -- there
-is no way to move `main` onto a child branch -- and says what to do instead:
-register the production database with `--write direct` so the job writes on
-`main` directly, or copy the rows across. That refusal is the honest answer,
-not a bug.
+Icechunk, Lance, and git upstream branches moved to the bookmark's branches
+because nothing else had touched them since the fork point (a fast-forward).
+Neon refuses -- there is no way to move `main` onto a child branch -- and says
+what to do instead: run that job on the trunk bookmark so it writes `main`
+directly, or copy the rows across. That refusal is the honest answer, not a
+bug; because of it the trunk bookmark did not move (everything must land for
+`main` to point at the commit).
 
 Or throw it away:
 
 ```bash
-tether new --discard          # reset every working branch onto the pins; the attempt is gone
+jj bookmark delete relabel-v3     # the line of work is over
+tether new main                   # back on the trunk
+tether gc --prune-bookmarks       # the bookmark's branches, everywhere it wrote
 ```
 
-Without `--discard`, `new` refuses to reset a branch holding writes you never
-committed. That is the guard against losing an afternoon.
+`gc` deletes a branch only when its head is pinned or nothing was written to
+it; the attempt's unpinned writes are kept until you pass `--force-prune`.
+That is the guard against losing an afternoon.
 
 ::: {.callout-note title="Rehearsing a database migration"}
-The same flow rehearses a schema change: `tether new`, run the migration
-against the Neon fork's URL, run the test suite, `tether diff main --content`
-to see the row counts move. Landing it is the `direct` recipe above or applying
-the migration to `main` yourself; the fork was the rehearsal.
+The same flow rehearses a schema change: `tether new -b migration`, run it
+against the Neon branch's URL, run the test suite, `tether diff main --content`
+to see the row counts move. Landing it is the trunk recipe above or applying
+the migration to `main` yourself; the branch was the rehearsal.
 :::
 
 Read next: [Branching and Writing](04-branching-and-writing.qmd).
@@ -162,53 +168,53 @@ Read next: [Branching and Writing](04-branching-and-writing.qmd).
 *Two labeling approaches. Run both against the same inputs, compare, promote
 the winner, and leave nothing of the loser behind.*
 
-Each candidate gets its own checkout of the repository -- a jj workspace or a
-git worktree -- and with it its own tether workspace, so the two never share a
-branch in any system. Left is A, right is B; each column is one shell.
+Each candidate is a bookmark -- `a` and `b` -- and each bookmark is a branch
+of the same name in every system, so the two never share a branch anywhere.
+Run them side by side from two checkouts (a jj workspace or a git worktree
+each). Left is A, right is B; each column is one shell.
 
-**Set up.** B's checkout is created from A's; each then decides its own forks.
+**Set up.** B's checkout is created from A's; each starts its own bookmark.
 
 :::: {.columns}
 ::: {.column width="49%"}
-**A** -- `analysis/`, workspace `7c1e0a4d`
+**A** -- `analysis/`
 
 ```bash
-jj workspace add ../analysis-b    # git: git worktree add ../analysis-b -b b
-tether new main
+jj workspace add ../analysis-b    # git: git worktree add ../analysis-b main
+tether new -b a
 ```
 
 ```
-working refs set up
-  ...  -> tether.ws.0a1b2c3d.7c1e0a4d.*
+on bookmark a; working refs set up
+  ...  -> tether.ws.0a1b2c3d.a
 ```
 :::
 ::: {.column width="2%"}
 :::
 ::: {.column width="49%"}
-**B** -- `analysis-b/`, workspace `3e9b2c71`
+**B** -- `analysis-b/`
 
 ```bash
 cd ../analysis-b
-tether new main
+tether new -b b
 ```
 
 ```
-working refs set up
-  ...  -> tether.ws.0a1b2c3d.3e9b2c71.*
+on bookmark b; working refs set up
+  ...  -> tether.ws.0a1b2c3d.b
 ```
 :::
 ::::
 
 **Run and commit.** Each job writes through its own handles; each `commit`
-pins its own branches and lands a dataset commit in the VCS; a bookmark names
-it (in jj the dataset commit is `@-`, the parent of the fresh working copy).
+pins its bookmark's branches, lands a dataset commit in the VCS, and moves
+the bookmark onto it.
 
 :::: {.columns}
 ::: {.column width="49%"}
 ```bash
 python label.py --candidate a
 tether commit -m "Labels: candidate A"
-jj bookmark set a -r @-           # git: git branch a
 ```
 
 ```
@@ -224,7 +230,6 @@ committed 5a1e9c0d7b2f
 ```bash
 python label.py --candidate b
 tether commit -m "Labels: candidate B"
-jj bookmark set b -r @-           # git: already on branch b
 ```
 
 ```
@@ -251,51 +256,52 @@ tether diff a b --content
    modified  features  [3 fragments added, 3 removed]
 ```
 
-**Land A.** Two halves, both from A: `promote` moves each system's base
-branch onto A's fork (a fast-forward: `main` had not moved since the fork),
-and the VCS bookmark moves `main` onto A's dataset commit.
+**Land A.** One command from A: `promote` moves each system's `main` onto
+`a`'s branch (a fast-forward: `main` had not moved since the fork) and then
+moves the `main` bookmark onto A's dataset commit.
 
 :::: {.columns}
 ::: {.column width="49%"}
 ```bash
 tether promote
-jj bookmark move main --to a      # git: git switch main && git merge --ff-only a
 ```
 
 ```
   fast-forwarded zarr/imaging -> {'snapshot_id': 'Q7ZK...'}
   fast-forwarded features -> {'branch': 'main', 'version': 42}
-  refused        db/metrics: Neon cannot promote a child branch into its parent; ...
+  fast-forwarded code -> {'sha': '9e1c...'}
+main -> 5a1e9c0d7b2f
 ```
 :::
 ::: {.column width="2%"}
 :::
 ::: {.column width="49%"}
-B is untouched by this. If B later moves its checkout onto the new `main`
-(`jj new main`), `tether status` reports `STALE: zarr/imaging, features`:
-B's forks were taken from pins the dataset no longer names, and a writable
-`open` is refused until `tether new` re-decides them (which itself refuses
-while B holds uncommitted writes).
+B is untouched by this: its bookmark and branches are its own. If B's
+checkout later moves onto the new `main` (`jj new main`), `tether status`
+says the working copy left bookmark `b` and how to return; `tether new b`
+returns, and a bookmark whose pins the dataset no longer names is re-forked
+(refused while it holds uncommitted writes).
 :::
 ::::
 
-**Retire B**, in the order that keeps every step safe -- both commands from
-A's checkout, since B's is about to stop being one. Forget the workspace
-*first*: B's branch heads are pinned by B's commit, so deleting them loses
-nothing. Then drop B's dataset commit and release the pins only it referenced.
+**Retire B**, in the order that keeps every step safe -- from A's checkout,
+since B's is about to stop being one. Forget B's checkout, drop B's dataset
+commit (which releases the pins only it referenced), delete the bookmark, and
+let `gc` judge its branches: their heads were pinned by B's commit until the
+abandon, so with the commit gone they hold writes no pin covers and are kept
+unless you say otherwise.
 
 :::: {.columns}
 ::: {.column width="49%"}
 ```bash
 tether forget-workspace 3e9b2c71
 tether abandon b --gc
+jj bookmark delete b             # git: git branch -D b
+tether gc --prune-bookmarks --force-prune --no-dry-run
 ```
 
 ```
 forgot workspace 3e9b2c71
-  deleted  zarr/imaging: tether.ws.0a1b2c3d.3e9b2c71.zarr-imaging-3fa1c0
-  deleted  features: tether.ws.0a1b2c3d.3e9b2c71.features-9b2e4f
-  kept     db/metrics: tether.ws.0a1b2c3d.3e9b2c71.db-metrics-77e21d (holds data; --force-prune)
   removed  /.../analysis-b/.tether/workspace.toml
   vcs      jj workspace 'analysis-b' forgotten (its directory is left in place)
 abandoned c4d82f1a6e93
@@ -303,6 +309,10 @@ unpinned 3 pin(s)
   icechunk: 0a1b2c3d.9c3a...
   neon: 0a1b2c3d.e08b...
   lance: 0a1b2c3d.71d4...
+deleted 2 branch(es); kept 1
+  deleted  zarr/imaging: tether.ws.0a1b2c3d.b  FORCED although it has unpinned writes
+  deleted  features: tether.ws.0a1b2c3d.b  FORCED although it has unpinned writes
+  kept     db/metrics: tether.ws.0a1b2c3d.b  cannot be deleted: pins hang off it
 ```
 :::
 ::: {.column width="2%"}
@@ -311,14 +321,15 @@ unpinned 3 pin(s)
 Nothing left to run here. The directory can be deleted (`git worktree
 remove` already did, for git).
 
-Had A abandoned *before* forgetting, B's branches would have been holding
-writes no pin covered any more, and `forget-workspace` would have kept them
-all without `--force-prune`. Neon's branch is kept either way: it *is* the
-storage, so tether never deletes it without being told.
+Without `--force-prune`, `gc` keeps the two branches and says so: B's writes
+are on them and nothing else holds them. Delete the bookmark *before* the
+abandon and `gc` sees pinned heads and deletes them without force -- the
+abandon then only releases the pins. Neon's branch is kept either way while
+pins hang off it.
 :::
 ::::
 
-Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces),
+Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-bookmarks),
 [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 ## 4. Catch drift nightly without a watcher
@@ -341,8 +352,10 @@ tether status --snapshot   # fingerprints every object concurrently; exit 1 if a
 tether verify          # exit 1 if a pin is missing or points elsewhere
 ```
 
-(`status --snapshot` only *reports*; nothing moves. `behind` means the system
-has a newer state than the pin -- `tether pull` when you want it.)
+(`status --snapshot` only *reports*; nothing moves. Run it on the trunk:
+`modified` means an upstream branch moved, `behind` that a branch-less
+object's system has a newer state than the pin -- `tether pull` commits both
+when you want them.)
 
 A raw file overwritten in place -- its bytes, not its timestamp (`status`
 stops at the snapshot; the exit code is 1):
@@ -455,9 +468,10 @@ tether undo
 
 ```
 undid 3f1c9a2b7d4e (new: forked db/metrics, zarr/imaging)
-  restored   db/metrics: deleted tether.ws.0a1b2c3d.7c1e0a4d.db-metrics-77e21d
-  restored   zarr/imaging: tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0 back at snapshot_id=K3F7...
+  restored   db/metrics: deleted tether.ws.0a1b2c3d.relabel
+  restored   zarr/imaging: tether.ws.0a1b2c3d.relabel back at snapshot_id=K3F7...
   restored   workspace.toml restored
+  restored   bookmark relabel deleted
 ```
 
 **One object's branch on the wrong state** -- everything else is fine, only

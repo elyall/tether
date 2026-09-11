@@ -58,12 +58,13 @@ from the environment.
 ## Per backend
 
 **Neon lineage.** Pins are child branches, so a working branch cannot be
-deleted while its pins exist (`gc --prune-workspaces` and `forget-workspace`
-plan it as kept and name the pins), `gc` only drops leaf pins, and `new` onto
+deleted while its pins exist (`gc --prune-bookmarks` plans it as kept and
+names the pins), `gc` only drops leaf pins, and `new` onto
 a *different* pin forks a sibling rather than resetting a branch with children
 (`commit` then `new` reuses the branch, since it already sits at the pin).
-Neon cannot merge or promote a child into `main`; use `--write direct` on
-`main` for production. `protected` needs a paid plan; branch quotas vary.
+Neon cannot merge or promote a child into `main`; run production writes on
+the trunk bookmark, where the working ref is `main` itself. `protected` needs
+a paid plan; branch quotas vary.
 
 **Neon fingerprint cost.** The LSN moves without user writes, so it is a
 volatile (address-only) key: only `next_xid` and the branch count as change.
@@ -87,7 +88,7 @@ recreated table (new metadata id) verifies as drifted, not re-addressed.
 **Lance versions are branch-scoped.** State is `(branch, version)`; an
 untouched fork reports its parent's address so no-op commits stay no-ops.
 Lance refuses to delete a branch a tag references, so a pinned working branch
-outlives its workspace until `gc` drops the tag (a re-fork picks `name.2`).
+outlives its bookmark until `gc` drops the tag (a re-fork picks `name.2`).
 `--at N` is version `N` of the locator's branch.
 
 **lakeFS staging.** Uncommitted lakeFS changes are not in any commit; a dirty

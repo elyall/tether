@@ -21,10 +21,11 @@ tether add raw/plate1   --kind file /mnt/instruments/plate1/
 ```
 
 `add` writes manifests only; the systems are first contacted by `status`.
-`--branch main` (the default) names the object's *upstream*: the first commit
-pins its head, and later `tether pull` moves the object to wherever it is
-then. `--at SNAPSHOT` starts from a chosen state instead (see
-[Positions](04-branching-and-writing.qmd#positions-what-the-next-commit-records)):
+`--branch main` (the default) names the object's *upstream*, the branch the
+dataset's trunk bookmark stands for: `init` left this working copy on `main`,
+so `commit` pins wherever these branches are. `--at SNAPSHOT` starts from a
+chosen state instead (see
+[Positions](04-branching-and-writing.qmd#positions-and-tether-pull)):
 
 ```bash
 tether status
@@ -89,27 +90,24 @@ new refs are created.
 ## Pin again after the data moves
 
 Some time later the imaging repository gets a new commit on `main` and the
-metrics database has been written to. Nobody in this checkout forked a
-working branch, so the objects still sit at their pins; a fan-out shows
-upstream has moved past them:
+metrics database has been written to. On the trunk those upstream branches
+*are* the working refs, so a fan-out shows them modified:
 
 ```bash
 tether status --snapshot       # fingerprint now; plain `status` shows the last snapshot
 ```
 
 ```
-dataset 0f2e9c7a11b3
-    behind  db/metrics  [neon/forkable]
+dataset 0f2e9c7a11b3; on trunk bookmark main
+  modified  db/metrics  [neon/forkable]
      clean  raw/plate1  [file/observed] unrecoverable
-    behind  zarr/imaging  [icechunk/forkable]
+  modified  zarr/imaging  [icechunk/forkable]
 ```
 
-`commit` alone would change nothing -- an object you did not touch keeps its
-pin, as an untouched file keeps its contents. `pull` takes upstream, then
-commit pins it (`commit --pull` does both):
+`commit` pins the new heads (`tether pull` does the same and writes the
+message for you -- the dataset's fetch):
 
 ```bash
-tether pull
 tether commit -m "Re-segmented plate1; metrics through 2026-09-04"
 ```
 
@@ -223,9 +221,9 @@ re-register with acceptance to record the new state
 That is deliberate: an "immutable" input silently changing is the worst kind of
 drift. Either the change is legitimate (`tether remove raw/plate1` and `add` it
 again, then commit) or something wrote where it should not have. Other objects
-drift benignly: a system that moved past the pin shows `behind` and waits for
-`pull`; a working branch that moved shows `modified` and is pinned by the next
-commit.
+drift benignly: a branch that moved shows `modified` and is pinned by the next
+commit; on the trunk, a branch-less object whose system moved past the pin
+shows `behind` and waits for `pull`.
 
 ## Verify
 

@@ -3,10 +3,10 @@ title: "Branching and Writing"
 ---
 
 Pinning makes the past reproducible. *Branching* makes the present safe to
-change: `tether new` sets up a fresh writable branch in every system off the
-pinned state, you write through native handles, and `commit` pins the results.
-Nothing you do on your branches touches `main` in any system until you decide
-it should.
+change: `tether new -b NAME` starts a bookmark and, with it, a branch named
+after it in every system off the pinned state; you write through native
+handles; `commit` pins the results and moves the bookmark. Nothing you do on a
+bookmark touches `main` in any system until you `promote` it.
 
 This walkthrough continues from [Pinning](03-pinning.qmd) and adds a Lance
 feature store and the analysis code itself as objects, so the recipe covers
@@ -23,40 +23,50 @@ tether commit -m "Add feature store and code"
 `code` pins a *separate* git repository -- the analysis code -- at its `HEAD`
 sha (as a tag), so a dataset commit also names the code that produced it. Do
 not register the repository the dataset itself lives in: every `tether commit`
-moves its sha, so every `pull` would find it behind and re-pin it forever.
+moves its sha, so every trunk `pull` would find it moved and re-pin it forever.
 
-## Fork: `tether new`
+## A bookmark is a branch in every system: `tether new -b`
+
+`init` left the working copy on the trunk bookmark, `main`. There, every
+object's working ref is its *upstream* branch -- `main` in Icechunk, `main`
+in Neon -- and `commit` pins wherever those are. To work without touching
+them, start a bookmark:
 
 ```bash
-tether new main
+tether new -b relabel
 ```
 
 ```
-working refs set up
-  code          -> tether.ws.0a1b2c3d.7c1e0a4d.code          (created on first writable open)
-  db/metrics    -> tether.ws.0a1b2c3d.7c1e0a4d.db-metrics    (created on first writable open)
-  features      -> tether.ws.0a1b2c3d.7c1e0a4d.features      (created on first writable open)
-  zarr/imaging  -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging  (created on first writable open)
+on bookmark relabel; working refs set up
+  code          -> tether.ws.0a1b2c3d.relabel  (created on first writable open)
+  db/metrics    -> tether.ws.0a1b2c3d.relabel  (created on first writable open)
+  features      -> tether.ws.0a1b2c3d.relabel  (created on first writable open)
+  zarr/imaging  -> tether.ws.0a1b2c3d.relabel  (created on first writable open)
 ```
 
-For every Forkable object, `new` decided a branch name and where it will be
-forked from -- and wrote nothing. Forking is **lazy** by default: the branch is
-created by the first writable `open` of that object, from the pin recorded at
-`main`. A workspace that reads three objects and writes one ends up with one
-branch, not four.
+`jj log` now shows a `relabel` bookmark where `main` is, and every Forkable
+system will get a `tether.ws.0a1b2c3d.relabel` branch: the same name on both
+sides, so `jj log` and `icechunk branch list` tell one story. `new` decided
+the names and where they fork from -- the pins at `main` -- and wrote nothing.
+Forking is **lazy** by default: the branch is created by the first writable
+`open` of that object. A bookmark that reads three objects and writes one ends
+up with one branch, not four.
 
-| Object | Pin at `main` | Working ref (created on first write) |
+| Object | Pin at `main` | Branch for `relabel` (created on first write) |
 | --- | --- | --- |
-| `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging` |
-| `db/metrics` | Neon branch | Neon child branch `tether.ws.0a1b2c3d.7c1e0a4d.db-metrics` |
-| `features` | Lance tag | Lance branch `tether.ws.0a1b2c3d.7c1e0a4d.features` |
-| `code` | git tag | git branch `tether.ws.0a1b2c3d.7c1e0a4d.code` |
+| `zarr/imaging` | Icechunk tag | Icechunk branch `tether.ws.0a1b2c3d.relabel` |
+| `db/metrics` | Neon branch | Neon child branch `tether.ws.0a1b2c3d.relabel` |
+| `features` | Lance tag | Lance branch `tether.ws.0a1b2c3d.relabel` |
+| `code` | git tag | git branch `tether.ws.0a1b2c3d.relabel` |
 
-`0a1b2c3d` is the dataset's id (from `tether.toml`) and `7c1e0a4d` this
-workspace's (from the untracked `.tether/workspace.toml`), so two people -- or
-two jj workspaces, or two datasets sharing a store -- forking the same commit
-get disjoint branches everywhere. `raw/plate1` has no working ref: files
-cannot be forked.
+`0a1b2c3d` is the dataset's id (from `tether.toml`), so two datasets sharing
+a store never collide. Objects sharing one system share the branch: it is the
+system's branch, not the object's. `raw/plate1` has no working ref: files
+cannot be forked. `tether new relabel` from another checkout joins the
+bookmark -- refused while this checkout works on it, unless `--shared`, since
+both would write the same branches. `tether new main` returns to the trunk;
+`tether new REV` for a revision carrying no bookmark gives a read-only working
+copy (`open --rev`, `status`, `verify` work; writes need a bookmark).
 
 `status` reads objects that have not been forked yet at their base (the pin),
 and all are `clean`; once a branch exists, `status` reads it instead.
@@ -112,7 +122,7 @@ from tether.handles import IcechunkHandle
 repo = Repo.find(".")
 h = repo.open("zarr/imaging")
 assert isinstance(h, IcechunkHandle) and not h.read_only
-print(h.branch)                       # tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging
+print(h.branch)                       # tether.ws.0a1b2c3d.relabel
 
 group = zarr.open_group(h.session.store, mode="a")
 group["labels"][...] = relabel(group["labels"][...])
@@ -151,11 +161,12 @@ A Neon pin is a branch at an LSN, and a pin taken on your working branch is a
 
 - `commit` then `new` keeps your working branch: it already sits at the state
   that was just pinned from it, so the plan says `reuse` and nothing is reset.
-- `new` onto a *different* pin (an older commit, a teammate's) cannot reset a
-  branch that has pin children -- Neon will not restore it in place -- so the
-  fork lands on a sibling name (`...db-61a22c.2`) and the old branch stays as
-  the pins' parent. Your workspace records the sibling.
-- Neither `gc --prune-workspaces` nor `--force-prune` can delete a branch
+- `new` onto a *different* pin (the bookmark moved by hand to an older
+  commit) cannot reset a branch that has pin children -- Neon will not
+  restore it in place -- so the fork lands on a sibling name
+  (`...relabel.2`) and the old branch stays as the pins' parent. Your
+  workspace records the sibling.
+- Neither `gc --prune-bookmarks` nor `--force-prune` can delete a branch
   while pins hang off it; the plan lists it as `keep-branch: cannot be
   deleted` with the pins named. Release those pins first (drop the commits
   that reference them, `gc`), then the branch goes.
@@ -180,7 +191,7 @@ From the shell, `tether open <key>` prints the same addresses:
 tether open db/metrics
 postgresql://runner@ep-brisk-forest-x9y8z7.us-west-2.aws.neon.tech/metrics?...
 tether open features
-s3://bucket/features.lance#tether.ws.0a1b2c3d.7c1e0a4d.features@v4
+s3://bucket/features.lance#tether.ws.0a1b2c3d.relabel@v4
 ```
 
 ## See what changed
@@ -203,7 +214,7 @@ working tree; nothing has been recorded yet, so use `--content` after the
 commit below. Meanwhile `main` in every system is untouched: the forks isolate
 your work.
 
-## Commit: pin the forks
+## Commit: pin the branches, move the bookmark
 
 ```bash
 tether commit -m "Relabel plate1 with model v3; scores for A1"
@@ -217,10 +228,12 @@ tether commit -m "Relabel plate1 with model v3; scores for A1"
 committed 41c0d9e2b7f3
 ```
 
-Each pin points at the state of the *working branch*: an Icechunk tag on the
-fork's snapshot, a Lance tag on `(branch, version)`, a Neon branch at the
-fork's LSN, a git tag on the fork's sha. Then the manifests were committed.
-Now compare:
+Each pin points at the state of the bookmark's *branch*: an Icechunk tag on
+the branch's snapshot, a Lance tag on `(branch, version)`, a Neon branch at
+the branch's LSN, a git tag on the branch's sha. Then the manifests were
+committed and the `relabel` bookmark moved onto the commit -- in one jj
+operation, so `jj undo` takes both back. `main` (the bookmark and every
+system's `main`) has not moved. Now compare:
 
 ```bash
 tether diff main @- --content
@@ -236,15 +249,18 @@ tether diff main @- --content
                modified  /labels  12 chunks
 ```
 
-Continue writing on the same forks and committing as often as you like; each
-commit pins the latest state and the previous pins stay valid (they are what
-`open -r` and `verify` use).
+Continue writing on the same branches and committing as often as you like;
+each commit pins the latest state and moves the bookmark, and the previous
+pins stay valid (they are what `open -r` and `verify` use). `commit` is not
+`jj commit`: it starts nothing new, and the next write lands on the same
+branches.
 
-## Bringing it back to `main`: `tether promote`
+## Landing it: `tether promote`
 
-Your dataset commit pins the fork's state in every system. To make each
-system's *base branch* point at that state too -- jj's `squash --into main`,
-for data -- run:
+Your dataset commit pins the bookmark's state in every system. To land it --
+make each system's *upstream branch* point at that state, then move the
+trunk bookmark to your commit; `jj bookmark set main -r relabel`, for data --
+run:
 
 ```bash
 tether promote --dry-run
@@ -255,16 +271,16 @@ plan: promote (3 write(s))
         fast-forward  code          [git] main  main sha=41c0d9e2b7f3… -> sha=f01a9d3c2b7e… (base unchanged since fork)
         fast-forward  features      [lance] main  ...
         fast-forward  zarr/imaging  [icechunk] main  main snapshot_id=K3F9M2A1B7C8… -> snapshot_id=DEB4861EB388… (base unchanged since fork)
-              refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; use `--write direct` ...
+              refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; work on the trunk bookmark ...
 ```
 
-For each Forkable object tether compares the base branch to the **fork point**
--- the state recorded in `workspace.toml` when the branch was created -- and
-decides:
+For each Forkable object tether compares the upstream branch to the **fork
+point** -- the state recorded in `workspace.toml` when the branch was created
+-- and decides:
 
-| Base branch since your fork | Backend has | Outcome |
+| Upstream since your fork | Backend has | Outcome |
 | --- | --- | --- |
-| unchanged | `PROMOTE` | **fast-forward**: the base is moved to the fork's head; nothing is rewritten |
+| unchanged | `PROMOTE` | **fast-forward**: upstream is moved to the branch's head; nothing is rewritten |
 | moved | `MERGE` | **merge**: the system's own three-way merge (lakeFS `merge_into`, Dolt `DOLT_MERGE`, `git merge`); conflicts are reported and nothing is written |
 | moved | `PROMOTE` only | **refuse**, with the system's recipe (Icechunk and Iceberg have no merge) |
 | anything | neither | **refuse** (Neon, Lance) |
@@ -272,79 +288,77 @@ decides:
 `--strategy ff` refuses anything that is not a fast-forward -- the setting for
 CI, where a surprise merge is worse than a failure. `--strategy merge` refuses
 plain fast-forwards when you want a merge commit for the record. `--rev REV`
-promotes what a *dataset commit* pinned instead of this workspace's live
-branches (the ancestry check replaces the fork point). `--dry-run`, `--plan`,
-and `--from-plan` work as everywhere else; apply refuses if a base moved after
-the plan was made.
+promotes what a *dataset commit* pinned instead of this bookmark's live
+branches (the ancestry check replaces the fork point; the trunk bookmark is
+not moved). `--dry-run`, `--plan`, and `--from-plan` work as everywhere else;
+apply refuses if an upstream moved after the plan was made.
 
-After a **fast-forward** nothing tether-side changes: the manifests already
-named that state and the pin already held it. Land the dataset commit with
-`jj` and you are done. After a **merge** the base holds a state no commit has
-pinned yet, so `promote` resets your working branch onto the merge result and
-the next `tether commit` pins it -- the output says so.
+When everything **fast-forwarded** and nothing was refused, the trunk bookmark
+moves to your commit: the manifests there already name the states upstream
+now holds. After a **merge** upstream holds a state no commit has pinned yet,
+so `promote` resets your branch onto the merge result and leaves the trunk
+where it is; `tether commit` pins the merge, and a second `promote` is then a
+fast-forward that moves it.
 
 ```bash
-tether promote                      # fast-forward what it can, merge where the system can
-tether commit -m "Merge plate1 relabel into main"   # only after a merge
-jj bookmark set main -r @-          # land the dataset commit
+tether promote                                       # fast-forward what it can, merge where the system can
+tether commit -m "Merge plate1 relabel into main"    # only after a merge
+tether promote                                       # ...then this moves main
 ```
 
 Refusals are the honest part. Icechunk and Iceberg can fast-forward but not
-merge; if `main` moved under you, re-apply the writes on a fresh fork (or, for
-Icechunk, `reset_branch` when discarding `main`'s newer snapshots is what you
-mean). Lance cannot move a branch head at all yet. Neon cannot promote a child
-branch into its parent -- use `--write direct` for databases that must receive
-writes, so the working ref *is* `main` and pins (child branches at an LSN)
-provide reproducibility.
+merge; if upstream moved under you, re-apply the writes on a fresh bookmark
+(or, for Icechunk, `reset_branch` when discarding `main`'s newer snapshots is
+what you mean). Lance cannot move a branch head at all yet. Neon cannot
+promote a child branch into its parent -- for a database that must receive
+writes on `main`, work on the trunk bookmark, where the working ref *is*
+`main` and pins (child branches at an LSN) provide reproducibility.
 
-## Positions: what the next commit records
+## Positions, and `tether pull`
 
 A dataset commit records an exact state per object. Between commits each
 object has a *position* -- what the next commit will record -- and it works
 the way files do in a VCS: what you did not touch stays exactly as the last
 commit had it.
 
-- An object with a **working branch** (forked by `new`, or the base branch
-  itself for `write = "direct"`) is positioned at that branch's head. `commit`
-  fingerprints it; writes move it.
-- An object **without** one keeps its **previous pin** (or recorded state).
-  `commit` does not contact its store -- there is nothing it could learn: the
-  pin cannot move. If the upstream branch (`locator.branch`) has moved on, or
-  the table has a newer version, or the files changed, that is the world's
-  business until you *pull*; `status --snapshot` reports it as `behind`.
+- On the **trunk**, a Forkable object's position is its upstream branch head:
+  `commit` fingerprints it and pins whatever is there.
+- On another **bookmark**, its position is the bookmark's branch once that
+  exists; until the first write it sits at the pin the bookmark started from,
+  and `commit` does not contact it.
+- Objects whose system has **no branches** (files, Iceberg, Delta, DuckLake)
+  sit at their pin on every bookmark. So does an object registered `--at`,
+  until a trunk `pull` moves it onto the branch.
 - An object with **no commit yet** is read once, at the branch head or at
   `--at`.
 
-Systems without branches (files, Iceberg, Delta, DuckLake) follow the same
-rule: `pull` reads the current version or the path. The one exception is a
-`file = "immutable"` object that changed -- `pull` refuses it like
-`status --snapshot` does, since accepting a new state is a re-registration,
-not a pull.
-
-`tether pull` is the explicit step that moves positions to upstream -- the
-dataset's `git fetch` + rebase:
+`tether pull` is the fetch: it reads the heads of the bookmark's branches and
+commits what moved onto the bookmark. On the trunk that means every upstream
+branch and every branch-less object -- a table's current version, a
+directory's contents -- so a nightly `tether pull` on `main` is the dataset
+trailing the world:
 
 ```bash
-tether pull                     # every object without a working branch
-tether pull zarr/imaging        # just this one
+tether new main
+tether pull
 ```
 
 ```
-  pulled zarr/imaging  snapshot_id=TYZ25DJEHXER -> snapshot_id=AZ1REKMV3HET  (pending working branch will fork from here, not the pin)
+  pulled zarr/imaging  snapshot_id=TYZ25DJEHXER -> snapshot_id=AZ1REKMV3HET
+  pulled raw/plate1  digest=9f2e1c… -> digest=0b7a4d…
   up to date db/metrics
-  skipped features: has working branch tether.ws.0a1b2c3d.7c1e0a4d.features-9b2e4f; commit it, or `new --discard`
-commit to pin the pulled states; `tether undo` puts them back
+committed 8d5719841a09 on main
 ```
 
-The pulled state is held in the workspace (`status` shows `pulled`) until the
-next `commit` pins it; a writable `open` before then forks from it, so "pull,
-then work on top" is a rebase onto upstream. `pull` writes nothing to any
-store; `undo` reverses it. An object whose working branch *exists* is skipped
--- replacing the branch would discard its writes; commit them, or `new
---discard`.
+Nothing moved: no commit. A `file = "immutable"` object that changed is
+refused, as `status --snapshot` refuses it: accepting a new state is a
+re-registration, not a pull. `undo` uncommits a pull like a commit (the pins
+stay). On a feature bookmark the branches *are* the working refs, so `pull`
+and `commit` see the same heads; objects with no branch yet are skipped.
 
-For a dataset that should trail `main` on every commit, pass `commit --pull`
-or set `[commit] pull = true`; the plan then says `pulled from main`.
+`status --snapshot` on the trunk shows what a pull would take: `modified` for
+upstream branches that moved, `behind` for branch-less objects and `--at`
+positions.
 
 ### Starting from an older snapshot
 
@@ -369,7 +383,7 @@ tether log s3://bucket/imaging.icechunk --kind icechunk   # before registering
 ```bash
 tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --at TYZ25DJEHXERGBR7H3P0
 tether commit -m "Adopt imaging at the pre-relabel snapshot"
-tether new
+tether new -b from-pre-relabel
 ```
 
 `--pick` does the same interactively -- it prints the list numbered and asks
@@ -388,39 +402,39 @@ Pick an entry (number or id) [1]: 2
 added zarr/imaging (icechunk) at TYZ25DJEHXERGBR7H3P0
 ```
 
-The first `commit` pins that state, `open` reads it, and `new` forks from the
-pin, exactly as if it had been the branch head. After that `at` has no further
-role: the pin is the position, and `tether pull` moves the object onto `main`
-(dropping `at` from the manifest). The ids `tether log` prints are always
-valid `at` values; the per-system forms are in the
+The first `commit` pins that state, `open` reads it, and a bookmark forks
+from the pin, exactly as if it had been the branch head. After that `at` has
+no further role: the pin is the position, and a trunk `tether pull` moves the
+object onto `main` (dropping `at` from the manifest). The ids `tether log`
+prints are always valid `at` values; the per-system forms are in the
 [backends guide](09-backends.qmd). Neon and files have no `at`.
 
-## `direct` mode: write on the base branch
+## Working on the trunk
 
 Some objects should never be forked -- a production database, a shared
-`main` you deliberately advance. Register them with `--write direct`:
+`main` you deliberately advance. That is what the trunk bookmark is for:
 
 ```bash
-tether add db/prod --kind neon --project-id prj-9f2 --database prod --role app --write direct
+tether new main
+tether open db/prod        # a writable handle to main itself
+tether commit -m "Nightly load"
 ```
 
-For a `direct` object, `tether new` sets the working ref to the locator's branch
-(`main`) instead of forking. `open` still returns a writable handle -- to
-`main` -- and `commit` still pins whatever state it finds there. You get
-reproducibility without branch sprawl, and the Neon quiescence check
-(`commit` refuses while writers are active unless `--force`) keeps pins
-consistent.
-
-Switch an object later with `tether set db/prod --write direct` (or `--write
-fork`): the workspace lets go of its current working branch -- left in the
-store for `gc --prune-workspaces` -- and the next `tether new` decides the new
-one. `tether set --all --write direct` does the whole dataset.
+On the trunk every Forkable object's working ref is its upstream branch
+(`locator.branch`, `main` by default; `[vcs] trunk` names the bookmark).
+`open` returns a writable handle to it and `commit` pins whatever state it
+finds there, so you get reproducibility without branch sprawl; the Neon
+quiescence check (`commit` refuses while writers are active unless `--force`)
+keeps pins consistent. Two checkouts may both work on the trunk -- that is
+what a shared `main` means -- where any other bookmark is refused to a second
+checkout unless `--shared`.
 
 ## Stale working copies
 
 If an object's committed manifest changes under you -- a teammate committed
-it, or you `jj new` to another revision where it is pinned differently -- your
-fork of it was taken from a state that is no longer the dataset's:
+it on the same bookmark (`--shared`), or the bookmark was moved by hand to a
+revision where it is pinned differently -- your branch was forked from a state
+that is no longer the dataset's:
 
 ```bash
 tether status
@@ -450,7 +464,7 @@ committed:
 ```
 $ tether new
 error: refusing to reset working branches with unpinned writes:
-  zarr/imaging: tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0 has writes since this workspace last committed (snapshot_id=Q7ZK…); commit them, or pass --discard to throw them away
+  zarr/imaging: tether.ws.0a1b2c3d.relabel has writes since this workspace last committed (snapshot_id=Q7ZK…); commit them, or pass --discard to throw them away
 ```
 
 Commit, or `tether new --discard` if that was scratch work. Branches that
@@ -466,8 +480,8 @@ tether ops
 
 ```
 9f2e1c7b3a5d  2026-09-05T10:41:12+00:00  commit   pinned zarr/imaging, db/metrics; vcs 4c1e2a9b7d3f
-3f1c9a2b7d4e  2026-09-05T10:22:03+00:00  fork     forked zarr/imaging -> tether.ws.0a1b2c3d.7c1e0a4d.zarr-imaging-3fa1c0
-b7d4e3f1c9a2  2026-09-05T10:21:55+00:00  new      deferred code, db/metrics, features, zarr/imaging; at main
+3f1c9a2b7d4e  2026-09-05T10:22:03+00:00  fork     forked zarr/imaging -> tether.ws.0a1b2c3d.relabel
+b7d4e3f1c9a2  2026-09-05T10:21:55+00:00  new      deferred code, db/metrics, features, zarr/imaging; on relabel
 ```
 
 `tether undo` reverses the newest entry where the store still allows it. Undo
@@ -495,25 +509,36 @@ If a store lost something a manifest promises -- a pin deleted by hand, a
 branch this workspace expects -- `tether repair` recreates it from the recorded
 state, while the store still has that state.
 
-## Workspaces
+## Workspaces and bookmarks
 
-Because working refs live in the *untracked* `.tether/workspace.toml`, each
-jj workspace (or each checkout) is an independent tether workspace with its own
-id and its own forks. Two agents working on the same dataset commit never write
-to the same branch.
+Each jj workspace (or each checkout) is its own tether workspace, with its own
+untracked `.tether/workspace.toml` saying which bookmark it works on. Two
+checkouts on two bookmarks never write the same store branch. Two checkouts on
+*one* bookmark would, so `tether new NAME` refuses a bookmark another live
+checkout holds unless you pass `--shared` -- a choice, not a default. The
+trunk is the exception: `main` is shared by nature.
+
+When the VCS moves a bookmark behind tether's back -- `jj bookmark delete`,
+`jj bookmark rename`, `jj bookmark set` to another commit, or a `jj new` that
+leaves it -- `tether status` says so, with what to do: `tether new NAME` to
+return or continue under the new name, `tether new -b NAME` to recreate one,
+`gc --prune-bookmarks` to release the branches of a bookmark that is gone.
 
 ## Recap
 
-- `tether new [rev]` decides a writable branch per Forkable object off the pins
-  at `rev`; names embed the workspace id so forks never collide. By default the
-  branch is created on the first writable `open` (`--eager` creates them all
-  now; `--pin record` objects always fork now).
-- `open` returns writable native handles on those forks; write with the
+- `tether new -b NAME [rev]` starts a bookmark and, per Forkable object, a
+  branch named after it (`tether.ws.<dataset>.NAME`) off the pins at `rev`;
+  created on the first writable `open` (`--eager` creates them all now;
+  `--pin record` objects always fork now). `tether new NAME` joins one;
+  `tether new main` works on the trunk, where the working refs are the
+  upstream branches; no bookmark means read-only.
+- `open` returns writable native handles on those branches; write with the
   system's own library.
-- `promote` moves each system's base branch to the fork: fast-forward when the
-  base is unchanged since the fork point, native merge where the system has
-  one, refusal with the system's recipe otherwise.
-- `commit` pins the forks' states and commits the manifests; `diff --content`
-  shows what changed inside each system.
-- Promotion to `main` is per system and deliberate; `--write direct` skips
-  forking for objects that must stay on their base branch.
+- `commit` pins the branches' states, commits the manifests, and moves the
+  bookmark; `diff --content` shows what changed inside each system.
+- `promote` moves each system's upstream branch to the bookmark's branch --
+  fast-forward when unchanged since the fork point, native merge where the
+  system has one, refusal with the system's recipe otherwise -- then moves the
+  trunk bookmark to the commit.
+- `pull` on the trunk reads every upstream branch and branch-less object and
+  commits what moved.
