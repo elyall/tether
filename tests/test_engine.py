@@ -1827,3 +1827,47 @@ def test_bookmarks_shape_the_working_copy(vcs_root: Path) -> None:
     assert isinstance(ro, MemoryHandle) and ro.read_only
     assert repo.plan_new().context["bookmark"] is None
     assert repo.plan_commit("ro").is_empty  # nothing this checkout can move
+
+
+def test_status_reports_bookmark_drift(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    c1 = repo.commit("baseline").vcs_commit
+    assert c1 is not None
+    repo.new(bookmark="feature", eager=True)
+    st = repo.status(do_snapshot=False)
+    assert st.bookmark == "feature" and not st.trunk and st.bookmark_drift == []
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 2})
+    c2 = repo.commit("work").vcs_commit
+    assert c2 is not None and repo.bookmark_drift() == []
+
+    # The working copy leaves the bookmark.
+    repo.vcs.new("main")
+    (msg,) = Repo.find(vcs_root).bookmark_drift()
+    assert "left bookmark 'feature'" in msg and "tether new feature" in msg
+    repo.new("feature")
+    assert repo.bookmark_drift() == []
+
+    # The bookmark is moved by hand, so its commit no longer describes the
+    # branches this workspace forked / committed.
+    repo.vcs.bookmark_set("feature", c1)
+    if repo.vcs.kind == "jj":  # git moved the checkout too (reset --keep)
+        (msg,) = repo.bookmark_drift()
+        assert "was moved to" in msg and "db" in msg and "tether new feature" in msg
+    repo.vcs.bookmark_set("feature", c2)
+    if repo.vcs.kind == "git":
+        repo.new("feature")
+    assert repo.bookmark_drift() == []
+
+    # Deleted, and deleted-with-a-lookalike (renamed).
+    repo.vcs.new("main")  # git cannot delete the checked-out branch
+    repo.vcs.bookmark_delete("feature")
+    (msg,) = repo.bookmark_drift()
+    assert "no longer exists" in msg and "tether new -b feature" in msg
+    repo.vcs.bookmark_set("renamed", c2)
+    repo.vcs.new("renamed")
+    (msg,) = repo.bookmark_drift()
+    assert "renamed?" in msg and "tether new renamed" in msg
+    assert repo.status(do_snapshot=False).bookmark_drift == [msg]

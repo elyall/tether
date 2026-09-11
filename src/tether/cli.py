@@ -134,6 +134,9 @@ def _status_payload(report: StatusReport) -> dict:
         "stale_keys": report.stale_keys,
         "fresh": report.fresh,
         "snapshot_at": report.snapshot_at,
+        "bookmark": report.bookmark,
+        "trunk": report.trunk,
+        "bookmark_drift": report.bookmark_drift,
         "vcs_drift": [
             {"op": d.op.id, "commit": d.commit, "referenced": d.referenced}
             for d in report.vcs_drift
@@ -496,7 +499,13 @@ def status(
         _emit(_status_payload(report), as_json=True)
         return
     flag = f" (STALE: {', '.join(report.stale_keys)})" if report.stale else ""
-    typer.echo(f"dataset {report.manifest_hash[:12]}{flag}")
+    if report.bookmark is None:
+        where = "on no bookmark: read-only (`tether new -b NAME` to write)"
+    else:
+        where = f"on {'trunk ' if report.trunk else ''}bookmark {report.bookmark}"
+    typer.echo(f"dataset {report.manifest_hash[:12]}{flag}; {where}")
+    for line in report.bookmark_drift:
+        typer.secho(f"  warning: {line}", fg=typer.colors.YELLOW, err=True)
     if not report.fresh:
         typer.secho(
             f"  states as fingerprinted {_age(report.snapshot_at)}; "

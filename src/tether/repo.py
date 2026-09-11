@@ -224,6 +224,13 @@ class StatusReport:
     """Per-object classifications, sorted by key."""
     stale_keys: list[str] = field(default_factory=list)
     """The objects that make the workspace stale (see `Repo.stale_keys`)."""
+    bookmark: str | None = None
+    """The bookmark this workspace works on (`None`: read-only working copy)."""
+    trunk: bool = False
+    """Whether that bookmark is the trunk (writes land on upstream branches)."""
+    bookmark_drift: list[str] = field(default_factory=list)
+    """Ways the VCS bookmark and this workspace have parted (see
+    `Repo.bookmark_drift`), each with what to do about it."""
     vcs_drift: list[VcsDrift] = field(default_factory=list)
     """Dataset commits this workspace made that left VCS history behind
     tether's back (see `Repo.vcs_drift`)."""
@@ -608,6 +615,70 @@ class Repo:
                 "`tether new -b NAME` to start one, or `tether new NAME` to join one"
             )
         return working_ref_name(self.config.dataset_id, self.workspace.bookmark)
+
+    def bookmark_drift(self) -> list[str]:
+        """How the VCS bookmark and this workspace have parted, if they have.
+
+        The bookmark can be deleted or renamed (`jj bookmark delete/rename`),
+        the working copy can leave it (`jj new`, `git switch`), or it can be
+        moved by hand so its commit no longer describes what the store branches
+        hold. VCS-only checks; no store is contacted. Each message says what
+        to do. Empty when everything agrees, or on no bookmark.
+        """
+        b = self.workspace.bookmark
+        if b is None:
+            return []
+        out: list[str] = []
+        marks = self.vcs.bookmarks()
+        here = self.vcs.current_bookmarks()
+        if b not in marks:
+            if self.vcs.kind == "git" and here == [b]:
+                return []  # unborn branch: HEAD is on it
+            renamed = [
+                n for n in here if n != b and n != self.config.trunk and n in marks
+            ]
+            if renamed:
+                out.append(
+                    f"bookmark {b!r} is gone and {renamed[0]!r} sits where the working "
+                    f"copy is -- renamed? `tether new {renamed[0]}` continues there "
+                    f"(its store branches are forked anew; {b!r}'s go to "
+                    "`gc --prune-bookmarks`)"
+                )
+            else:
+                out.append(
+                    f"bookmark {b!r} no longer exists in the VCS; `tether new -b {b}` "
+                    "recreates it here, `tether new NAME` joins another; its store "
+                    "branches stay until `gc --prune-bookmarks`"
+                )
+            return out
+        on_it = self.vcs.is_ancestor(b, "@") if self.vcs.kind == "jj" else here == [b]
+        if not on_it:
+            out.append(
+                f"the working copy has left bookmark {b!r} (now on "
+                f"{', '.join(here) or 'no bookmark'}); `tether new {b}` returns to it, "
+                "`tether new` works where you are"
+            )
+            return out
+        # Moved by hand: the bookmark's commit no longer records what this
+        # workspace forked from / last committed on its branches.
+        moved: list[str] = []
+        with contextlib.suppress(Exception):
+            at_mark = self._objects_at(marks[b])
+            for key, expected in self.workspace.base_states.items():
+                m = at_mark.get(key)
+                if m is not None and m.state is not None:
+                    if not self._same(m.kind, m.state, expected):
+                        moved.append(key)
+                elif key in self.objects and self.objects[key].state is not None:
+                    moved.append(key)
+        if moved:
+            out.append(
+                f"bookmark {b!r} was moved to {marks[b][:12]}: its commit no longer "
+                f"records what the store branches of {', '.join(sorted(moved))} hold; "
+                f"`tether new {b}` resets them onto the pins there (refused while "
+                "they hold unpinned writes; --discard to drop those)"
+            )
+        return out
 
     def _check_on_bookmark(self) -> None:
         """Refuse to commit when the VCS working copy has left the workspace's
@@ -1328,6 +1399,9 @@ class Repo:
             stale=bool(stale),
             objects=objects,
             stale_keys=stale,
+            bookmark=self.workspace.bookmark,
+            trunk=self.on_trunk(),
+            bookmark_drift=self.bookmark_drift(),
             vcs_drift=self.vcs_drift(),
             fresh=fresh,
             snapshot_at=self.workspace.last_snapshot_at,
