@@ -50,6 +50,9 @@ on_status = false    # also run a cheap verify of each committed object in statu
 auto_fork = false    # commit re-runs `new` from the pins it just created
 fork = "lazy"        # "lazy": create a working branch on first writable open; "eager": during `new`
 
+[commit]
+pull = false          # true: every commit also pulls objects without a working branch
+
 [defaults]           # policy for objects added without an explicit one
 write = "fork"       # fork | direct
 file = "immutable"   # immutable | versioned
@@ -136,6 +139,9 @@ last_snapshot_at = "2026-09-04T22:10:03.118Z"
 
 [base_states."zarr/imaging"]         # committed state this working ref corresponds to
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
+
+[pulled."db/metrics"]                # taken by `pull`; the next commit pins it
+lsn = "0/1A2B3C4D"
 
 [fork_points."zarr/imaging"]         # base state when the branch was forked (for promote)
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"

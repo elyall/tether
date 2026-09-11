@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Positions and `tether pull`.** An object with no working branch now keeps
+  its pin from commit to commit -- `commit` does not contact its store -- the
+  way an untouched file stays as the parent commit had it. `tether pull
+  [KEY]...` is the explicit step that moves such objects to their upstream
+  branch head (`locator.branch`): the state is held in the workspace
+  (`workspace.toml [pulled]`, `status` shows `pulled`) until the next commit
+  pins it, a writable `open` before then forks from it (a fork `new` left
+  pending is retargeted, and `pull` says so), and `undo` drops it.
+  `commit --pull` (or `[commit] pull = true`) folds the pull into every
+  commit for datasets that should trail `main`. `status --snapshot` reports
+  such an object as `behind` when upstream has moved past its pin, and a
+  read-only `open` reads the pin, not the upstream head. The rule holds for
+  systems without branches too (file, iceberg, delta, ducklake): `pull` reads
+  the current version or path, and refuses a `file = "immutable"` object
+  that changed. Only `direct` objects and objects not yet committed are
+  fingerprinted on every commit (`Repo.moving_keys`). `--at` is an object's
+  *initial* position only: after
+  the first commit the pin is the position and `pull` drops `at` from the
+  manifest. `PullReport`; the `add --branch` help now calls it the upstream.
+
 - A **Caveats and Performance** guide, holding what the README used to: the
   limits of the model (per-system promotion, no cross-system atomicity, what
   `undo` can and cannot do, pin-then-commit ordering, lazy forks, storage
@@ -27,7 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The write policy `track` is now `direct`** (`--write direct`,
   `[defaults] write = "direct"`, `policy_write = "direct"` in registries): writes
   land on the base branch instead of a forked working branch. Same behaviour,
-  new word -- `track` is about to mean something else (see follow/freeze).
+  new word -- `track` would otherwise be read as "follow upstream", which
+  is what `pull` is for.
   The v3 migration (`tether upgrade`) rewrites `write = "track"` in the
   working-tree manifests alongside the content-hash re-fingerprint. Manifests
   in history keep the old spelling and stay readable.
@@ -37,7 +58,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `jj status`. `--snapshot` fans out and fingerprints first; a workspace with
   no snapshot yet always does. `[snapshot] auto` now defaults to `false`
   (`true` restores fingerprinting on every `status`; `--no-snapshot` wins).
-  `commit` and `verify` always fingerprint regardless of the setting.
+  `verify` always fingerprints regardless of the setting; `commit` fingerprints
+  what this checkout can have moved (see positions).
   `StatusReport` gains `fresh` and `snapshot_at`, and the JSON output the same.
 - Local files are fingerprinted by **content hash**, not mtime. A file's state
   is `{size, sha256}` and a directory's digest is over its files' sha256s, so

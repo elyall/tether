@@ -21,8 +21,10 @@ Common conventions:
   inside its own dataset's namespace.
 - `identity` is the subset of the locator that names the system; two objects
   of one dataset with the same identity and state share one pin.
-- `at` in a locator detaches the base at a native state (`tether add --at` /
-  `--pick`); `tether log` lists what each system accepts:
+- `at` in a locator is an object's initial position (`tether add --at` /
+  `--pick`): the first commit pins that native state instead of the `branch`
+  head; `pull` later moves the object onto the branch. `tether log` lists
+  what each system accepts:
 
 | Kind | `at` accepts | `log` lists |
 | --- | --- | --- |

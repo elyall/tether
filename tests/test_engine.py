@@ -240,7 +240,9 @@ def test_lazy_forking(vcs_root: Path) -> None:
 
     # Read-only opens, status, and commit never trigger the fork.
     ro = repo.open("db", read_only=True)
-    assert isinstance(ro, MemoryHandle) and ro.read_only and ro.ref == "main"
+    pin = repo.objects["db"].pin
+    assert pin is not None
+    assert isinstance(ro, MemoryHandle) and ro.read_only and ro.ref == pin.ref
     assert not any(b.startswith("tether.ws.") for b in branches)
     assert next(o for o in repo.status().objects if o.key == "db").changed is False
     assert repo.commit("nothing").pinned == {}  # unchanged: no branch, no new pin
@@ -315,7 +317,7 @@ def test_content_diff_and_listings(vcs_root: Path) -> None:
     (data / "a.bin").write_bytes(b"aaaaaaaa")
     (data / "sub" / "b.bin").unlink()
     (data / "c.bin").write_bytes(b"c")
-    r2 = repo.commit("update")
+    r2 = repo.commit("update", pull=True)
     assert r2.vcs_commit is not None
 
     entries = {e.key: e for e in repo.diff(r1.vcs_commit, r2.vcs_commit, content=True)}
@@ -364,7 +366,7 @@ def test_content_diff_reports_backend_failures_per_object(
     system = _mem_object(repo)
     r1 = repo.commit("baseline")
     default_store().write(system, "main", {"x": 1})
-    r2 = repo.commit("update")
+    r2 = repo.commit("update", pull=True)
     assert r1.vcs_commit and r2.vcs_commit
     backend = repo.backend_for("memory")
 
@@ -514,7 +516,7 @@ def test_commit_plan_roundtrip_and_stale_detection(vcs_root: Path) -> None:
     stale = repo.plan_commit("next")
     assert stale.is_empty  # unchanged since the commit
     store.write(system, "main", {"v": 2})
-    stale = repo.plan_commit("next")
+    stale = repo.plan_commit("next", pull=True)
     store.write(system, "main", {"v": 3})
     with pytest.raises(StalePlanError):
         repo.apply_commit(stale)
@@ -728,7 +730,7 @@ def test_stale_new_plan_does_not_move_the_working_copy(vcs_root: Path) -> None:
     system = _mem_object(repo)
     c1 = repo.commit("baseline").vcs_commit
     default_store().write(system, "main", {"v": 2})
-    c2 = repo.commit("second").vcs_commit
+    c2 = repo.commit("second", pull=True).vcs_commit
     assert c1 and c2
     plan = repo.plan_new(c1)
     # The manifests at c1 change (someone rewrote history); the plan is stale.
@@ -1031,7 +1033,7 @@ def test_undo_commit_uncommits_and_keeps_pins(vcs_root: Path) -> None:
     parent = "@-" if repo.vcs.kind == "jj" else "HEAD"
     before = repo.vcs.resolve(parent)  # the baseline dataset commit
     store.write(system, "main", {"v": 2})
-    result = repo.commit("second")
+    result = repo.commit("second", pull=True)
     assert result.vcs_commit is not None
     pin = repo.objects["db"].pin
     assert pin is not None
@@ -1229,7 +1231,7 @@ def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:
     repo.commit("v1")
     pin1 = repo.objects["db"].pin
     s2 = store.write(system, "main", {"v": 2})
-    repo.commit("v2")
+    repo.commit("v2", pull=True)
     pin2 = repo.objects["db"].pin
     assert pin1 is not None and pin2 is not None
     repo.new(eager=True)
@@ -1281,10 +1283,10 @@ def test_abandon_frees_the_pins_only_those_commits_referenced(vcs_root: Path) ->
     repo.commit("v1")
     p1 = repo.objects["db"].pin
     store.write(system, "main", {"v": 2})
-    c2 = repo.commit("v2").vcs_commit
+    c2 = repo.commit("v2", pull=True).vcs_commit
     p2 = repo.objects["db"].pin
     store.write(system, "main", {"v": 3})
-    repo.commit("v3")
+    repo.commit("v3", pull=True)
     p3 = repo.objects["db"].pin
     assert p1 and p2 and p3 and c2
 
@@ -1373,7 +1375,7 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     c1 = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
     s2 = store.write(system, "main", {"v": 2})
     store.write(other, "main", {"o": 2})
-    repo.commit("v2")
+    repo.commit("v2", pull=True)
     repo.new(eager=True)
     wref = repo.workspace.working_refs["db"]
     oref = repo.workspace.working_refs["other"]
@@ -1504,7 +1506,7 @@ def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -
     store = default_store()
     repo.commit("v1")
     store.write(system, "main", {"v": 2})
-    c2 = repo.commit("v2").vcs_commit
+    c2 = repo.commit("v2", pull=True).vcs_commit
     assert c2 is not None
     assert repo.vcs_drift() == [] and repo.status(do_snapshot=False).vcs_drift == []
 
@@ -1530,10 +1532,10 @@ def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -
 
     # tether's own removals are not drift: undo (uncommit) and abandon.
     store.write(system, "main", {"v": 3})
-    c3 = repo.commit("v3").vcs_commit
+    c3 = repo.commit("v3", pull=True).vcs_commit
     repo.undo()  # uncommit c3
     store.write(system, "main", {"v": 4})
-    c4 = repo.commit("v4").vcs_commit
+    c4 = repo.commit("v4", pull=True).vcs_commit
     repo.abandon([c4]) if c4 else None
     assert [d.commit for d in repo.vcs_drift()] == [c2]
     assert c3 is not None
@@ -1541,9 +1543,9 @@ def test_vcs_drift_notices_commits_removed_behind_tethers_back(vcs_root: Path) -
     # A rewrite tether did itself (abandon rebases descendants) is followed
     # through the recorded mapping, not reported as drift.
     store.write(system, "main", {"v": 5})
-    c5 = repo.commit("v5").vcs_commit
+    c5 = repo.commit("v5", pull=True).vcs_commit
     store.write(system, "main", {"v": 6})
-    c6 = repo.commit("v6").vcs_commit
+    c6 = repo.commit("v6", pull=True).vcs_commit
     assert c5 and c6
     report = repo.abandon([c5])  # c6 is rebased and gets a new id
     assert c6 in repo.ops()[0].result["rewritten_commits"]
@@ -1581,3 +1583,167 @@ def test_prune_plans_undeletable_branches_as_kept(
     plan = repo.plan_forget_workspace("deadbeef")
     (a,) = [x for x in plan.actions if x.target == stray]
     assert a.op == "keep-branch" and "cannot be deleted" in a.detail
+
+
+def test_positions_commit_unchanged_until_pull(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An object with no working branch keeps its pin from commit to commit;
+    `pull` is the explicit step that takes the upstream head."""
+    from tether.backends.memory import MemoryBackend
+
+    calls: list[str] = []
+    real = MemoryBackend.fingerprint
+
+    def counting(self, locator, working_ref):  # type: ignore[no-untyped-def]
+        calls.append(str(locator.get("system")))
+        return real(self, locator, working_ref)
+
+    monkeypatch.setattr(MemoryBackend, "fingerprint", counting)
+
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    assert repo.moving_keys() == ["db"]  # no commit yet: the first commit reads it
+    res = repo.commit("adopt")
+    assert res.pinned["db"] is not None and calls == [system]
+    assert repo.moving_keys() == []
+
+    # main moves on. commit does not follow it; the pin stands.
+    s2 = store.write(system, "main", {"v": 2})
+    calls.clear()
+    plan = repo.plan_commit("again")
+    assert calls == [] and plan.is_empty and "db: unchanged" in plan.notes
+    st = repo.status(do_snapshot=False)
+    assert st.objects[0].state_label == "clean" and calls == []
+    # A fan-out sees upstream ahead of us: `behind`, not `modified`.
+    st = repo.status(do_snapshot=True)
+    assert st.objects[0].state_label == "behind" and calls == [system]
+    # ...and a cached fan-out must not turn into an implicit pull.
+    assert repo.plan_commit("cached", do_snapshot=False).is_empty
+    # A commit-time (partial) snapshot leaves what the fan-out learned alone:
+    # db is still behind in a local status afterwards.
+    repo.snapshot(upstream=False)
+    assert repo.status(do_snapshot=False).objects[0].state_label == "behind"
+    # Reads stay at the position, not the upstream head.
+    ro = repo.open("db", read_only=True)
+    assert isinstance(ro, MemoryHandle) and ro.read() == {"v": 1}
+
+    # pull takes the head; status says so; commit pins it.
+    report = repo.pull()
+    assert report.pulled == {"db": ({"snapshot_id": s1}, {"snapshot_id": s2})}
+    assert repo.workspace.pulled["db"] == {"snapshot_id": s2}
+    assert repo.status(do_snapshot=False).objects[0].state_label == "pulled"
+    ro = repo.open("db", read_only=True)
+    assert isinstance(ro, MemoryHandle) and ro.read() == {"v": 2}
+    plan = repo.plan_commit("take main")
+    assert [a.op for a in plan.actions if a.key == "db"] == ["pin"]
+    assert "db: pulled from main" in plan.notes
+    # undo puts the position back before anything is committed.
+    repo.undo()
+    assert "db" not in repo.workspace.pulled
+    # ...and the last fan-out still remembers that upstream is ahead.
+    assert repo.status(do_snapshot=False).objects[0].state_label == "behind"
+    repo.pull(["db"])
+    res = repo.commit("take main")
+    assert res.pinned["db"] is not None and repo.objects["db"].state == {
+        "snapshot_id": s2
+    }
+    assert repo.workspace.pulled == {}
+    assert repo.pull().up_to_date == ["db"]
+
+    # commit --pull does it in one step, [commit] pull makes it the default.
+    s3 = store.write(system, "main", {"v": 3})
+    assert repo.plan_commit("no").is_empty
+    res = repo.commit("with pull", pull=True)
+    assert repo.objects["db"].state == {"snapshot_id": s3}
+    repo.config.commit_pull = True
+    s4 = store.write(system, "main", {"v": 4})
+    assert not repo.plan_commit("default pull").is_empty
+    repo.config.commit_pull = False
+
+    # A working branch is what moves; pull refuses to step on it.
+    repo.new(eager=True)
+    assert repo.moving_keys() == ["db"]
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"v": 5})
+    assert repo.status(do_snapshot=False).objects[0].state_label == "modified"
+    report = repo.pull()
+    assert "working branch" in report.skipped["db"] and not report.pulled
+    res = repo.commit("branch")
+    assert res.pinned["db"] is not None
+    assert repo.objects["db"].state == {"snapshot_id": store.resolve(system, wref)}
+    _ = s4
+    with pytest.raises(ConfigError, match="no such object"):
+        repo.pull(["nope"])
+
+    # Files sit at their recorded state too. pull reads the path; an immutable
+    # file that changed is refused, a versioned/accepted one is held.
+    (vcs_root / "f.bin").write_bytes(b"x")
+    repo.add("f", "file", {"uri": str(vcs_root / "f.bin")})
+    repo.commit("file")
+    assert "f" not in repo.moving_keys()
+    (vcs_root / "f.bin").write_bytes(b"xy")
+    assert repo.plan_commit("untouched").is_empty
+    with pytest.raises(ImmutableObjectModified):
+        repo.pull(["f"])
+    assert "f" not in repo.workspace.pulled
+
+
+def test_pull_then_write_forks_from_the_pulled_state(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"v": 1})
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("adopt")
+    repo.new()  # lazy: the fork is decided, not created
+    assert "db" in repo.workspace.pending_forks
+
+    s2 = store.write(system, "main", {"v": 2})
+    report = repo.pull(["db"])
+    assert report.pulled["db"][1] == {"snapshot_id": s2}
+    assert report.retargeted == ["db"]  # the pending fork will start at s2
+    h = repo.open("db", read_only=False)  # first write: the branch is created now
+    assert isinstance(h, MemoryHandle) and h.read() == {"v": 2}
+    wref = repo.workspace.working_refs["db"]
+    assert store.system(system).branches[wref] == s2
+    assert repo.workspace.fork_points["db"] == {"snapshot_id": s2}
+    # The branch is now the position; the pull is consumed by the commit.
+    res = repo.commit("on the pulled base")
+    assert res.pinned["db"] is not None and repo.workspace.pulled == {}
+
+    # `new REV` puts positions back at the pins and drops any pull -- with
+    # `keep` too, where the branches survive but the pulled states must not.
+    store.write(system, "main", {"v": 3})
+    repo.pull(["db"])  # skipped: working branch
+    assert repo.workspace.pulled == {}
+    repo.new()
+    assert repo.workspace.pulled == {}
+    repo.workspace.pulled["db"] = {"snapshot_id": "stale"}
+    repo.new(keep=True)
+    assert repo.workspace.pulled == {} and "db" in repo.workspace.working_refs
+
+
+def test_add_at_is_the_initial_position_only(vcs_root: Path) -> None:
+    """`--at` says where a new object starts; `pull` moves it onto the branch
+    and the manifest stops carrying `at`."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    s1 = store.write(system, "main", {"v": 1})
+    s2 = store.write(system, "main", {"v": 2})
+    repo.add("db", "memory", {"system": system, "branch": "main", "at": s1})
+    repo.commit("adopt at s1")
+    assert repo.objects["db"].state == {"snapshot_id": s1}
+    assert repo.plan_commit("again").is_empty
+    assert repo.status(do_snapshot=True).objects[0].state_label == "behind"
+    assert repo.pull(["db"]).pulled["db"][1] == {"snapshot_id": s2}
+    repo.commit("onto main")
+    assert repo.objects["db"].state == {"snapshot_id": s2}
+    assert "at" not in repo.objects["db"].locator

@@ -155,7 +155,7 @@ the manifests. Rows must have tether's canonical columns:
 | `uri` | one of | becomes `locator.uri` |
 | `locator_json` | `uri` / `locator_json` | full locator as a JSON object (merged over `uri`) |
 | `policy_write`, `policy_file`, `policy_pin` | no | default from `[defaults]` in `tether.toml` |
-| `at` | no | detached base state, exactly like `add --at` |
+| `at` | no | initial position, exactly like `add --at` |
 
 Other columns are ignored (and named in the plan). The mapping from your
 registry's columns is SQL on your side, which keeps tether free of

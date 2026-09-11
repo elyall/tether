@@ -36,7 +36,14 @@ from tether.handles import (
 )
 from tether.manifest import Policy
 from tether.plan import Action, Plan
-from tether.repo import CommitResult, GcReport, PromoteReport, Repo, StatusReport
+from tether.repo import (
+    CommitResult,
+    GcReport,
+    PromoteReport,
+    Repo,
+    StatusReport,
+    short_state,
+)
 
 app = typer.Typer(
     name="tether",
@@ -184,7 +191,10 @@ def add(
     database: str | None = typer.Option(None, "--database", help="Neon/Dolt database."),
     role: str | None = typer.Option(None, "--role", help="Neon role for connections."),
     branch: str | None = typer.Option(
-        None, "--branch", help="Base branch (default main) for branching backends."
+        None,
+        "--branch",
+        help="Upstream branch (default main) for branching backends: what `pull` "
+        "reads, `promote` lands on, and `direct` writes to.",
     ),
     remote: str | None = typer.Option(
         None, "--remote", help="git remote to push pins to."
@@ -219,8 +229,8 @@ def add(
     at: str | None = typer.Option(
         None,
         "--at",
-        help="Detach the base at a native state (snapshot id, version, commit, or "
-        "tag) instead of the branch head; commit pins it and new forks from it.",
+        help="Start at this native state (snapshot id, version, commit, or tag) "
+        "instead of the branch head: the first commit pins it; `pull` moves on.",
     ),
     pick: bool = typer.Option(
         False,
@@ -231,8 +241,10 @@ def add(
     """Register an object in the working copy.
 
     The positional LOCATOR is stored as the `uri` field; named options set
-    other locator fields. Nothing is contacted until the next status/commit
-    (except with --pick, which lists history first).
+    other locator fields. The first commit pins the upstream branch head (or
+    --at / --pick: a chosen native state); after that the object keeps its pin
+    until `tether pull` or a working branch moves it. Nothing is contacted
+    until the next status/commit (except --pick, which lists history first).
     """
     repo = _repo()
     loc = _build_locator(
@@ -362,6 +374,62 @@ def remove(key: str = typer.Argument(..., help="Object key.")) -> None:
 
 
 @app.command()
+def pull(
+    keys: list[str] | None = typer.Argument(
+        None, help="Objects to pull; default: every object."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Take the current state of objects that have no working branch.
+
+    A committed object nobody here is writing to keeps its pin from commit to
+    commit; `pull` is the explicit step that moves it to what is there now --
+    the upstream branch head, the table's current version, the files' contents
+    (like fetching and rebasing). The new state is held until the next
+    `commit` pins it -- `status` shows it as `pulled` -- and a writable `open`
+    before then forks from it. Objects with a working branch, `direct`
+    objects, and objects not yet committed are skipped with a reason; an
+    immutable file that changed is refused. Nothing is written to any store;
+    `undo` reverses it.
+    """
+    repo = _repo()
+    try:
+        report = repo.pull(keys or None)
+    except TetherError as exc:
+        _fail(exc)
+    if json_out:
+        _emit(
+            {
+                "pulled": {
+                    k: {"from": a, "to": b} for k, (a, b) in report.pulled.items()
+                },
+                "up_to_date": report.up_to_date,
+                "skipped": report.skipped,
+                "retargeted": report.retargeted,
+            },
+            as_json=True,
+        )
+        return
+    for key, (before, after) in report.pulled.items():
+        note = (
+            "  (pending working branch will fork from here, not the pin)"
+            if key in report.retargeted
+            else ""
+        )
+        typer.echo(
+            f"  pulled {key}  {short_state(before)} -> {short_state(after)}{note}"
+        )
+    for key in report.up_to_date:
+        typer.echo(f"  up to date {key}")
+    for key, why in report.skipped.items():
+        typer.echo(f"  skipped {key}: {why}")
+    if not report.pulled and not report.up_to_date:
+        typer.echo("nothing to pull")
+    elif report.pulled:
+        typer.echo("commit to pin the pulled states; `tether undo` puts them back")
+
+
+@app.command()
 def status(
     snapshot: bool | None = typer.Option(
         None,
@@ -471,6 +539,13 @@ def commit(
         "--no-snapshot",
         help="Commit the cached fingerprints as-is instead of fingerprinting first.",
     ),
+    pull: bool | None = typer.Option(
+        None,
+        "--pull/--no-pull",
+        help="Also take the upstream head of every object without a working "
+        "branch, as `tether pull` would, and pin it. Default: [commit] pull in "
+        "tether.toml (off: such objects keep their pin).",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be pinned/recorded; write nothing."
     ),
@@ -507,6 +582,7 @@ def commit(
                 strict=strict,
                 force=force,
                 do_snapshot=not no_snapshot,  # commit always sees the real state
+                pull=pull,
             )
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)

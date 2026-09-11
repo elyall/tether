@@ -66,6 +66,15 @@ collect; the raw prefix was *recorded* (size, count, etag digest) and `verify`
 reports whether it still matches, but files cannot be pinned -- the line says
 so at commit time.
 
+And what later commits will *not* do: as long as nobody in this checkout
+forks a working branch for `zarr/imaging`, it keeps this pin even while
+`main` moves on -- objects you do not touch stay as committed, like files.
+When the next report should read newer inputs, `tether pull` moves them onto
+upstream and the next commit pins that (`commit --pull` in one step;
+`[commit] pull = true` for a dataset that should trail `main` on every
+commit). See
+[Positions](04-branching-and-writing.qmd#positions-what-the-next-commit-records).
+
 Read next: [Pinning](03-pinning.qmd).
 
 ## 2. Reprocess on a branch, then land it or throw it away
@@ -331,6 +340,9 @@ Then schedule two commands:
 tether status --snapshot   # fingerprints every object concurrently; exit 1 if an immutable file changed
 tether verify          # exit 1 if a pin is missing or points elsewhere
 ```
+
+(`status --snapshot` only *reports*; nothing moves. `behind` means the system
+has a newer state than the pin -- `tether pull` when you want it.)
 
 A raw file overwritten in place -- its bytes, not its timestamp (`status`
 stops at the snapshot; the exit code is 1):

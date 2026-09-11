@@ -60,6 +60,35 @@ Documentation: <https://evanlyall.com/tether/> --
 [caveats and performance](https://evanlyall.com/tether/user-guide/caveats-and-performance.html),
 plus the generated API and CLI reference.
 
+## The model
+
+A dataset is a git/jj repository with one small manifest per object. Two
+things are versioned, and they live in different places:
+
+- **Commits hold references.** Each dataset commit records, per object, an
+  exact state and -- where the system allows it -- a *pin*: a native,
+  GC-proof ref (an Icechunk tag, a protected Neon branch, a git tag) that
+  holds that state. A commit is therefore a complete, reproducible position
+  for every object at once, and `tether open KEY --rev C` reads it.
+- **The working copy holds branches.** `tether new` gives each Forkable
+  object a per-workspace *working branch* off its pin -- decided at once,
+  created lazily on the first write (`--eager` creates them now). Writes go
+  there; `main` in every system is untouched until `tether promote`. An
+  object nobody here is writing to has no branch and simply keeps its pin.
+
+`commit` fingerprints the working branches and pins their heads; it does not
+contact objects that have no branch, because their position cannot have
+moved -- like files you did not edit. When the world has moved (someone
+committed to Icechunk's `main`, a table gained a version, a directory
+changed), `tether status --snapshot` says `behind`, and `tether pull` is the
+explicit step that takes the new state for the next commit -- the dataset's
+fetch + rebase. `--at` is only where a new object starts.
+
+Everything history-shaped (commits, branches, workspaces, sharing, undo of
+the manifests) is the VCS's. What the VCS cannot see -- what tether did to
+the *stores* -- is in tether's own operation log (`tether ops`, `tether
+undo`).
+
 ## Why this exists (prior art)
 
 Every existing tool versions a single layer:
@@ -76,7 +105,7 @@ Every existing tool versions a single layer:
 
 Nothing provides unified version control *across* files + Icechunk + Postgres +
 Iceberg with pinning and forking. So tether borrows jj's working-copy model
-(fingerprint, snapshot on every command, stale-working-copy detection), DVC's
+(fingerprint, snapshot, stale-working-copy detection), DVC's
 manifests-in-VCS layout, and [Yggdrasil](https://github.com/replikativ/yggdrasil)'s
 observe-then-record shape (a workspace that watches independent systems and
 records their snapshots, rather than a store that holds the data).
@@ -111,7 +140,7 @@ tether status                       # clean / modified / drifted per object (loc
 tether commit -m "Baseline"         # pin each object natively, write the manifests, jj/git commit
 tether new main                     # start working: a writable branch per object, created on first write
 tether open db/metrics              # postgresql://... on this workspace's fork
-tether commit -m "Relabel plate1"   # pins the forks
+tether commit -m "Relabel plate1"   # pins the forks; untouched objects keep their pin (tether pull moves them)
 tether promote                      # move each system's main to the fork: fast-forward, native merge, or refuse with a recipe
 tether verify --all-history         # every pin any commit ever named still resolves
 ```

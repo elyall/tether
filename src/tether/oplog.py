@@ -180,6 +180,10 @@ class OpEntry:
             )
         if self.command in ("add", "remove"):
             return str(r.get("key", ""))
+        if self.command == "pull":
+            pulled = sorted(r.get("pulled") or {})
+            same = len(r.get("up_to_date") or [])
+            return ", ".join(pulled) + (f" (+{same} up to date)" if same else "")
         if self.command == "undo":
             return f"undid {self.undoes}: {r.get('summary', '')}"
         if self.command == "repair":

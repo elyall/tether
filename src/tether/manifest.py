@@ -360,6 +360,11 @@ class RepoConfig:
     verify_on_status: bool = False
     new_auto_fork: bool = False
     new_fork: str = "lazy"
+    commit_pull: bool = False
+    """`[commit] pull`: whether `commit` fingerprints the upstream branch of
+    objects that have no working branch and pins wherever it is, instead of
+    keeping their previous pin until `tether pull`. Off by default: unchanged
+    positions commit unchanged, as in any VCS."""
     """`[new] fork`: `lazy` (default) creates a working branch on the first
     writable `open`; `eager` creates every branch during `new`."""
     defaults: Policy = field(default_factory=Policy)
@@ -378,6 +383,7 @@ class RepoConfig:
         doc["snapshot"] = {"auto": self.snapshot_auto}
         doc["verify"] = {"on_status": self.verify_on_status}
         doc["new"] = {"auto_fork": self.new_auto_fork, "fork": self.new_fork}
+        doc["commit"] = {"pull": self.commit_pull}
         doc["defaults"] = self.defaults.to_dict()
         if self.vcs:
             doc["vcs"] = _drop_nulls(self.vcs)
@@ -394,6 +400,7 @@ class RepoConfig:
         snapshot = data.get("snapshot") or {}
         verify = data.get("verify") or {}
         new = data.get("new") or {}
+        commit = data.get("commit") or {}
         import_tbl = data.get("import") or {}
         query = import_tbl.get("query")
         fork = str(new.get("fork", "lazy"))
@@ -416,6 +423,7 @@ class RepoConfig:
             verify_on_status=bool(verify.get("on_status", False)),
             new_auto_fork=bool(new.get("auto_fork", False)),
             new_fork=fork,
+            commit_pull=bool(commit.get("pull", False)),
             defaults=Policy.from_dict(data.get("defaults")),
             vcs=dict(data.get("vcs") or {}),
             backends=dict(data.get("backends") or {}),
@@ -440,7 +448,10 @@ class WorkspaceState:
     created on the first writable ``open``). ``fork_points`` maps object key ->
     the state its working branch was created from; ``promote`` compares the
     base branch against it to tell a fast-forward from a divergence.
-    ``last_snapshot`` caches the most recent fan-out fingerprints.
+    ``pulled`` maps object key -> an upstream state taken by ``pull`` that the
+    next ``commit`` will pin in place of the previous one (the object's
+    position moved without a working branch). ``last_snapshot`` caches the
+    most recent fan-out fingerprints.
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -448,6 +459,7 @@ class WorkspaceState:
     working_refs: dict[str, str] = field(default_factory=dict)
     pending_forks: dict[str, str] = field(default_factory=dict)
     fork_points: dict[str, State] = field(default_factory=dict)
+    pulled: dict[str, State] = field(default_factory=dict)
     last_snapshot: dict[str, State] = field(default_factory=dict)
     last_snapshot_at: str | None = None
 
@@ -468,6 +480,8 @@ class WorkspaceState:
             doc["base_states"] = {
                 k: _drop_nulls(v) for k, v in self.base_states.items()
             }
+        if self.pulled:
+            doc["pulled"] = {k: _drop_nulls(v) for k, v in self.pulled.items()}
         if self.last_snapshot:
             doc["last_snapshot"] = {
                 k: _drop_nulls(v) for k, v in self.last_snapshot.items()
@@ -487,6 +501,7 @@ class WorkspaceState:
             fork_points={
                 str(k): dict(v) for k, v in (data.get("fork_points") or {}).items()
             },
+            pulled={str(k): dict(v) for k, v in (data.get("pulled") or {}).items()},
             last_snapshot={
                 str(k): dict(v) for k, v in (data.get("last_snapshot") or {}).items()
             },

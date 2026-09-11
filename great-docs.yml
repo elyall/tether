@@ -44,7 +44,7 @@ cli:
       contents: [status, snapshot, diff, log, verify]
     - title: Record and branch
       desc: Pin state into commits and fork writable branches.
-      contents: [commit, new, open, restore, promote]
+      contents: [commit, pull, new, open, restore, promote]
     - title: Maintenance
       desc: Reclaim native refs, and see or reverse what tether did.
       contents: [gc, abandon, forget-workspace, ops, undo, repair, upgrade]
@@ -74,6 +74,7 @@ reference:
         - GcReport
         - AbandonReport
         - ForgetWorkspaceReport
+        - PullReport
         - PromoteReport
         - UndoReport
         - UndoToReport
@@ -157,7 +158,8 @@ reference:
 
 skill:
   gotchas:
-    - "`tether status` is local by default and shows the last snapshot with its age; `tether status --snapshot` (or `tether snapshot`) fingerprints every object. `commit` and `verify` always fingerprint."
+    - "`tether status` is local by default and shows the last snapshot with its age; `tether status --snapshot` (or `tether snapshot`) fingerprints every object. `verify` always fingerprints; `commit` fingerprints working branches and `direct` objects only; everything else keeps its pin until `tether pull`."
+    - "An object with no working branch keeps its pin from commit to commit; `commit` does not contact it and `status --snapshot` says `behind` once upstream moved. `tether pull [KEY]...` takes the upstream head (held until the next commit pins it; `undo` drops it); `commit --pull` or `[commit] pull = true` does it on every commit. This holds for files and branch-less tables too; only `direct` objects and never-committed objects are fingerprinted on every commit."
     - "Run `tether new` before writing: writable handles are refused while the workspace is stale or has no working ref. Forks are lazy: the first writable `open` creates the branch (`--eager` creates them during `new`; `--pin record` objects always fork during `new`)."
     - "A `file` object is Observed unless registered with `--file versioned` on a versioning-enabled bucket; its committed state cannot be re-read later."
     - "Neon pins are child branches: a working branch cannot be deleted while its pins exist, and `commit` refuses while writers are active (`--force` overrides)."
@@ -174,5 +176,6 @@ skill:
     - "Preview store writes with `--dry-run` on every command that makes them (`commit`, `new`, `gc`, `promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace`); save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Retire a losing workspace with `tether forget-workspace` *before* `tether abandon --gc` of its commit; the other order leaves branches holding unpinned writes that only `--force-prune` removes."
     - "Datasets from before 0.1.0a8 need `tether upgrade` (`--dry-run` first): it renames every pin and branch into the dataset's namespace and rewrites history to match, so every clone must re-sync afterwards. The v3 migration (content-hashed file states, `write = \"direct\"`) touches only the working tree."
+    - "To hold an input still under a long analysis, do nothing: it keeps its pin until you `tether pull` it. To trail `main` on every commit, set `[commit] pull = true`."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."
     - "For registries, run `tether publish` after each `tether commit` (or `tether export` for a file); join `objects.uri` to the catalog's URI column and `objects.commit_id` to whatever column records the VCS commit a job read. `tether import` only changes what is tracked; commit afterwards."

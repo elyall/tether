@@ -20,7 +20,11 @@ tether add db/metrics   --kind neon --project-id prj-9f2 --database metrics --ro
 tether add raw/plate1   --kind file /mnt/instruments/plate1/
 ```
 
-`add` writes manifests only; the systems are first contacted by `status`:
+`add` writes manifests only; the systems are first contacted by `status`.
+`--branch main` (the default) names the object's *upstream*: the first commit
+pins its head, and later `tether pull` moves the object to wherever it is
+then. `--at SNAPSHOT` starts from a chosen state instead (see
+[Positions](04-branching-and-writing.qmd#positions-what-the-next-commit-records)):
 
 ```bash
 tether status
@@ -85,7 +89,9 @@ new refs are created.
 ## Pin again after the data moves
 
 Some time later the imaging repository gets a new commit on `main` and the
-metrics database has been written to:
+metrics database has been written to. Nobody in this checkout forked a
+working branch, so the objects still sit at their pins; a fan-out shows
+upstream has moved past them:
 
 ```bash
 tether status --snapshot       # fingerprint now; plain `status` shows the last snapshot
@@ -93,12 +99,17 @@ tether status --snapshot       # fingerprint now; plain `status` shows the last 
 
 ```
 dataset 0f2e9c7a11b3
-  modified  db/metrics  [neon/forkable]
+    behind  db/metrics  [neon/forkable]
      clean  raw/plate1  [file/observed] unrecoverable
-  modified  zarr/imaging  [icechunk/forkable]
+    behind  zarr/imaging  [icechunk/forkable]
 ```
 
+`commit` alone would change nothing -- an object you did not touch keeps its
+pin, as an untouched file keeps its contents. `pull` takes upstream, then
+commit pins it (`commit --pull` does both):
+
 ```bash
+tether pull
 tether commit -m "Re-segmented plate1; metrics through 2026-09-04"
 ```
 
@@ -195,10 +206,10 @@ objects with `--file versioned`, or put them in lakeFS.
 
 ## Drift
 
-Because tether snapshots on every command, drift surfaces the next time you
-touch the dataset. The directory was registered with the default
-`--file immutable`, so if a file under `/mnt/instruments/plate1/` changes
-(its *content* -- a `touch` is not a change):
+`status --snapshot` fingerprints everything, so drift surfaces the next time
+you ask. The directory was registered with the default `--file immutable`, so
+if a file under `/mnt/instruments/plate1/` changes (its *content* -- a `touch`
+is not a change):
 
 ```bash
 tether status --snapshot
@@ -211,9 +222,10 @@ re-register with acceptance to record the new state
 
 That is deliberate: an "immutable" input silently changing is the worst kind of
 drift. Either the change is legitimate (`tether remove raw/plate1` and `add` it
-again, then commit) or something wrote where it should not have. Forkable
-objects drift too, but benignly -- their branch moved, `status` says `modified`,
-and the next commit pins the new state.
+again, then commit) or something wrote where it should not have. Other objects
+drift benignly: a system that moved past the pin shows `behind` and waits for
+`pull`; a working branch that moved shows `modified` and is pinned by the next
+commit.
 
 ## Verify
 
@@ -269,5 +281,5 @@ covered in [Reclaiming storage](05-reclaiming-storage.qmd).
 - `open -r <rev>` / `TETHER_REV` resolve any object read-only at that commit.
 - Observed objects record state but cannot be re-read; use versioned storage
   or lakeFS if you need to.
-- `status` catches drift on every command; `verify` confirms pins still hold;
+- `status --snapshot` catches drift; `verify` confirms pins still hold;
   `gc` releases pins no commit references.

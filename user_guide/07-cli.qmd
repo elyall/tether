@@ -9,11 +9,12 @@ codes, and environment.
 
 ```
 tether init [PATH]
-tether add KEY [LOCATOR] --kind KIND [locator options] [--set k=v]... [--write fork|direct] [--file immutable|versioned] [--pin native|record]
+tether add KEY [LOCATOR] --kind KIND [--branch BRANCH] [--at STATE | --pick] [locator options] [--set k=v]... [--write fork|direct] [--file immutable|versioned] [--pin native|record]
 tether remove KEY
 tether status [--snapshot | --no-snapshot]
 tether snapshot
-tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-run | --plan FILE]
+tether pull [KEY]...
+tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--pull | --no-pull] [--dry-run | --plan FILE]
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
 tether new [REV] [--keep] [--eager | --lazy] [--discard] [--dry-run | --plan FILE | --from-plan FILE]
 tether open KEY [-r REV] [--read-only | --writable]
@@ -77,14 +78,14 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | Option | Locator field | Typical backends |
 | --- | --- | --- |
 | `LOCATOR` (positional) | `uri` | file, icechunk, delta, lance, ducklake (`metadata`) |
-| `--branch` | `branch` | icechunk, neon, iceberg, lance, lakefs, dolt |
+| `--branch` | `branch` | icechunk, neon, iceberg, lance, lakefs, dolt: the object's *upstream* (default `main`) -- what the first commit pins, `pull` reads, `promote` lands on, and `direct` writes to |
 | `--project-id`, `--database`, `--role` | same | neon; `--database` also dolt |
 | `--remote` | `remote` | git (push pins to a remote) |
 | `--region` | `region` | file (object stores), icechunk, delta |
 | `--repository`, `--prefix` | same | lakefs |
 | `--host`, `--port` | same | dolt |
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
-| `--at ID` / `--pick` | `at` | detached base: snapshot id / version / commit / tag (all but file, neon); `--pick` chooses from `log` interactively |
+| `--at ID` / `--pick` | `at` | initial position: snapshot id / version / commit / tag (all but file, neon) that the first commit pins instead of the branch head; `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
 
 Policy options: `--write fork|direct` (fork a per-workspace branch on `new`, or
@@ -117,13 +118,35 @@ enough to run constantly. `--snapshot` fans out and fingerprints every object
 first: one metadata round-trip per system in parallel, so wall time is the
 slowest one (a suspended Neon compute has to wake). A workspace with no
 snapshot yet always takes one. `[snapshot] auto = true` makes every `status`
-fingerprint; `--no-snapshot` then wins. `commit` and `verify` always
-fingerprint regardless -- they must see the real state.
+fingerprint; `--no-snapshot` then wins. `verify` always fingerprints.
+
+States: `new` (no commit yet), `modified` (a working branch or `direct`
+object differs from the commit), `pulled` (`pull` took a state the next
+commit will pin), `behind` (no working branch, and the fan-out saw the
+system past the committed state -- `pull` to take it), `clean`, `error`. A commit refreshes the cache only for the objects it
+fingerprinted, so an object a fan-out found `behind` still reads `behind`
+after an unrelated commit. See
+[Positions](04-branching-and-writing.qmd#positions-what-the-next-commit-records).
+
+## What `pull` does
+
+For each named object (default all) that has a committed state and no
+working branch: fingerprint what is there now -- the upstream branch head
+(`locator.branch`, ignoring `at`) for branching systems, the current version
+or contents for the rest -- and, if it differs from the committed state, hold
+it in the workspace for the next `commit` to pin. Objects with a working
+branch, `direct` objects, and objects not yet committed are skipped with a
+reason; a `file = "immutable"` object that changed is refused. Nothing is
+written to any store; the op is logged and `undo` drops the held states.
+`commit --pull` (or `[commit] pull = true`) folds this into every commit.
 
 ## What `commit` does
 
-1. Snapshot (unless `--no-snapshot`), then quiescence checks for backends that
-   need them (Neon refuses while writers are active; `--force` skips).
+1. Snapshot the objects whose position can move (working branch, `direct`,
+   or never committed) unless `--no-snapshot`; with `--pull`, every object.
+   Objects with no working branch keep their pin, or take the state `pull`
+   held. Then quiescence checks for backends that need them
+   (Neon refuses while writers are active; `--force` skips).
 2. For each object whose state changed: Pinnable/Forkable backends create the
    native ref `tether.<pin_id>`; Addressable and `--pin record` objects record
    the state; Observed backends record it with `recoverable = false`
@@ -376,8 +399,8 @@ handle is read-only at that commit's pinned (or recorded Addressable) state.
 
 Lists an object's native history newest first: id, timestamp, message, and
 the branches, tags, and tether pins (`tether.<id>`) pointing at each entry.
-For a registered object it starts at the working ref (or the detached `at`
-base); `--ref` starts elsewhere (a branch, tag, or id). With `--kind`, the
+For a registered object it starts at the working ref (or the `at` it was
+registered at); `--ref` starts elsewhere (a branch, tag, or id). With `--kind`, the
 positional is a locator for an unregistered object, so you can browse before
 `add`. Ids are valid `--at` values.
 
