@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -527,6 +528,36 @@ def test_undo_is_journaled_before_it_acts(vcs_root: Path) -> None:
     assert (
         entries[0].undoes == report.op.id and entries[0].pre["target"] == report.op.id
     )
+    # Completing the undo and marking its target undone is one record.
+    assert entries[1].id == report.op.id and entries[1].undone_by == entries[0].id
+    lines = [
+        json.loads(line)
+        for line in (vcs_root / ".tether" / "ops.jsonl").read_text().splitlines()
+    ]
+    done = [obj for obj in lines if obj.get("done") == entries[0].id]
+    assert len(done) == 1 and done[0]["undone"] == report.op.id
+    assert not any("undone" in obj and "done" not in obj for obj in lines)
+
+
+def test_a_refused_undo_is_a_failed_attempt_not_an_interrupted_one(
+    vcs_root: Path,
+) -> None:
+    """`undo` refusing (writes it would have to discard) must not leave a
+    started entry behind: nothing was touched, so the attempt is recorded as
+    failed and the log has no incomplete operation."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"unsaved": 1})
+    with pytest.raises(TetherError, match="discard"):
+        repo.undo()  # the `new` -- its branch now holds writes
+    assert not repo.incomplete_ops()
+    newest = repo.ops()[0]
+    assert newest.command == "undo" and "discard" in newest.result["failed"]
+    assert repo.ops()[1].command == "new" and repo.ops()[1].undone_by is None
 
 
 def test_saved_gc_plan_is_bound_to_history(vcs_root: Path) -> None:

@@ -248,10 +248,12 @@ def read_ops(root: Path) -> list[OpEntry]:
             continue  # a torn final line from an interrupted append
         if "command" in obj:
             entries.append(OpEntry.from_dict(obj))
-        elif "undone" in obj:
-            marks[str(obj["undone"])] = str(obj.get("by", ""))
         elif "done" in obj:
             done[str(obj["done"])] = obj
+            if obj.get("undone"):
+                marks[str(obj["undone"])] = str(obj.get("by", ""))
+        elif "undone" in obj:
+            marks[str(obj["undone"])] = str(obj.get("by", ""))
     for e in entries:
         if e.id in marks:
             e.undone_by = marks[e.id] or None
@@ -284,10 +286,19 @@ def mark_done(
     op_id: str,
     result: dict[str, Any],
     pre: dict[str, Any] | None = None,
+    *,
+    undone: str | None = None,
 ) -> None:
     """Complete a started entry: what happened, and anything `undo` learnt
-    only while the operation ran (branch heads it replaced, for one)."""
-    _append_line(root, {"done": op_id, "result": result, "pre": dict(pre or {})})
+    only while the operation ran (branch heads it replaced, for one). An undo
+    names the entry it reversed in the same record, so completing the undo
+    and marking its target undone is one append -- there is no state where
+    the undo is done but its target still counts as undoable."""
+    line: dict[str, Any] = {"done": op_id, "result": result, "pre": dict(pre or {})}
+    if undone is not None:
+        line["undone"] = undone
+        line["by"] = op_id
+    _append_line(root, line)
 
 
 def mark_undone(root: Path, op_id: str, by: str) -> None:

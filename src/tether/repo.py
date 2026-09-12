@@ -88,7 +88,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.migrations import UpgradeReport, pending
-from tether.oplog import OpEntry, append_op, mark_done, mark_undone, read_ops
+from tether.oplog import OpEntry, append_op, mark_done, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
@@ -1068,13 +1068,18 @@ class Repo:
         *,
         result: Mapping[str, Any] | None = None,
         pre: Mapping[str, Any] | None = None,
+        undone: str | None = None,
     ) -> OpEntry:
-        """Complete a journaled operation with its result (and late `pre`)."""
+        """Complete a journaled operation with its result (and late `pre`).
+
+        `undone` names the entry this one reversed; the mark rides in the same
+        record, so it cannot be lost between two appends.
+        """
         entry.result = dict(result or {})
         if pre:
             entry.pre = {**entry.pre, **dict(pre)}
         entry.status = "done"
-        mark_done(self.root, entry.id, entry.result, dict(pre or {}))
+        mark_done(self.root, entry.id, entry.result, dict(pre or {}), undone=undone)
         return entry
 
     def incomplete_ops(self) -> list[OpEntry]:
@@ -3750,8 +3755,55 @@ class Repo:
                 f"`tether promote KEY...`, or write those systems' base branches "
                 "by hand on the trunk (see the refusals) and promote again"
             )
+        if keys:
+            self._refuse_partial_scopes(plan, set(selected), ("fast-forward", "merge"))
         self._share_scope_writes(plan, ("fast-forward", "merge"))
         return plan
+
+    def _refuse_partial_scopes(
+        self, plan: Plan, keys: set[str], ops: tuple[str, ...]
+    ) -> None:
+        """A write to a native branch moves every object writing through it;
+        naming only some of them is refused, with the rest to name."""
+        for i, a in enumerate(plan.actions):
+            if a.op not in ops:
+                continue
+            m = self.objects.get(a.key)
+            if m is None:
+                continue
+            scope = (m.kind, self.backend_for(m.kind).branch_scope(m.locator))
+            source = a.params.get("source") or {}
+            branch = source.get("ref")
+            if not branch:
+                continue  # a pin or state source names no shared branch
+            unnamed = sorted(
+                k
+                for k, other in self.objects.items()
+                if k != a.key
+                and k not in keys
+                and (
+                    other.kind,
+                    self.backend_for(other.kind).branch_scope(other.locator),
+                )
+                == scope
+                and (
+                    self.workspace.working_refs.get(k) == branch
+                    or self.workspace.pending_forks.get(k) == branch
+                )
+            )
+            if unnamed:
+                plan.actions[i] = Action(
+                    "refuse",
+                    a.key,
+                    a.kind,
+                    target=a.target,
+                    detail=(
+                        f"{branch} is also {', '.join(unnamed)}'s working branch; "
+                        f"landing {a.key} alone would land theirs too -- name them: "
+                        f"`tether promote {' '.join(sorted(keys | set(unnamed)))}`"
+                    ),
+                    params={"locator": a.params.get("locator", {})},
+                )
 
     def _share_scope_writes(self, plan: Plan, ops: tuple[str, ...]) -> None:
         """Collapse the writes of one native branch to a single action.
@@ -4578,22 +4630,33 @@ class Repo:
                 pre={"workspace": self.workspace.to_toml(), "target": target.id},
                 undoes=target.id,
             )
-            handler(target, report, discard)
-            result = {
-                "summary": f"{target.command} {target.summary()}",
-                "restored": list(report.restored),
-                "irreversible": list(report.irreversible),
-                "skipped": list(report.skipped),
-            }
+
+            def summary() -> dict[str, Any]:
+                return {
+                    "summary": f"{target.command} {target.summary()}",
+                    "restored": list(report.restored),
+                    "irreversible": list(report.irreversible),
+                    "skipped": list(report.skipped),
+                }
+
+            try:
+                handler(target, report, discard)
+            except TetherError as exc:
+                if not report.restored:
+                    # Refused before touching anything (writes to discard, a
+                    # moved working copy): a failed attempt, not an interrupted
+                    # one. Something restored, then an error: leave it started.
+                    self._end_op(entry, result={**summary(), "failed": str(exc)})
+                raise
             if not report.restored and report.irreversible:
-                self._end_op(entry, result={**result, "failed": "nothing restored"})
+                self._end_op(entry, result={**summary(), "failed": "nothing restored"})
                 raise TetherError(
                     f"cannot undo {target.id} ({target.command}):\n"
                     + "\n".join(f"  {line}" for line in report.irreversible)
                 )
-            self._end_op(entry, result=result)
+            # Completing the undo and marking its target undone is one record.
+            self._end_op(entry, result=summary(), undone=target.id)
             report.undo_id = entry.id
-            mark_undone(self.root, target.id, entry.id)
             return report
 
     def undo_to(self, op_id: str, *, discard: bool = False) -> UndoToReport:
