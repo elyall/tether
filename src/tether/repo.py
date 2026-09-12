@@ -39,6 +39,7 @@ from tether.errors import (
     ImmutableObjectModified,
     MergeConflict,
     MultiObjectError,
+    PinDriftError,
     StalePlanError,
     StaleWorkingCopyError,
     TetherError,
@@ -2157,22 +2158,17 @@ class Repo:
         """Create working branch `name` from a manifest's pin (or recorded state)."""
         backend = self.backend_for(m.kind)
         assert m.state is not None
-        gone = ""
-        if m.pin is not None:
-            report = backend.verify(m.locator, m.state, m.pin, deep=False)
-            if report.status is not VerifyStatus.MISSING:
-                return backend.fork(m.locator, m.pin, name)
-            # The pin is gone (`verify` says so; `repair` may not be able to
-            # bring it back). The state it named is still a fork point while
-            # the store has it, as it is for `open`.
-            eff = effective_capabilities(backend, m.locator, m.policy)
-            if Capability.ADDRESSABLE not in eff:
-                raise TetherError(f"pin missing: {report.message}")
-            gone = f"pin missing ({report.message}) and "
+        eff = effective_capabilities(backend, m.locator, m.policy)
+        source = self._pinned_source(m, backend, eff)
+        if isinstance(source, Pin):
+            return backend.fork(m.locator, source, name)
+        # No usable pin: the recorded state is the fork point while the store
+        # still has it (between a deletion and `repair`, or a record-only pin).
         report = backend.verify(m.locator, m.state, None, deep=True)
         if report.status is VerifyStatus.MISSING:
+            gone = "" if m.pin is None else "pin missing and "
             raise TetherError(f"{gone}recorded state is gone: {report.message}")
-        return backend.fork(m.locator, m.state, name)
+        return backend.fork(m.locator, source, name)
 
     def _forget_working_state(self, key: str) -> None:
         """Drop everything this workspace knows about `key`'s working branch."""
@@ -2358,23 +2354,59 @@ class Repo:
                 return backend.open(m.locator, state, read_only=True)
         return backend.open(m.locator, working_ref, read_only=True)
 
-    @staticmethod
-    def _open_pinned(
-        m: ObjectManifest, backend: ObjectBackend, eff: Capability
-    ) -> Handle:
-        """Open read-only at the pin; if its native ref is gone, at the state.
+    def _pinned_source(
+        self, m: ObjectManifest, backend: ObjectBackend, eff: Capability
+    ) -> Pin | State:
+        """What a committed object is read or forked from: its pin, checked.
 
-        A pin someone deleted (`verify` says `missing`) does not make the
-        recorded state unreadable while the store still has it: an
-        Addressable backend opens it by the state the manifest recorded.
+        The manifest names both a state and the native ref that was created
+        for it. Before the ref is trusted, `verify` confirms it still points
+        at that state:
+
+        - OK: the pin (exact, and the retention hold).
+        - MISSING (someone deleted the ref): the recorded state, if the
+          backend can address it -- the store may still hold it, as it does
+          between a deletion and `repair`.
+        - DRIFTED (someone moved the ref): refused. Reading or forking a
+          drifted pin would hand back the wrong data under a commit's name.
+
+        Raises:
+            PinDriftError: The pin points at a different state.
+            BackendError: The pin is gone and the backend cannot address the
+                recorded state.
         """
-        assert m.pin is not None
-        try:
-            return backend.open(m.locator, m.pin, read_only=True)
-        except BackendError:
-            if Capability.ADDRESSABLE in eff and m.state is not None:
-                return backend.open(m.locator, m.state, read_only=True)
-            raise
+        assert m.state is not None
+        if m.pin is None:
+            if Capability.ADDRESSABLE in eff:
+                return dict(m.state)
+            raise CapabilityError(
+                f"{m.key!r} has no pin and {m.kind} cannot address a recorded state",
+                key=m.key,
+                kind=m.kind,
+            )
+        report = backend.verify(m.locator, m.state, m.pin, deep=False)
+        if report.status is VerifyStatus.DRIFTED:
+            raise PinDriftError(
+                f"pin {m.pin.ref} of {m.key!r} no longer names the committed state "
+                f"({report.message}); `tether verify` reports it and `repair` never "
+                "overwrites a drifted pin -- move the ref back by hand, or use a "
+                "commit whose pins hold",
+                key=m.key,
+                kind=m.kind,
+            )
+        if report.status is VerifyStatus.MISSING:
+            if Capability.ADDRESSABLE in eff:
+                return dict(m.state)
+            raise BackendError(f"pin missing: {report.message}", key=m.key, kind=m.kind)
+        return m.pin
+
+    def _open_pinned(
+        self, m: ObjectManifest, backend: ObjectBackend, eff: Capability
+    ) -> Handle:
+        """Open read-only at the committed state (see `_pinned_source`)."""
+        return backend.open(
+            m.locator, self._pinned_source(m, backend, eff), read_only=True
+        )
 
     def _open_at_rev(self, key: str, rev: str) -> Handle:
         objects = self._objects_at(self.vcs.resolve(rev))
@@ -3003,15 +3035,26 @@ class Repo:
                     plan.notes.append(f"{key}: nothing committed at {rev}")
                     continue
                 target_state = m.state
-                if m.pin is not None:
-                    source = {"pin": m.pin.to_dict()}
-                elif Capability.ADDRESSABLE in eff:
-                    source = {"state": m.state}
-                else:
-                    plan.notes.append(
-                        f"{key}: not recoverable at {rev}; cannot promote"
+                try:
+                    src = self._pinned_source(m, backend, eff)
+                except PinDriftError as exc:
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            m.kind,
+                            target=str(m.locator.get("branch", "main")),
+                            detail=str(exc),
+                            params={"locator": dict(m.locator)},
+                        )
                     )
                     continue
+                except BackendError as exc:
+                    plan.notes.append(f"{key}: not recoverable at {rev} ({exc})")
+                    continue
+                source = (
+                    {"pin": src.to_dict()} if isinstance(src, Pin) else {"state": src}
+                )
                 fork_point = None
             else:
                 working_ref = self._working_ref(key)

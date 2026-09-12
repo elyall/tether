@@ -139,11 +139,21 @@ def test_gc_removes_orphan_pin(vcs_root: Path) -> None:
 
 
 def _someone_else_commits(repo: Repo, key: str, state: dict) -> None:
-    """Rewrite `key`'s committed manifest as another workspace's commit would."""
-    from tether.manifest import write_object
+    """Rewrite `key`'s committed manifest as another workspace's commit would:
+    a new state *and* a pin that names it (a manifest whose pin points at a
+    different state than it records is drift, and refused)."""
+    from tether.manifest import compute_pin_id, write_object
 
     m = repo.objects[key]
-    write_object(repo.root, m.with_pin(state=state, pin=m.pin, recoverable=True))
+    backend = repo.backend_for(m.kind)
+    pin = backend.pin(
+        m.locator,
+        state,
+        compute_pin_id(
+            m.kind, backend.identity(m.locator), state, repo.config.dataset_id
+        ),
+    )
+    write_object(repo.root, m.with_pin(state=state, pin=pin, recoverable=True))
 
 
 def test_stale_working_copy_blocks_writes(vcs_root: Path) -> None:
@@ -400,6 +410,43 @@ def test_commit_rollback_spares_pins_it_did_not_create(
     assert pin_a.ref in store.system(a).tags
     assert not store.system(c).tags
     assert all(r.ok for r in Repo.find(vcs_root).verify().values() if r)
+
+
+def test_a_drifted_pin_is_never_read_or_forked(vcs_root: Path) -> None:
+    """A tag moved by hand must not hand back the wrong data under a commit's
+    name: `open --rev`, `new` from that commit, and `promote --rev` all refuse
+    with PinDriftError, while a *deleted* tag still falls back to the state."""
+    from tether.errors import PinDriftError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 1})
+    c1 = repo.commit("v1").vcs_commit
+    pin = repo.objects["db"].pin
+    assert c1 is not None and pin is not None
+    s1 = store.system(system).branches["main"]
+    s2 = store.write(system, "main", {"v": 2})
+
+    # Move the tag: it now names s2 while the manifest at c1 says s1.
+    store.system(system).tags[pin.ref] = s2
+    with pytest.raises(PinDriftError, match="no longer names the committed state"):
+        repo.open("db", rev=c1)
+    with pytest.raises(TetherError, match="no longer names the committed state"):
+        repo.new(c1, bookmark="from-c1", eager=True)
+    repo.new(bookmark="work", eager=False)  # lazy: nothing forked yet
+    (action,) = [a for a in repo.plan_promote(rev=c1).actions if a.op == "refuse"]
+    assert "no longer names the committed state" in action.detail
+
+    # Put it back: everything works again, and reads by pin are exact.
+    store.system(system).tags[pin.ref] = s1
+    handle = repo.open("db", rev=c1)
+    assert isinstance(handle, MemoryHandle) and handle.read() == {"v": 1}
+
+    # Delete it: the recorded state is still addressable, so reads fall back.
+    del store.system(system).tags[pin.ref]
+    handle = repo.open("db", rev=c1)
+    assert isinstance(handle, MemoryHandle) and handle.read() == {"v": 1}
 
 
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
