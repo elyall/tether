@@ -88,6 +88,10 @@ Optional members:
   engine forks one branch per scope under a bookmark (members `share` it)
   and collects `gc` references per namespace. Both default to the canonical
   identity.
+- `state_addressable(locator, state) -> bool` (default `True`) when an
+  Addressable backend can produce a state that nonetheless has no coordinate
+  to reopen it by (a `file` object in a bucket without versioning has no
+  `version_id`). `commit` records such a state `recoverable = false`.
 - `check_quiescence(locator, working_ref)` for `NEEDS_QUIESCENCE` backends;
   raise `BackendError` if writers are active.
 - `listing(locator, state) -> str | None` and

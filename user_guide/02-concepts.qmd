@@ -150,10 +150,15 @@ The re-check extends to every ref a plan will delete or reset: the plan
 records the head it saw, and apply reads the head again immediately before
 the step. A branch that gained writes between plan and apply -- a saved gc
 plan applied the next day, a slow `promote` -- stops the whole apply with
-`StalePlanError` instead of losing them. A gc plan is also bound to the
-history it was planned against (a commit made since may reference a pin it
-would release), and a lazy fork on first writable `open` resets an existing
-branch only onto the head `new` reviewed and agreed to reset.
+`StalePlanError` instead of losing them, and the check runs over the whole
+plan before the first action, so a stale plan does nothing at all. A gc plan
+is also bound to a digest of *every* visible commit -- a bookmark committed in
+another workspace may reference a pin it would release, without this
+checkout's head moving. `promote --rev` verifies that a pin source still names
+the reviewed state, `new` refuses when it cannot list a system's branches
+(not knowing is not the same as absent), and a lazy fork on first writable
+`open` resets an existing branch only onto the head `new` reviewed and agreed
+to reset.
 
 ## The operation log
 
@@ -178,7 +183,10 @@ journal entries and `workspace.toml` writes.
 manifest write, a listing, the VCS commit -- the pins this commit created
 are released (never a pin an earlier commit made and this one merely
 reused), the manifests and listings it wrote are put back, and the journal
-records the attempt as failed and rolled back.
+records the attempt as failed and rolled back. The one thing it never undoes
+is a dataset commit that landed: if the adapter fails *after* writing the
+commit, history already names the pins, so the operation completes as a
+commit that succeeded and the trailing error is reported.
 
 `tether undo [ID]` reverses an entry *where the store still allows it* and
 says exactly what it could not reverse:

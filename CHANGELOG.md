@@ -37,6 +37,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   experimental kind.
 - `ObjectBackend.LOCAL_PATH_KEYS`: locator keys that may hold a local path.
   The git backend runs the shared conformance suite.
+- `ObjectBackend.state_addressable(locator, state)`: whether a *particular*
+  recorded state can be reopened (the `file` backend says no for a remote
+  object without a version id); `commit` records such a state
+  `recoverable = false` and says why in the plan.
+- `VcsAdapter.history_digest()`: a digest of every visible commit id, across
+  workspaces and bookmarks; `gc` plans bind to it.
 
 ### Changed
 
@@ -63,11 +69,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refork (the branch must still be missing). A lazy fork resets an existing
   branch only onto the head `new` reviewed (`workspace.toml`
   `pending_resets`), reuses a branch already at the pin or one a scope
-  sibling writes through, and otherwise refuses.
+  sibling writes through, and otherwise refuses. `gc` plans are bound to the
+  digest of *all* visible history (a commit made in another workspace can
+  reference a pin the plan would release) and check every branch head before
+  the first action, so a stale plan does nothing at all; `promote --rev`
+  verifies a pin source still names the reviewed state; a fork `new` planned
+  as fresh is re-checked for absence at apply, and `new` refuses outright
+  when the backend cannot list branches (unknown is not absent).
 - **`commit` compensates as a unit.** A failure after the pins -- manifest
   write, listing, VCS commit -- releases only the pins this commit created
   (never a reused one), restores the manifests and listings it wrote, and
-  journals the attempt as failed and rolled back.
+  journals the attempt as failed and rolled back. If the VCS commit *landed*
+  before the adapter raised, nothing is rolled back: history names the pins,
+  so the operation completes as a commit that succeeded and the trailing
+  error is surfaced (`failed_after_commit`).
+- **`restore` and `promote` are closed over the branch scope.** Restoring one
+  of several keys that write through one branch is refused (the message names
+  the siblings to include); with all named, the branch is reset once and the
+  siblings `share` it. `promote` fast-forwards a shared branch once instead of
+  once per key.
+- The writer lock also covers `add`, `remove`, `set`, `import`, `abandon`,
+  `forget-workspace`, and `upgrade`; `undo` journals before it acts (a refused
+  undo is recorded as failed).
+- `promote`'s guarantee is stated as it is: a bookmark is *planned* whole or
+  not at all; once applying, each system's fast-forward stands on its own.
 - `set --pin record` on a pinned object takes effect at the next commit (the
   pin is dropped; `gc` releases the tag once no commit names it); `--pin
   native` creates one again. Before, the "unchanged" shortcut kept the pin.
@@ -107,7 +132,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   differed.
 - Relative paths in locators were resolved against each command's working
   directory, so the same manifest addressed different files from different
-  directories.
+  directories. The git backend left the CLI's positional `uri` relative.
+- The v4 migration rewrote a relative locator before moving a misplaced
+  manifest, leaving two files for one key.
+- `--file versioned` recorded a state with no version id as recoverable
+  although `open` could not read it back.
+- The wheel smoke test in `publish.yml` installed the wheel without the `cli`
+  extra the entry point needs.
 
 ## [0.1.0a9] - 2026-09-11
 
