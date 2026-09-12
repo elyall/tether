@@ -109,8 +109,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `undo` completes atomically: the undone mark rides in the done record (one
   append), and a handler refusal that touched nothing ends the entry as a
   failed attempt rather than leaving it started.
-- `promote KEY...` refuses a subset that leaves unnamed siblings writing
-  through the same branch, as `restore` does.
+- `promote KEY...` refuses a subset that leaves unnamed siblings whose base
+  branch the write would move, whatever the source (a working ref, or a pin
+  by `--rev`), as `restore` does.
+- `promote` fast-forwards from the *state* the plan reviewed, not the source
+  ref's current head: what lands is what was shown, whatever the timing. The
+  inline convenience methods (`commit`, `new`, `promote`, `restore`, `gc`,
+  `import`) plan and apply under one checkout lock, and `new`/`promote`/
+  `restore`/`import` re-verify at apply (`commit` does not need to: a pin
+  names the captured state).
+- `snapshot` and `pull` run whole under the checkout lock: which refs to read
+  is decided from the workspace as it is on disk, not from the one a
+  long-lived `Repo` loaded.
+- `new` writes `workspace.toml` -- bookmark set, every fork pending with the
+  reset it agreed to -- right after moving the VCS and before the first store
+  write, so a process killed in the fork fan-out leaves exactly a lazy `new`;
+  a fork that fails in the fan-out stays pending instead of being forgotten.
 - `gc`: a branch that moved *after* the preflight (a race, not a stale plan)
   is kept and reported while the rest of the plan finishes; a `--force-prune`
   plan that could not read a head refuses at apply if the head reads now.
@@ -159,9 +173,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory, so the same manifest addressed different files from different
   directories. The git backend left the CLI's positional `uri` relative.
 - The v4 migration rewrote a relative locator before moving a misplaced
-  manifest, leaving two files for one key; and it recorded v4 after
-  reporting a manifest collision (it now stops, like v3 on a failed
-  re-fingerprint).
+  manifest, leaving two files for one key; it recorded v4 after reporting a
+  manifest collision (it now stops, like v3 on a failed re-fingerprint); and
+  a collision found half-way left earlier moves in a dirty tree that blocked
+  the rerun (every destination is checked before anything moves).
+- `snapshot` from a stale `Repo` cached one bookmark's states under another's
+  name: it chose which refs to read before the lock refreshed the workspace.
 - `snapshot` from a `Repo` constructed before another process moved the
   checkout to a bookmark rewrote `workspace.toml` with the old bookmark and
   refs.
