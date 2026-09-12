@@ -264,6 +264,33 @@ class ObjectBackend(Protocol):
         (region, credential references, source branch, ...).
         """
 
+    def branch_scope(self, locator: Locator) -> str:
+        """The native resource that owns branches, as a stable string.
+
+        Two objects with the same scope share one branch namespace: a fork
+        under a bookmark creates *one* branch for both, and the engine forks
+        it once and lets every member write through it. Defaults to the
+        canonical identity (one object per system). Override where several
+        objects legitimately live in one branch space -- a Neon project, an
+        Iceberg table with several object keys -- and where the identity
+        carries fields the branch does not (a database, a source branch).
+        """
+        from tether.manifest import canonical_bytes
+
+        return canonical_bytes(self.identity(locator)).decode()
+
+    def ref_namespace(self, locator: Locator) -> str:
+        """The native resource whose pins ``list_pins`` returns, as a string.
+
+        ``gc`` compares the pins it lists against the pins every object *in
+        that namespace* references; listing a project-wide namespace against
+        one object's references would release the others' pins. Defaults to
+        the canonical identity.
+        """
+        from tether.manifest import canonical_bytes
+
+        return canonical_bytes(self.identity(locator)).decode()
+
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         """Read the current state at ``working_ref`` (or the locator's base)."""
 

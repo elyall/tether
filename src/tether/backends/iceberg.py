@@ -90,6 +90,14 @@ class IcebergBackend(ObjectBackend):
             "catalog_name": str(locator.get("catalog_name", "default")),
         }
 
+    def _table_scope(self, locator: Locator) -> str:
+        # Branches and tags are table-wide, whichever branch an object reads.
+        catalog = str(locator.get("catalog_name", "default"))
+        return f"iceberg:{catalog}:{self._identifier(locator)}"
+
+    branch_scope = _table_scope
+    ref_namespace = _table_scope
+
     def _resolve(self, table: Any, ref: str) -> int:
         """Resolve a branch/tag name or a snapshot id to a snapshot id."""
         snap = table.snapshot_by_name(ref)

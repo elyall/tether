@@ -548,6 +548,90 @@ def test_lazy_fork_never_resets_a_branch_new_did_not_see(vcs_root: Path) -> None
     assert handle.read() == store.read(system, "main")
 
 
+def test_two_keys_on_one_system_share_the_bookmarks_branch(vcs_root: Path) -> None:
+    """Two objects in one branch space (two databases of a Neon project, here
+    two keys on one memory system) get *one* branch per bookmark: the second
+    writable open joins the branch the first created instead of resetting it,
+    and a later `new` plans one fork and one share."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = _mem_object(repo, "left")
+    repo.add("right", "memory", {"system": system, "branch": "main"})
+    store.write(system, "main", {"v": 0})
+    repo.commit("baseline")
+
+    repo.new(bookmark="work")  # lazy
+    plan_ops = [a.op for a in repo.plan_new(keep=False).actions]
+    assert sorted(plan_ops) == ["defer-fork", "share"]
+    left = repo.open("left", read_only=False)
+    assert isinstance(left, MemoryHandle)
+    left.write({"v": 1})
+    branch = repo.workspace.working_refs["left"]
+    assert repo.workspace.working_refs.get("right") == branch  # adopted with it
+    right = repo.open("right", read_only=False)
+    assert isinstance(right, MemoryHandle) and right.ref == branch
+    assert right.read() == {"v": 1}  # the shared branch, not a reset copy
+    assert store.read(system, branch) == {"v": 1}
+
+    res = repo.commit("both")
+    assert res.pinned["left"] is not None and res.pinned["right"] is not None
+    plan = repo.plan_new(eager=True)
+    assert sorted(a.op for a in plan.actions) == ["reuse", "share"]
+
+
+def test_scope_members_must_pin_the_same_branch_state(vcs_root: Path) -> None:
+    """A branch is at one point: two keys that share it but pin different
+    states cannot both be forked from -- `new` refuses and says so."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = _mem_object(repo, "left")
+    s0 = store.system(system).branches["main"]
+    store.write(system, "main", {"v": 1})
+    repo.add("right", "memory", {"system": system, "branch": "main", "at": s0})
+    repo.commit("left at v1, right at s0")
+    with pytest.raises(TetherError, match="a branch is at one point"):
+        repo.new(bookmark="work", eager=True)
+
+
+def test_gc_collects_references_over_the_whole_pin_namespace(vcs_root: Path) -> None:
+    """When one native namespace holds several objects' pins (a Neon project,
+    an Iceberg table), gc must subtract every object's references from what it
+    lists there, or one object's sweep releases the others' pins."""
+    from tether.backends.base import register_backend
+    from tether.backends.memory import MemoryBackend
+
+    class TableBackend(MemoryBackend):
+        """A memory system holding several 'tables': identity is per table,
+        pins live (and are listed) per system."""
+
+        kind = "memtable"
+
+        def identity(self, locator: Locator) -> Locator:
+            return {"system": locator["system"], "table": locator["table"]}
+
+        def branch_scope(self, locator: Locator) -> str:
+            return str(locator["system"])
+
+        def ref_namespace(self, locator: Locator) -> str:
+            return str(locator["system"])
+
+    register_backend("memtable", lambda config: TableBackend(store=default_store()))
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    store.write(system, "main", {"rows": 1})
+    repo.add("t1", "memtable", {"system": system, "branch": "main", "table": "t1"})
+    repo.add("t2", "memtable", {"system": system, "branch": "main", "table": "t2"})
+    res = repo.commit("both tables")
+    p1, p2 = res.pinned["t1"], res.pinned["t2"]
+    assert p1 is not None and p2 is not None and p1.id != p2.id
+    plan = repo.plan_gc()
+    assert not [a for a in plan.actions if a.op == "unpin"], plan.actions
+    repo.gc(dry_run=False)
+    assert {p1.ref, p2.ref} <= set(store.system(system).tags)
+
+
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
     """`diff REV` is REV -> working tree, not REV -> nothing."""
     repo = Repo.init(vcs_root)

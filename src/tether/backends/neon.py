@@ -186,6 +186,14 @@ class NeonBackend(ObjectBackend):
             "database": locator.get("database"),
         }
 
+    def branch_scope(self, locator: Locator) -> str:
+        # Branches are project-wide: two databases in one project share them.
+        return f"neon:{self._project(locator)}"
+
+    def ref_namespace(self, locator: Locator) -> str:
+        # Pins are branches too, so they are listed project-wide.
+        return f"neon:{self._project(locator)}"
+
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         if locator.get("at"):
             raise BackendError(

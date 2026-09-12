@@ -80,7 +80,7 @@ class Plan:
     )
 
     NON_WRITES = frozenset(
-        {"trunk", "keep-branch", "defer-fork", "refuse", "reuse", "hold"}
+        {"trunk", "keep-branch", "defer-fork", "refuse", "reuse", "hold", "share"}
     )
     """Actions that write nothing to an external system when applied."""
 

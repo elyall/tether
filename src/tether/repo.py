@@ -1924,6 +1924,11 @@ class Repo:
             plan.notes.append(
                 f"on trunk {bookmark!r}: writes land on each object's upstream branch"
             )
+        # One branch per (kind, scope): objects that live in the same native
+        # branch space -- two databases of one Neon project -- share the fork.
+        # The first member plans it; later members `share` it, provided they
+        # pin the same state of that branch (a branch is at one point).
+        scoped: dict[tuple[str, str], str] = {}  # (kind, scope) -> first key
         for key in sorted(objects):
             m = objects[key]
             backend = self.backend_for(m.kind)
@@ -1948,6 +1953,47 @@ class Repo:
                 )
                 continue
             name = working_ref_name(self.config.dataset_id, bookmark)
+            scope = (m.kind, backend.branch_scope(m.locator))
+            if scope in scoped:
+                first_key = scoped[scope]
+                first = objects[first_key]
+                first_action = next(
+                    (a for a in plan.actions if a.key == first_key), None
+                )
+                if first_action is None or first_action.op == "refuse":
+                    plan.notes.append(
+                        f"{key}: shares a branch with {first_key}, which cannot fork"
+                    )
+                elif not self._same(m.kind, m.state, first.state):
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            m.kind,
+                            target=name,
+                            detail=(
+                                f"shares branch {name} with {first_key!r} but pins "
+                                f"{short_state(m.state)} where it pins "
+                                f"{short_state(first.state)}; a branch is at one "
+                                "point -- commit them together (`tether pull` on "
+                                "the trunk) before forking"
+                            ),
+                            params={"with": first_key},
+                        )
+                    )
+                else:
+                    plan.actions.append(
+                        Action(
+                            "share",
+                            key,
+                            m.kind,
+                            target=name,
+                            detail=f"same branch as {first_key} ({first_action.op})",
+                            params={"with": first_key, "state": m.state},
+                        )
+                    )
+                continue
+            scoped[scope] = key
             # The bookmark's branch may already exist in this system -- joining
             # a bookmark, or `new` again on the one we are on. Its head decides
             # whether it is kept, reset (recorded so the op log can restore it),
@@ -2173,6 +2219,20 @@ class Repo:
         # branches are reset onto the pin, not duplicated).
         forked, errors = self._fanout_collect(fork_one, list(forks))
         working_refs.update(forked)
+        # Objects sharing a branch follow the member that planned it.
+        for a in plan.actions:
+            if a.op != "share":
+                continue
+            first = str(a.params["with"])
+            if first in forked:
+                working_refs[a.key] = forked[first]
+            elif first in pending:
+                pending[a.key] = pending[first]
+                if first in pending_resets:
+                    pending_resets[a.key] = pending_resets[first]
+            elif first in reused:
+                working_refs[a.key] = a.target
+                reused[a.key] = dict(a.params["state"])
 
         # Keep refs of removed objects around until `gc` deletes their branches.
         leftovers = {
@@ -2187,7 +2247,10 @@ class Repo:
         fork_points = {
             k: v for k, v in self.workspace.fork_points.items() if k in leftovers
         }
-        for key in forked:
+        shared = {
+            a.key for a in plan.actions if a.op == "share" and a.key in working_refs
+        }
+        for key in set(forked) | shared:
             state = self.objects[key].state
             if state is not None:
                 fork_points[key] = dict(state)
@@ -2282,22 +2345,60 @@ class Repo:
         m = self.objects[key]
         backend = self.backend_for(m.kind)
         pre: dict[str, Any] = {"workspace": self.workspace.to_toml()}
+        scope = (m.kind, backend.branch_scope(m.locator))
+
+        def siblings() -> list[str]:
+            """Other keys whose pending fork is this very branch."""
+            return [
+                k
+                for k, n in self.workspace.pending_forks.items()
+                if k != key
+                and n == name
+                and k in self.objects
+                and (
+                    self.objects[k].kind,
+                    self.backend_for(self.objects[k].kind).branch_scope(
+                        self.objects[k].locator
+                    ),
+                )
+                == scope
+            ]
+
+        def adopt(ref: str, keys: list[str]) -> None:
+            for k in keys:
+                self.workspace.working_refs[k] = ref
+                self.workspace.pending_forks.pop(k, None)
+                self.workspace.pending_resets.pop(k, None)
+                state = self.objects[k].state
+                if state is not None:
+                    self.workspace.fork_points[k] = dict(state)
+            self._mark_base_states(keys)
+
         if name in backend.list_working_refs(m.locator):
             # The branch exists. A writable open resets it only when `new`
             # reviewed exactly this head and agreed (`pending_resets`); a
-            # branch already at this object's pin is reused as it is; any
-            # other head -- another key of the same system wrote to it, or it
-            # moved since `new` -- stops here and `new` decides again.
+            # branch already at this object's pin, or one a sibling of the
+            # same scope already writes through, is reused as it is; any
+            # other head -- it moved since `new` -- stops here and `new`
+            # decides again.
             head = backend.fingerprint(m.locator, name)
-            if m.state is not None and self._same(m.kind, head, m.state):
-                ref = name
-                self.workspace.working_refs[key] = ref
-                self.workspace.pending_forks.pop(key, None)
-                self.workspace.pending_resets.pop(key, None)
-                self.workspace.fork_points[key] = dict(m.state)
-                self._mark_base_states([key])
+            owned = any(
+                r == name
+                and k != key
+                and k in self.objects
+                and (
+                    self.objects[k].kind,
+                    self.backend_for(self.objects[k].kind).branch_scope(
+                        self.objects[k].locator
+                    ),
+                )
+                == scope
+                for k, r in self.workspace.working_refs.items()
+            )
+            if owned or (m.state is not None and self._same(m.kind, head, m.state)):
+                adopt(name, [key, *siblings()])
                 write_workspace(self.root, self.workspace)
-                return ref
+                return name
             agreed = self.workspace.pending_resets.get(key)
             if agreed is None or not self._same(m.kind, head, agreed):
                 raise StaleWorkingCopyError(
@@ -2308,12 +2409,7 @@ class Repo:
                 )
             pre["heads"] = {key: head}
         ref = self._fork_from_manifest(m, name)
-        self.workspace.working_refs[key] = ref
-        self.workspace.pending_forks.pop(key, None)
-        self.workspace.pending_resets.pop(key, None)
-        if m.state is not None:
-            self.workspace.fork_points[key] = dict(m.state)
-        self._mark_base_states([key])
+        adopt(ref, [key, *siblings()])
         write_workspace(self.root, self.workspace)
         self._log_op(
             "fork",
@@ -2688,8 +2784,10 @@ class Repo:
         referenced: dict[str, set[str]] = {}
 
         def key_for(backend: ObjectBackend, locator: dict) -> str:
-            ident = backend.identity(locator)
-            return f"{backend.kind}|{_m.canonical_bytes(ident).decode()}"
+            # Pins are listed per *namespace* (a Neon project, an Iceberg
+            # table), which may hold several objects; the references that
+            # keep a pin alive must be collected over the whole namespace.
+            return f"{backend.kind}|{backend.ref_namespace(locator)}"
 
         history_manifests: list[ObjectManifest] = []
         all_manifests: list[ObjectManifest] = []
