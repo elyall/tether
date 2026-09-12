@@ -449,6 +449,105 @@ def test_a_drifted_pin_is_never_read_or_forked(vcs_root: Path) -> None:
     assert isinstance(handle, MemoryHandle) and handle.read() == {"v": 1}
 
 
+def test_saved_gc_plan_will_not_delete_a_branch_that_moved(vcs_root: Path) -> None:
+    """A gc plan records the head of every branch it will delete; applying it
+    after the branch gained writes stops with StalePlanError, branch intact."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    # Leave the bookmark behind: its branch becomes a stray gc may delete.
+    repo.new("main")
+    repo.vcs.bookmark_delete("work")
+    plan = repo.plan_gc(prune_bookmarks=True)
+    (delete,) = [a for a in plan.actions if a.op == "delete-branch"]
+    assert delete.target == branch and delete.params["head"] is not None
+
+    store.write(system, branch, {"late": 1})  # writes after the plan was made
+    with pytest.raises(StalePlanError, match="moved since the plan was made"):
+        repo.apply_gc(plan)
+    assert branch in store.system(system).branches
+    assert store.read(system, branch) == {"late": 1}
+
+    # A fresh plan sees the writes and keeps the branch without --force-prune.
+    fresh = repo.plan_gc(prune_bookmarks=True)
+    assert [a.op for a in fresh.actions if a.target == branch] == ["keep-branch"]
+
+
+def test_saved_gc_plan_is_bound_to_history(vcs_root: Path) -> None:
+    """A commit made after the plan may reference a pin the plan releases."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    plan = repo.plan_gc()
+    store.write(system, "main", {"v": 2})
+    repo.commit("moved on")
+    with pytest.raises(StalePlanError, match="history moved"):
+        repo.apply_gc(plan)
+
+
+def test_promote_checks_the_source_it_reviewed(vcs_root: Path) -> None:
+    """What lands must be what the plan showed: a fork that gained writes after
+    planning is not promoted from a stale plan."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"v": 2})
+    repo.commit("v2")
+    plan = repo.plan_promote()
+    store.write(system, branch, {"v": 3})  # after review
+    with pytest.raises(StalePlanError, match=r"promote db: .* moved since the plan"):
+        repo.apply_promote(plan)
+    heads = store.system(system).branches
+    assert heads["main"] != heads[branch]  # nothing landed
+
+
+def test_lazy_fork_never_resets_a_branch_new_did_not_see(vcs_root: Path) -> None:
+    """A deferred fork resets an existing branch only onto the head `new`
+    reviewed; writes that landed on it since are refused at open."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    baseline = repo.commit("baseline").vcs_commit
+    assert baseline is not None
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"v": 2})
+    repo.commit("v2")
+    # Move the bookmark back by hand: `new` finds the branch off the pin and
+    # plans a deferred reset of the head it sees.
+    repo.vcs.bookmark_set("work", baseline)
+    repo.new("work")
+    assert repo.workspace.pending_forks == {"db": branch}
+    assert "db" in repo.workspace.pending_resets
+
+    store.write(system, branch, {"v": 3})  # someone else, after `new`
+    with pytest.raises(StaleWorkingCopyError, match="did not see"):
+        repo.open("db", read_only=False)
+    assert store.read(system, branch) == {"v": 3}  # untouched
+
+    # `new` again sees the new head: unpinned writes, so it refuses without
+    # --discard; with it, the open resets the branch onto the pin.
+    with pytest.raises(TetherError, match="has writes since"):
+        repo.new("work")
+    repo.new("work", discard=True)
+    handle = repo.open("db", read_only=False)
+    assert isinstance(handle, MemoryHandle)
+    assert handle.read() == store.read(system, "main")
+
+
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
     """`diff REV` is REV -> working tree, not REV -> nothing."""
     repo = Repo.init(vcs_root)

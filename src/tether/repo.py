@@ -977,6 +977,13 @@ class Repo:
         for rev, files in self.vcs.iter_history_files(self._objects_reldir()):
             yield rev, self._parse_manifests(files)
 
+    def _vcs_head_or_none(self) -> str | None:
+        """The current VCS revision, or `None` before the first commit."""
+        try:
+            return self.vcs.current_rev()
+        except VcsError:
+            return None
+
     def current_manifest_hash(self) -> str:
         """Hash of the committed object set in the working tree."""
         return manifest_hash(self.objects)
@@ -1099,6 +1106,7 @@ class Repo:
         # its previous incarnation is found by `gc --prune-workspaces`.
         self.workspace.working_refs.pop(key, None)
         self.workspace.pending_forks.pop(key, None)
+        self.workspace.pending_resets.pop(key, None)
         self.workspace.fork_points.pop(key, None)
         self.workspace.base_states.pop(key, None)
         write_workspace(self.root, self.workspace)
@@ -1129,6 +1137,7 @@ class Repo:
         del self.objects[key]
         self.workspace.last_snapshot.pop(key, None)
         self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
+        self.workspace.pending_resets.pop(key, None)
         self.workspace.fork_points.pop(key, None)
         self.workspace.base_states.pop(key, None)
         write_workspace(self.root, self.workspace)
@@ -1763,6 +1772,33 @@ class Repo:
         )
         return self.apply_commit(plan, vcs=vcs, verify=False)
 
+    def _require_head(
+        self,
+        backend: ObjectBackend,
+        locator: Locator,
+        ref: str,
+        expected: State | None,
+        *,
+        what: str,
+    ) -> None:
+        """Refuse a destructive step when `ref` no longer holds what the plan saw.
+
+        Plans record the head of every branch they will delete or reset. A
+        saved plan applied later, or a slow apply, must not act on a branch
+        that gained writes in between: re-read the head immediately before
+        the step and stop with `StalePlanError` if it moved. `expected` is
+        `None` when the plan could not read the head; then there is nothing
+        to compare and the plan's own verdict stands.
+        """
+        if expected is None:
+            return
+        now = backend.fingerprint(locator, ref)
+        if not self._same(backend.kind, now, expected):
+            raise StalePlanError(
+                f"{what}: {ref} moved since the plan was made "
+                f"({short_state(expected)} -> {short_state(now)}); re-run the plan"
+            )
+
     def _rollback_pins(self, created: list[tuple[str, Pin]]) -> None:
         for key, pin in created:
             m = self.objects.get(key)
@@ -2060,6 +2096,41 @@ class Repo:
                 raise StalePlanError(
                     "manifests at the target differ from the plan; re-run the plan"
                 )
+        if plan.context.get("workspace_id") not in (None, self.workspace.workspace_id):
+            raise StalePlanError(
+                "this plan was made in another workspace; re-run the plan here"
+            )
+        if (
+            verify
+            and bookmark
+            and bookmark != self.config.trunk
+            and not plan.context.get("shared")
+            and (holders := self.bookmark_holders(str(bookmark)))
+        ):
+            # A holder that appeared since the plan was made.
+            raise StalePlanError(
+                f"bookmark {bookmark!r} is now held by live workspace(s) "
+                f"{', '.join(holders)}; re-run the plan (or pass --shared)"
+            )
+        if verify:
+            # Branches the plan keeps or resets must still hold what it saw.
+            for a in plan.actions:
+                if a.op == "reuse":
+                    self._require_head(
+                        self.backend_for(a.kind),
+                        self.objects[a.key].locator,
+                        a.target,
+                        a.params.get("then_state"),
+                        what=f"new {a.key}",
+                    )
+                elif a.op == "fork" and a.params.get("existing"):
+                    self._require_head(
+                        self.backend_for(a.kind),
+                        self.objects[a.key].locator,
+                        str(a.params["existing"]),
+                        a.params.get("head"),
+                        what=f"new {a.key}",
+                    )
         pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
         if create:
             self.vcs.new_bookmark(str(bookmark), str(rev) if rev else None)
@@ -2078,6 +2149,7 @@ class Repo:
 
         working_refs: dict[str, str] = {}
         pending: dict[str, str] = {}
+        pending_resets: dict[str, State] = {}
         reused: dict[str, State] = {}
         forks = {a.key: a for a in plan.actions if a.op == "fork"}
         for a in plan.actions:
@@ -2085,6 +2157,8 @@ class Repo:
                 working_refs[a.key] = a.target
             elif a.op == "defer-fork":
                 pending[a.key] = a.target
+                if a.params.get("existing") and a.params.get("head") is not None:
+                    pending_resets[a.key] = dict(a.params["head"])
             elif a.op == "reuse":
                 working_refs[a.key] = a.target
                 reused[a.key] = dict(a.params["then_state"])
@@ -2108,6 +2182,7 @@ class Repo:
         }
         self.workspace.working_refs = {**leftovers, **working_refs}
         self.workspace.pending_forks = pending
+        self.workspace.pending_resets = pending_resets
         # Fork points: what each branch was created from (promote's baseline).
         fork_points = {
             k: v for k, v in self.workspace.fork_points.items() if k in leftovers
@@ -2172,7 +2247,13 @@ class Repo:
 
     def _forget_working_state(self, key: str) -> None:
         """Drop everything this workspace knows about `key`'s working branch."""
-        for table in ("working_refs", "pending_forks", "base_states", "fork_points"):
+        for table in (
+            "working_refs",
+            "pending_forks",
+            "pending_resets",
+            "base_states",
+            "fork_points",
+        ):
             getattr(self.workspace, table).pop(key, None)
 
     def materialize_fork(self, key: str) -> str:
@@ -2201,13 +2282,35 @@ class Repo:
         m = self.objects[key]
         backend = self.backend_for(m.kind)
         pre: dict[str, Any] = {"workspace": self.workspace.to_toml()}
-        # A branch left by an earlier `new` of this workspace is about to be
-        # reset; remember its head so undo can put it back.
         if name in backend.list_working_refs(m.locator):
-            pre["heads"] = {key: backend.fingerprint(m.locator, name)}
+            # The branch exists. A writable open resets it only when `new`
+            # reviewed exactly this head and agreed (`pending_resets`); a
+            # branch already at this object's pin is reused as it is; any
+            # other head -- another key of the same system wrote to it, or it
+            # moved since `new` -- stops here and `new` decides again.
+            head = backend.fingerprint(m.locator, name)
+            if m.state is not None and self._same(m.kind, head, m.state):
+                ref = name
+                self.workspace.working_refs[key] = ref
+                self.workspace.pending_forks.pop(key, None)
+                self.workspace.pending_resets.pop(key, None)
+                self.workspace.fork_points[key] = dict(m.state)
+                self._mark_base_states([key])
+                write_workspace(self.root, self.workspace)
+                return ref
+            agreed = self.workspace.pending_resets.get(key)
+            if agreed is None or not self._same(m.kind, head, agreed):
+                raise StaleWorkingCopyError(
+                    f"branch {name} holds writes ({short_state(head)}) that `new` "
+                    f"did not see; a writable open never resets a branch -- run "
+                    "`tether new` to decide (it refuses while the branch holds "
+                    "uncommitted writes; --discard throws them away)"
+                )
+            pre["heads"] = {key: head}
         ref = self._fork_from_manifest(m, name)
         self.workspace.working_refs[key] = ref
         self.workspace.pending_forks.pop(key, None)
+        self.workspace.pending_resets.pop(key, None)
         if m.state is not None:
             self.workspace.fork_points[key] = dict(m.state)
         self._mark_base_states([key])
@@ -2614,6 +2717,8 @@ class Repo:
                 "prune_bookmarks": prune_bookmarks,
                 "keep_bookmarks": sorted(keep_bookmarks or ()),
                 "force_prune": force_prune,
+                "manifest_hash": self.current_manifest_hash(),
+                "vcs_head": self._vcs_head_or_none(),
             },
         )
 
@@ -2867,6 +2972,20 @@ class Repo:
         """
         if plan.command != "gc":
             raise ConfigError(f"expected a gc plan, got {plan.command!r}")
+        # Unpins are justified by what history references; a commit made since
+        # the plan (here or in another checkout) may reference one of them.
+        head_then = plan.context.get("vcs_head")
+        if head_then is not None:
+            with contextlib.suppress(VcsError):
+                if self.vcs.current_rev() != head_then:
+                    raise StalePlanError(
+                        "history moved since the gc plan was made (a new commit may "
+                        "reference a pin it would release); re-run the plan"
+                    )
+        if plan.context.get("manifest_hash") != self.current_manifest_hash():
+            raise StalePlanError(
+                "manifests changed since the gc plan was made; re-run the plan"
+            )
         report = GcReport(dry_run=False, plan=plan)
         errors: dict[str, Exception] = {}
         forgot = False
@@ -2884,13 +3003,23 @@ class Repo:
                     report.forgotten_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "delete-branch":
                     backend = self.backend_for(a.kind)
-                    backend.delete_working_ref(dict(a.params["locator"]), a.target)
+                    locator = dict(a.params["locator"])
+                    self._require_head(
+                        backend,
+                        locator,
+                        a.target,
+                        a.params.get("head"),
+                        what=f"gc {a.key}",
+                    )
+                    backend.delete_working_ref(locator, a.target)
                     report.deleted_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "keep-branch":
                     report.kept_working_refs.setdefault(a.key, []).append(a.target)
                 elif a.op == "delete-listing":
                     (listings_dir(self.root) / a.target).unlink(missing_ok=True)
                     report.deleted_listings.append(a.target)
+            except StalePlanError:
+                raise  # the plan is stale as a whole: stop, do not aggregate
             except Exception as exc:
                 errors[f"{a.op} {a.target}"] = exc
         if forgot:
@@ -3226,6 +3355,16 @@ class Repo:
                         f"({short_state(a.params['base_state'])} -> "
                         f"{short_state(current)}); re-run the plan"
                     )
+                # ... and the source: what lands must be what was reviewed.
+                source = a.params.get("source") or {}
+                if "ref" in source:
+                    self._require_head(
+                        backend,
+                        locator,
+                        str(source["ref"]),
+                        a.params.get("target_state"),
+                        what=f"promote {a.key}",
+                    )
 
         message = str(plan.context.get("message") or "tether promote")
         by_key = {a.key: a for a in writes}
@@ -3437,10 +3576,19 @@ class Repo:
         done: dict[str, str] = {}
         for a in forks:
             m = ObjectManifest.from_toml(str(a.params["then"]))
+            if verify and a.params.get("existing"):
+                self._require_head(
+                    self.backend_for(a.kind),
+                    self.objects[a.key].locator,
+                    str(a.params["existing"]),
+                    a.params.get("head"),
+                    what=f"restore {a.key}",
+                )
             ref = self._fork_from_manifest(m, a.target)
             done[a.key] = ref
             self.workspace.working_refs[a.key] = ref
             self.workspace.pending_forks.pop(a.key, None)
+            self.workspace.pending_resets.pop(a.key, None)
             self.workspace.fork_points[a.key] = dict(a.params["then_state"])
             self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
         # What the branch now holds is deliberate: it corresponds to the
@@ -4201,6 +4349,14 @@ class Repo:
                     report.repinned[a.key] = str(a.params["pin_id"])
                 elif a.op == "refork":
                     m = self.objects[a.key]
+                    # Planned because the branch was missing; if it is back
+                    # (another checkout re-created it), do not reset it.
+                    backend = self.backend_for(m.kind)
+                    if a.target in backend.list_working_refs(m.locator):
+                        raise StalePlanError(
+                            f"{a.target} exists again since the plan was made; "
+                            "re-run the plan"
+                        )
                     ref = self._fork_from_manifest(m, a.target)
                     self.workspace.working_refs[a.key] = ref
                     if m.state is not None:

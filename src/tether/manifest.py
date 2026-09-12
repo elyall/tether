@@ -469,7 +469,10 @@ class WorkspaceState:
     ``working_refs`` maps object key -> native working ref that exists.
     ``pending_forks`` maps object key -> the branch
     name ``new`` decided on but has not created yet (lazy forking: it is
-    created on the first writable ``open``). ``fork_points`` maps object key ->
+    created on the first writable ``open``); ``pending_resets`` records, for a
+    pending fork whose branch already existed when ``new`` planned it, the head
+    ``new`` saw and agreed to reset -- the open resets only if it is still
+    there. ``fork_points`` maps object key ->
     the state its working branch was created from; ``promote`` compares the
     base branch against it to tell a fast-forward from a divergence.
     ``bookmark`` is the dataset bookmark this checkout works on: its store
@@ -483,6 +486,7 @@ class WorkspaceState:
     base_states: dict[str, State] = field(default_factory=dict)
     working_refs: dict[str, str] = field(default_factory=dict)
     pending_forks: dict[str, str] = field(default_factory=dict)
+    pending_resets: dict[str, State] = field(default_factory=dict)
     fork_points: dict[str, State] = field(default_factory=dict)
     last_snapshot: dict[str, State] = field(default_factory=dict)
     last_snapshot_at: str | None = None
@@ -498,6 +502,10 @@ class WorkspaceState:
             doc["working_refs"] = dict(self.working_refs)
         if self.pending_forks:
             doc["pending_forks"] = dict(self.pending_forks)
+        if self.pending_resets:
+            doc["pending_resets"] = {
+                k: _drop_nulls(v) for k, v in self.pending_resets.items()
+            }
         if self.fork_points:
             doc["fork_points"] = {
                 k: _drop_nulls(v) for k, v in self.fork_points.items()
@@ -523,6 +531,9 @@ class WorkspaceState:
             },
             working_refs=dict(data.get("working_refs") or {}),
             pending_forks=dict(data.get("pending_forks") or {}),
+            pending_resets={
+                str(k): dict(v) for k, v in (data.get("pending_resets") or {}).items()
+            },
             fork_points={
                 str(k): dict(v) for k, v in (data.get("fork_points") or {}).items()
             },
