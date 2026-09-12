@@ -43,6 +43,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `recoverable = false` and says why in the plan.
 - `VcsAdapter.history_digest()`: a digest of every visible commit id, across
   workspaces and bookmarks; `gc` plans bind to it.
+- **A repository-wide lock.** `commit`, `pull`, `gc`, `undo`, and `abandon`
+  hold `tether.lock` in the store every checkout shares
+  (`VcsAdapter.shared_dir()`: git's common dir, jj's repo dir), waiting up to
+  `Repo.REPO_LOCK_TIMEOUT`, so a gc in one workspace cannot race a commit in
+  another between deciding a pin is unreferenced and releasing it.
+- **Progress records.** Every side effect of a journaled operation appends a
+  record (`mark_progress`; `OpEntry.progress`): each pin and the VCS commit of
+  a `commit`, each fork of `new`/`restore`, each unpin and deletion of `gc`,
+  each system a `promote` lands, each repin/refork of `repair`. `repair
+  --dry-run` lists what an incomplete operation got done, how many actions
+  were planned, and the re-run contract (running the command again finishes
+  what is left).
 
 ### Changed
 
@@ -90,7 +102,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once per key.
 - The writer lock also covers `add`, `remove`, `set`, `import`, `abandon`,
   `forget-workspace`, and `upgrade`; `undo` journals before it acts (a refused
-  undo is recorded as failed).
+  undo is recorded as failed). Taking the lock re-reads `workspace.toml` and
+  the manifests, so a long-lived `Repo` never writes the state it loaded at
+  construction over what another process wrote since; `snapshot` writes its
+  cache under the lock.
+- `undo` completes atomically: the undone mark rides in the done record (one
+  append), and a handler refusal that touched nothing ends the entry as a
+  failed attempt rather than leaving it started.
+- `promote KEY...` refuses a subset that leaves unnamed siblings writing
+  through the same branch, as `restore` does.
+- `gc`: a branch that moved *after* the preflight (a race, not a stale plan)
+  is kept and reported while the rest of the plan finishes; a `--force-prune`
+  plan that could not read a head refuses at apply if the head reads now.
+- Pre-v4 manifests read from history resolve relative local paths against
+  the dataset root, the rule the migration applies to the working tree.
 - `promote`'s guarantee is stated as it is: a bookmark is *planned* whole or
   not at all; once applying, each system's fast-forward stands on its own.
 - `set --pin record` on a pinned object takes effect at the next commit (the
@@ -134,7 +159,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory, so the same manifest addressed different files from different
   directories. The git backend left the CLI's positional `uri` relative.
 - The v4 migration rewrote a relative locator before moving a misplaced
-  manifest, leaving two files for one key.
+  manifest, leaving two files for one key; and it recorded v4 after
+  reporting a manifest collision (it now stops, like v3 on a failed
+  re-fingerprint).
+- `snapshot` from a `Repo` constructed before another process moved the
+  checkout to a bookmark rewrote `workspace.toml` with the old bookmark and
+  refs.
+- `undo`'s two-append completion could leave a finished undo whose target
+  still counted as undoable.
 - `--file versioned` recorded a state with no version id as recoverable
   although `open` could not read it back.
 - The wheel smoke test in `publish.yml` installed the wheel without the `cli`

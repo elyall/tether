@@ -234,8 +234,8 @@ bookmark: the first member forks (or defers) it, the others share it, and a
 member that pins a different state of the same branch is refused (a branch is
 at one point; commit them together on the trunk first). `restore` and
 `promote` follow the same rule: one reset or fast-forward per branch, the
-siblings `share` it -- and `restore` refuses to name only some of the objects
-that write through a branch, since resetting it moves them all.
+siblings `share` it -- and both refuse to name only some of the objects that
+write through a branch, since moving it moves them all.
 
 ## `gc` scope
 

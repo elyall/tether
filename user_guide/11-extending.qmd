@@ -184,6 +184,12 @@ branches) without breaking the contract.
 
 ## VCS adapters
 
+Two members beyond reading and committing files: `history_digest()` digests
+every visible commit id (gc plans bind to it, so a commit made in another
+workspace stales them), and `shared_dir()` names the directory every
+checkout of the repository shares (git's common dir, jj's repo dir), where
+the repository-wide lock lives.
+
 Backends never touch the VCS. If you need to support another version-control
 system for the *manifests*, implement `tether.vcs.VcsAdapter` (resolve, read
 and list files at a revision, stream history, commit, new) and extend

@@ -158,7 +158,8 @@ checkout's head moving. `promote --rev` verifies that a pin source still names
 the reviewed state, `new` refuses when it cannot list a system's branches
 (not knowing is not the same as absent), and a lazy fork on first writable
 `open` resets an existing branch only onto the head `new` reviewed and agreed
-to reset.
+to reset. A branch that moves *after* gc's preflight -- a race, not a stale
+plan -- is kept and reported while the rest of the plan finishes.
 
 ## The operation log
 
@@ -175,9 +176,20 @@ effect, then appends a completion mark with the result. A process killed in
 between leaves an entry marked `INCOMPLETE` in `ops`; `undo` skips it (what
 it did is not known), `repair --dry-run` names it, and `gc` collects
 whatever it left -- pins no commit names, branches judged by
-`--prune-bookmarks`. One writer holds `.tether/lock` for the duration of a
-writing command, so two `tether` processes in one checkout cannot interleave
-journal entries and `workspace.toml` writes.
+`--prune-bookmarks`. Each side effect also appends a *progress* record as it
+takes effect, so `repair --dry-run` can say which forks, unpins, or
+fast-forwards of an interrupted operation had already happened; running the
+command again finishes what is left (creating an absent ref from a pinned
+state is idempotent; a reset needs the head reviewed again).
+
+One writer holds `.tether/lock` for the duration of a writing command, so
+two `tether` processes in one checkout cannot interleave journal entries and
+`workspace.toml` writes; taking it re-reads the workspace and manifests, so a
+`Repo` that has lived a while never writes stale state back. Commands that
+create references to pins (`commit`, `pull`), release them (`gc`), or remove
+commits (`undo`, `abandon`) also hold a repository-wide lock in the store
+every checkout shares, so a gc here cannot race a commit in another
+workspace.
 
 `commit` compensates as a unit: if anything fails after the pins -- a
 manifest write, a listing, the VCS commit -- the pins this commit created
