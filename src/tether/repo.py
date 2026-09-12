@@ -3671,7 +3671,41 @@ class Repo:
                 f"`tether promote KEY...`, or write those systems' base branches "
                 "by hand on the trunk (see the refusals) and promote again"
             )
+        self._share_scope_writes(plan, ("fast-forward", "merge"))
         return plan
+
+    def _share_scope_writes(self, plan: Plan, ops: tuple[str, ...]) -> None:
+        """Collapse the writes of one native branch to a single action.
+
+        Objects in one branch scope write through one branch, so promoting or
+        restoring each of them would move the same ref several times -- and
+        concurrently, in the fan-out. The first member keeps the write; the
+        others become `share` actions that take its result.
+        """
+        seen: dict[tuple[str, str, str], str] = {}
+        for i, a in enumerate(plan.actions):
+            if a.op not in ops:
+                continue
+            m = self.objects.get(a.key)
+            if m is None:
+                continue
+            scope = (
+                m.kind,
+                self.backend_for(m.kind).branch_scope(m.locator),
+                str(a.target),
+            )
+            first = seen.get(scope)
+            if first is None:
+                seen[scope] = a.key
+                continue
+            plan.actions[i] = Action(
+                "share",
+                a.key,
+                a.kind,
+                target=a.target,
+                detail=f"same branch as {first}: {a.op} once, for both",
+                params={**a.params, "with": first, "would": a.op},
+            )
 
     def apply_promote(self, plan: Plan, *, verify: bool = True) -> PromoteReport:
         """Execute a plan from `plan_promote`.
@@ -3764,6 +3798,10 @@ class Repo:
                     report.refused[key] = str(exc)
                     errors.pop(key)
 
+            # Siblings sharing the branch take the member's result.
+            for a in plan.actions:
+                if a.op == "share" and str(a.params.get("with")) in results:
+                    results[a.key] = results[str(a.params["with"])]
             touched = False
             for key, (how, new_state) in results.items():
                 (report.fast_forwarded if how == "ff" else report.merged)[key] = (
@@ -3921,7 +3959,89 @@ class Repo:
             plan.actions.append(
                 Action("fork", key, now.kind, target=name, detail=detail, params=params)
             )
+        self._close_restore_over_scopes(plan, set(keys), then, rev)
         return plan
+
+    def _close_restore_over_scopes(
+        self, plan: Plan, keys: set[str], then: Mapping[str, ObjectManifest], rev: str
+    ) -> None:
+        """A restore resets a native branch; every object writing through that
+        branch is restored with it, whether named or not.
+
+        Unnamed siblings make the plan a refusal (name them, so the plan says
+        what moves); named siblings must pin the same state of the branch at
+        `rev` (a branch is at one point), and only the first of them forks --
+        the rest `share` the reset.
+        """
+
+        def scope_of(key: str) -> tuple[str, str] | None:
+            m = self.objects.get(key)
+            if m is None:
+                return None
+            return (m.kind, self.backend_for(m.kind).branch_scope(m.locator))
+
+        forks = {a.key: a for a in plan.actions if a.op == "fork"}
+        first_by_scope: dict[tuple[str, str], str] = {}
+        for i, a in enumerate(plan.actions):
+            if a.op != "fork":
+                continue
+            scope = scope_of(a.key)
+            if scope is None:
+                continue
+            # Siblings writing through this very branch.
+            siblings = [
+                k
+                for k in self.objects
+                if k != a.key
+                and scope_of(k) == scope
+                and (
+                    self.workspace.working_refs.get(k) == a.target
+                    or self.workspace.pending_forks.get(k) == a.target
+                )
+            ]
+            unnamed = sorted(k for k in siblings if k not in keys)
+            if unnamed:
+                plan.actions[i] = Action(
+                    "refuse",
+                    a.key,
+                    a.kind,
+                    target=a.target,
+                    detail=(
+                        f"{a.target} is also {', '.join(unnamed)}'s working branch; "
+                        f"restoring {a.key} alone would move theirs too -- name them: "
+                        f"`tether restore {' '.join(sorted(keys | set(unnamed)))} "
+                        f"--from {rev}`"
+                    ),
+                )
+                continue
+            first = first_by_scope.get(scope)
+            if first is None:
+                first_by_scope[scope] = a.key
+                continue
+            first_action = forks[first]
+            mine = then.get(a.key)
+            if mine is None or not self._same(
+                a.kind, mine.state, first_action.params.get("then_state")
+            ):
+                plan.actions[i] = Action(
+                    "refuse",
+                    a.key,
+                    a.kind,
+                    target=a.target,
+                    detail=(
+                        f"shares {a.target} with {first!r} but pins a different "
+                        f"state of it at {rev}; a branch is at one point"
+                    ),
+                )
+                continue
+            plan.actions[i] = Action(
+                "share",
+                a.key,
+                a.kind,
+                target=a.target,
+                detail=f"same branch as {first}: reset once, for both",
+                params={**a.params, "with": first},
+            )
 
     def apply_restore(self, plan: Plan, *, verify: bool = True) -> dict[str, str]:
         """Execute a plan from `plan_restore`; returns key -> working ref.
@@ -3969,6 +4089,16 @@ class Repo:
                         what=f"restore {a.key}",
                     )
                 ref = self._fork_from_manifest(m, a.target)
+                done[a.key] = ref
+                self.workspace.working_refs[a.key] = ref
+                self.workspace.pending_forks.pop(a.key, None)
+                self.workspace.pending_resets.pop(a.key, None)
+                self.workspace.fork_points[a.key] = dict(a.params["then_state"])
+                self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
+            for a in plan.actions:
+                if a.op != "share" or str(a.params.get("with")) not in done:
+                    continue
+                ref = done[str(a.params["with"])]
                 done[a.key] = ref
                 self.workspace.working_refs[a.key] = ref
                 self.workspace.pending_forks.pop(a.key, None)

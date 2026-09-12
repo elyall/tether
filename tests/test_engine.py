@@ -754,6 +754,47 @@ def test_two_keys_on_one_system_share_the_bookmarks_branch(vcs_root: Path) -> No
     assert sorted(a.op for a in plan.actions) == ["reuse", "share"]
 
 
+def test_restore_and_promote_are_closed_over_the_branch_scope(vcs_root: Path) -> None:
+    """Two keys writing through one branch: restoring one alone is refused (it
+    would move the other's branch too); restoring both resets the branch once;
+    promoting the bookmark fast-forwards the shared branch once."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = _mem_object(repo, "left")
+    repo.add("right", "memory", {"system": system, "branch": "main"})
+    store.write(system, "main", {"v": 0})
+    c0 = repo.commit("v0").vcs_commit
+    assert c0 is not None
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["left"]
+    assert repo.workspace.working_refs["right"] == branch
+    store.write(system, branch, {"v": 1})
+    repo.commit("v1")
+
+    plan = repo.plan_restore(["left"], c0)
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert "also right's working branch" in refuse.detail
+    with pytest.raises(TetherError, match="also right's working branch"):
+        repo.restore(["left"], c0)
+    assert store.read(system, branch) == {"v": 1}  # untouched
+
+    plan = repo.plan_restore(["left", "right"], c0)
+    assert sorted(a.op for a in plan.actions) == ["fork", "share"]
+    done = repo.apply_restore(plan)
+    assert done == {"left": branch, "right": branch}
+    assert store.read(system, branch) == {"v": 0}
+    assert repo.workspace.fork_points["right"] == repo.workspace.fork_points["left"]
+
+    # Promote: one fast-forward for the branch, the sibling shares its result.
+    store.write(system, branch, {"v": 2})
+    repo.commit("v2")
+    plan = repo.plan_promote()
+    assert sorted(a.op for a in plan.actions) == ["fast-forward", "share"]
+    report = repo.apply_promote(plan)
+    assert set(report.fast_forwarded) == {"left", "right"}
+    assert store.read(system, "main") == {"v": 2}
+
+
 def test_scope_members_must_pin_the_same_branch_state(vcs_root: Path) -> None:
     """A branch is at one point: two keys that share it but pin different
     states cannot both be forked from -- `new` refuses and says so."""
