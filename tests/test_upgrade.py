@@ -9,7 +9,7 @@ import pytest
 
 from tether.backends.base import VerifyStatus
 from tether.backends.memory import default_store
-from tether.errors import ConfigError, StalePlanError
+from tether.errors import ConfigError, StalePlanError, TetherError
 from tether.manifest import (
     ObjectManifest,
     Pin,
@@ -531,10 +531,14 @@ def test_upgrade_v4_resolves_relative_locators_against_the_root(
     assert rewrite.key == "raw" and rewrite.params["locator"]["uri"] == str(
         data.resolve()
     )
+    old_commit = vcs.current_rev()
     report = repo.apply_upgrade(plan)
     assert not report.failed and report.rewritten_manifests == ["raw"]
     repo = Repo.find(vcs_root)
     assert repo.objects["raw"].locator["uri"] == str(data.resolve())
+    # History keeps the old text; read at a revision it means the root too.
+    assert repo._objects_at(old_commit)["raw"].locator["uri"] == str(data.resolve())
+    assert [e.change for e in repo.diff(old_commit) if e.key == "raw"] == ["unchanged"]
 
 
 def test_upgrade_v4_handles_a_dotted_key_with_a_relative_locator(
@@ -568,3 +572,32 @@ def test_upgrade_v4_handles_a_dotted_key_with_a_relative_locator(
     assert files == ["raw.v2.toml"]
     repo = Repo.find(vcs_root)
     assert repo.objects["raw.v2"].locator["uri"] == str(data.resolve())
+
+
+def test_upgrade_v4_stops_on_a_manifest_collision(vcs_root: Path) -> None:
+    """A key whose new path is already taken is reported *and* the upgrade
+    stops before recording v4, so the next run sees the same problem."""
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/cache\n"
+    )
+    (vcs_root / "tether.toml").write_text(V3_CONFIG)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    text = ObjectManifest(
+        key="features.v2",
+        kind="memory",
+        locator={"system": system, "branch": "main"},
+        policy=Policy(),
+    ).to_toml()
+    (vcs_root / ".tether" / "objects" / "features.toml").write_text(text)  # pre-v4
+    (vcs_root / ".tether" / "objects" / "features.v2.toml").write_text(text)  # taken
+    vcs = detect_vcs(vcs_root)
+    vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v3")
+
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    with pytest.raises(TetherError, match="upgrade stopped"):
+        repo.apply_upgrade(repo.plan_upgrade())
+    assert Repo.find(vcs_root, allow_outdated=True).config.version == 3
+    with pytest.raises(ConfigError, match="tether upgrade"):
+        Repo.find(vcs_root)

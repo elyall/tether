@@ -1133,10 +1133,29 @@ class Repo:
                 continue
             m = self._manifest_cache.get(text)
             if m is None:
-                m = ObjectManifest.from_toml(text)
+                m = self._resolve_locator(ObjectManifest.from_toml(text))
                 self._manifest_cache[text] = m
             result[m.key] = m
         return result
+
+    def _resolve_locator(self, m: ObjectManifest) -> ObjectManifest:
+        """Pin down a relative local path in a *historical* manifest.
+
+        Manifests written before v4 could hold a path as typed; the v4
+        migration rewrites the working tree, but history keeps the old text.
+        Read at `--rev`, such a path means the dataset root -- the same rule
+        the migration applied -- not whatever directory this command runs in.
+        """
+        try:
+            backend = self.backend_for(m.kind)
+        except TetherError:
+            return m  # an uninstalled extra; the locator is not used anyway
+        if not backend.LOCAL_PATH_KEYS:
+            return m
+        resolved = absolutize_locator(backend, dict(m.locator), self.root)
+        if resolved == dict(m.locator):
+            return m
+        return dataclasses.replace(m, locator=resolved)
 
     def _objects_at(self, rev: str) -> dict[str, ObjectManifest]:
         return self._parse_manifests(self.vcs.files_at(rev, self._objects_reldir()))
@@ -2044,7 +2063,17 @@ class Repo:
         to compare and the plan's own verdict stands.
         """
         if expected is None:
-            return
+            # The plan could not read this head and (under --force) decided
+            # blind. If it can be read now, the plan should be made again with
+            # the head in view rather than act on what nobody has seen.
+            try:
+                now = backend.fingerprint(locator, ref)
+            except TetherError:
+                return  # still unreadable: the plan's verdict stands
+            raise StalePlanError(
+                f"{what}: the plan could not read {ref}'s head, but it reads now "
+                f"({short_state(now)}); re-run the plan to review it"
+            )
         now = backend.fingerprint(locator, ref)
         if not self._same(backend.kind, now, expected):
             raise StalePlanError(
@@ -3432,14 +3461,24 @@ class Repo:
                         backend = self.backend_for(a.kind)
                         locator = dict(a.params["locator"])
                         # Checked in the preflight; check again at the moment
-                        # of deletion (other actions took time).
-                        self._require_head(
-                            backend,
-                            locator,
-                            a.target,
-                            a.params.get("head"),
-                            what=f"gc {a.key}",
-                        )
+                        # of deletion (other actions took time). The preflight
+                        # validated the plan as a whole, so a move found *now*
+                        # is a race, not a stale plan: keep this branch, say
+                        # so, and finish the rest rather than stop half-way.
+                        try:
+                            self._require_head(
+                                backend,
+                                locator,
+                                a.target,
+                                a.params.get("head"),
+                                what=f"gc {a.key}",
+                            )
+                        except StalePlanError as exc:
+                            report.kept_working_refs.setdefault(a.key, []).append(
+                                a.target
+                            )
+                            errors[f"{a.op} {a.target}"] = exc
+                            continue
                         backend.delete_working_ref(locator, a.target)
                         report.deleted_working_refs.setdefault(a.key, []).append(
                             a.target

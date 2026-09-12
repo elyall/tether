@@ -661,6 +661,16 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         repo.objects[key] = updated
         if key not in report.rewritten_manifests:
             report.rewritten_manifests.append(key)
+    collided = [k for k in report.failed if k.startswith("rename-manifest ")]
+    if collided:
+        # Stop before recording v4: a dataset with a manifest still at the old
+        # path is not at v4, and the next run must see the same problem.
+        raise TetherError(
+            "upgrade stopped: "
+            + "; ".join(report.failed[k] for k in collided)
+            + " -- resolve the collision (re-add the missing object under its "
+            "own key) and re-run `tether upgrade`"
+        )
     repo.config.version = 4
     write_config(repo.root, repo.config)
 

@@ -11,6 +11,7 @@ from tether.errors import (
     BackendError,
     ConfigError,
     ImmutableObjectModified,
+    MultiObjectError,
     StaleWorkingCopyError,
     TetherError,
     VcsError,
@@ -516,6 +517,88 @@ def test_stale_gc_plan_does_nothing_at_all(vcs_root: Path) -> None:
         repo.apply_gc(plan)
     assert orphan.ref in store.system(system).tags  # the unpin did not run
     assert not repo.incomplete_ops()  # and no journal entry was left open
+
+
+def test_gc_keeps_a_branch_that_moved_after_the_preflight(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preflight validated the whole plan; a move found at the moment of
+    deletion is a race. The branch is kept and reported, the rest of the plan
+    finishes, and the journal entry is complete."""
+    from tether.manifest import compute_pin_id
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    repo.new("main")
+    repo.vcs.bookmark_delete("work")
+    backend = repo.backend_for("memory")
+    m = repo.objects["db"]
+    orphan_state = {"snapshot_id": store.write(system, "main", {"v": 9})}
+    orphan = backend.pin(
+        m.locator,
+        orphan_state,
+        compute_pin_id(
+            "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
+        ),
+    )
+    plan = repo.plan_gc(prune_bookmarks=True)
+    assert [a.op for a in plan.actions if a.op in ("unpin", "delete-branch")] == [
+        "unpin",
+        "delete-branch",
+    ]
+
+    real_unpin = backend.unpin
+
+    def unpin_then_someone_writes(locator: Locator, pin: Pin) -> None:
+        real_unpin(locator, pin)
+        store.write(system, branch, {"late": 1})  # between preflight and delete
+
+    monkeypatch.setattr(backend, "unpin", unpin_then_someone_writes)
+    with pytest.raises(MultiObjectError, match="moved since the plan"):
+        repo.apply_gc(plan)
+    assert orphan.ref not in store.system(system).tags  # the unpin stood
+    assert store.read(system, branch) == {"late": 1}  # the branch was kept
+    assert not repo.incomplete_ops()
+    assert repo.ops()[0].command == "gc" and repo.ops()[0].result["kept_working_refs"]
+
+
+def test_force_prune_does_not_delete_blind_once_the_head_is_readable(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan that could not read a branch's head and decided under --force
+    must not act if the head can be read at apply: re-plan with it in view."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"mine": 1})
+    repo.new("main")
+    repo.vcs.bookmark_delete("work")
+
+    backend = repo.backend_for("memory")
+    real_fp = backend.fingerprint
+
+    def blind(locator: Locator, working_ref: str | None) -> State:
+        if working_ref == branch:
+            raise BackendError("unreadable", kind="memory")
+        return real_fp(locator, working_ref)
+
+    monkeypatch.setattr(backend, "fingerprint", blind)
+    plan = repo.plan_gc(prune_bookmarks=True, force_prune=True)
+    (delete,) = [a for a in plan.actions if a.op == "delete-branch"]
+    assert delete.params.get("head") is None and delete.params.get("forced")
+    monkeypatch.setattr(backend, "fingerprint", real_fp)
+    with pytest.raises(StalePlanError, match="reads now"):
+        repo.apply_gc(plan)
+    assert store.read(system, branch) == {"mine": 1}
 
 
 def test_undo_is_journaled_before_it_acts(vcs_root: Path) -> None:
