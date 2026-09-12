@@ -800,7 +800,7 @@ def new(
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
-            repo.apply_new(plan, verify=False)
+            repo.apply_new(plan)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -1211,7 +1211,7 @@ def restore(
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
-            done = repo.apply_restore(plan, verify=False)
+            done = repo.apply_restore(plan)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -1592,7 +1592,7 @@ def promote(
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
-            report = repo.apply_promote(plan, verify=False)
+            report = repo.apply_promote(plan)
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -1836,7 +1836,7 @@ def import_(
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
-            report = repo.apply_import(plan, verify=False)
+            report = repo.apply_import(plan)
     except (TetherError, OSError, ValueError) as exc:
         _fail(exc)
     if json_out:

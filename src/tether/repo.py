@@ -2053,13 +2053,18 @@ class Repo:
             BackendError: A quiescence check or pin failed.
             MultiObjectError: The snapshot failed for one or more objects.
         """
-        plan = self.plan_commit(
-            message,
-            strict=strict,
-            force=force,
-            do_snapshot=do_snapshot,
-        )
-        return self.apply_commit(plan, vcs=vcs, verify=False)
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            plan = self.plan_commit(
+                message,
+                strict=strict,
+                force=force,
+                do_snapshot=do_snapshot,
+            )
+            # No re-verification: a pin names the *state* the plan captured, so a
+            # branch that moved since changes nothing about what lands.
+            return self.apply_commit(plan, vcs=vcs, verify=False)
 
     def _require_head(
         self,
@@ -2803,17 +2808,19 @@ class Repo:
                 is not set.
             MultiObjectError: A pin is missing or a fork failed.
         """
-        self.apply_new(
-            self.plan_new(
-                rev,
-                bookmark=bookmark,
-                shared=shared,
-                keep=keep,
-                eager=eager,
-                discard=discard,
-            ),
-            verify=False,
-        )
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            self.apply_new(
+                self.plan_new(
+                    rev,
+                    bookmark=bookmark,
+                    shared=shared,
+                    keep=keep,
+                    eager=eager,
+                    discard=discard,
+                ),
+            )
 
     # -- open ------------------------------------------------------------ #
     def open(
@@ -3566,28 +3573,35 @@ class Repo:
             force_prune: Delete stray branches even if they hold unpinned data
                 (or belong to a `BRANCH_IS_STORAGE` backend).
         """
-        plan = self.plan_gc(
-            prune_bookmarks=prune_bookmarks,
-            keep_bookmarks=keep_bookmarks,
-            force_prune=force_prune,
-        )
-        if dry_run:
-            report = GcReport(dry_run=True, plan=plan)
-            for a in plan.actions:
-                if a.op == "unpin":
-                    report.unpinned.setdefault(a.kind, []).append(
-                        str(a.params["pin_id"])
-                    )
-                elif a.op == "forget-working-ref":
-                    report.forgotten_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "delete-branch":
-                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "keep-branch":
-                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "delete-listing":
-                    report.deleted_listings.append(a.target)
-            return report
-        return self.apply_gc(plan)
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            plan = self.plan_gc(
+                prune_bookmarks=prune_bookmarks,
+                keep_bookmarks=keep_bookmarks,
+                force_prune=force_prune,
+            )
+            if dry_run:
+                report = GcReport(dry_run=True, plan=plan)
+                for a in plan.actions:
+                    if a.op == "unpin":
+                        report.unpinned.setdefault(a.kind, []).append(
+                            str(a.params["pin_id"])
+                        )
+                    elif a.op == "forget-working-ref":
+                        report.forgotten_working_refs.setdefault(a.key, []).append(
+                            a.target
+                        )
+                    elif a.op == "delete-branch":
+                        report.deleted_working_refs.setdefault(a.key, []).append(
+                            a.target
+                        )
+                    elif a.op == "keep-branch":
+                        report.kept_working_refs.setdefault(a.key, []).append(a.target)
+                    elif a.op == "delete-listing":
+                        report.deleted_listings.append(a.target)
+                return report
+            return self.apply_gc(plan)
 
     # -- promote (fork -> base branch) ----------------------------------- #
     def plan_promote(
@@ -3832,24 +3846,24 @@ class Repo:
             if m is None:
                 continue
             scope = (m.kind, self.backend_for(m.kind).branch_scope(m.locator))
-            source = a.params.get("source") or {}
-            branch = source.get("ref")
-            if not branch:
-                continue  # a pin or state source names no shared branch
+            # What a promote moves is the scope's *base* branch (`a.target`),
+            # whatever the source -- a working ref, a pin, a state. Every
+            # object of the scope whose base branch that is moves with it.
+            base = str(a.target)
+
+            def shares_base(other: ObjectManifest, scope=scope, base=base) -> bool:
+                backend = self.backend_for(other.kind)
+                if (other.kind, backend.branch_scope(other.locator)) != scope:
+                    return False
+                try:
+                    return backend.base_branch(other.locator) == base
+                except TetherError:
+                    return False
+
             unnamed = sorted(
                 k
                 for k, other in self.objects.items()
-                if k != a.key
-                and k not in keys
-                and (
-                    other.kind,
-                    self.backend_for(other.kind).branch_scope(other.locator),
-                )
-                == scope
-                and (
-                    self.workspace.working_refs.get(k) == branch
-                    or self.workspace.pending_forks.get(k) == branch
-                )
+                if k != a.key and k not in keys and shares_base(other)
             )
             if unnamed:
                 plan.actions[i] = Action(
@@ -3858,7 +3872,7 @@ class Repo:
                     a.kind,
                     target=a.target,
                     detail=(
-                        f"{branch} is also {', '.join(unnamed)}'s working branch; "
+                        f"{base} is also {', '.join(unnamed)}'s base branch; "
                         f"landing {a.key} alone would land theirs too -- name them: "
                         f"`tether promote {' '.join(sorted(keys | set(unnamed)))}`"
                     ),
@@ -3978,7 +3992,13 @@ class Repo:
                 locator = dict(a.params["locator"])
                 source = _source_object(a.params["source"])
                 if a.op == "fast-forward":
-                    new_state = backend.promote(locator, source)
+                    # Land what was reviewed: the target state the plan
+                    # captured, not whatever the ref's head is by now. Every
+                    # Forkable backend promotes from a state.
+                    reviewed = a.params.get("target_state")
+                    new_state = backend.promote(
+                        locator, dict(reviewed) if reviewed else source
+                    )
                     self._progress(op, "fast-forward", key=key, state=new_state)
                     return "ff", new_state
                 ref = source.ref if isinstance(source, Pin) else str(source)
@@ -4064,8 +4084,11 @@ class Repo:
 
         Equivalent to `apply_promote(plan_promote(...))`.
         """
-        plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
-        return self.apply_promote(plan, verify=False)
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            plan = self.plan_promote(keys, rev=rev, strategy=strategy, message=message)
+            return self.apply_promote(plan)
 
     # -- restore --------------------------------------------------------- #
     def plan_restore(
@@ -4324,9 +4347,10 @@ class Repo:
         self, keys: Sequence[str], rev: str, *, discard: bool = False
     ) -> dict[str, str]:
         """Re-fork `keys` from the pins at `rev` (see `plan_restore`)."""
-        return self.apply_restore(
-            self.plan_restore(keys, rev, discard=discard), verify=False
-        )
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            return self.apply_restore(self.plan_restore(keys, rev, discard=discard))
 
     # -- forget-workspace ------------------------------------------------ #
     def _workspace_root(self, workspace_id8: str) -> Path | None:
@@ -5338,10 +5362,11 @@ class Repo:
         `tether.registry.CANONICAL_COLUMNS`); missing policy fields take
         `config.defaults`. Equivalent to `apply_import(plan_import(...))`.
         """
-        specs, notes = specs_from_rows(rows, self.config.defaults)
-        return self.apply_import(
-            self.plan_import(specs, sync=sync, notes=notes), verify=False
-        )
+        # Plan and apply under one lock: planning sees the state the lock
+        # refreshed, and nothing in this checkout moves in between.
+        with self._writer_lock():
+            specs, notes = specs_from_rows(rows, self.config.defaults)
+            return self.apply_import(self.plan_import(specs, sync=sync, notes=notes))
 
     # -- diff ------------------------------------------------------------ #
     def diff(

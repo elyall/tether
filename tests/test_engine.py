@@ -933,9 +933,19 @@ def test_restore_and_promote_are_closed_over_the_branch_scope(vcs_root: Path) ->
     assert store.read(system, branch) == {"v": 0}
     assert repo.workspace.fork_points["right"] == repo.workspace.fork_points["left"]
 
-    # Promote: one fast-forward for the branch, the sibling shares its result.
+    # Promote: naming only one of the two is refused -- the base branch it
+    # moves is the other's too, whatever the source (a working ref, or a pin
+    # by revision). The bookmark as a whole fast-forwards the branch once and
+    # the sibling shares the result.
     store.write(system, branch, {"v": 2})
-    repo.commit("v2")
+    c2 = repo.commit("v2").vcs_commit
+    assert c2 is not None
+    plan = repo.plan_promote(["left"])
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert "also right's base branch" in refuse.detail
+    plan = repo.plan_promote(["left"], rev=c2)
+    assert [a.op for a in plan.actions if a.key == "left"] == ["refuse"]
+    assert store.read(system, "main") == {"v": 0}
     plan = repo.plan_promote()
     assert sorted(a.op for a in plan.actions) == ["fast-forward", "share"]
     report = repo.apply_promote(plan)
