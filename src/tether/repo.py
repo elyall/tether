@@ -4349,39 +4349,45 @@ class Repo:
                 },
             }
             op = self._begin_op("restore", plan=plan, pre=pre)
+            shares = {
+                a.key: a for a in plan.actions if a.op == "share" and "with" in a.params
+            }
             done: dict[str, str] = {}
+
+            def adopt(key: str, ref: str, then_state: State) -> None:
+                done[key] = ref
+                self.workspace.working_refs[key] = ref
+                self.workspace.pending_forks.pop(key, None)
+                self.workspace.pending_resets.pop(key, None)
+                self.workspace.fork_points[key] = dict(then_state)
+                self.workspace.last_snapshot[key] = dict(then_state)
+
+            # Every head is checked before the first reset (stale means nothing
+            # happens), and the workspace is written after *each* reset -- with
+            # the siblings that share the branch -- so a process killed between
+            # two resets leaves every branch that was reset described as such.
+            if verify:
+                for a in forks:
+                    if a.params.get("existing"):
+                        self._require_head(
+                            self.backend_for(a.kind),
+                            self.objects[a.key].locator,
+                            str(a.params["existing"]),
+                            a.params.get("head"),
+                            what=f"restore {a.key}",
+                        )
             for a in forks:
                 m = ObjectManifest.from_toml(str(a.params["then"]))
-                if verify and a.params.get("existing"):
-                    self._require_head(
-                        self.backend_for(a.kind),
-                        self.objects[a.key].locator,
-                        str(a.params["existing"]),
-                        a.params.get("head"),
-                        what=f"restore {a.key}",
-                    )
                 ref = self._fork_from_manifest(m, a.target)
                 self._progress(op, "fork", key=a.key, ref=ref)
-                done[a.key] = ref
-                self.workspace.working_refs[a.key] = ref
-                self.workspace.pending_forks.pop(a.key, None)
-                self.workspace.pending_resets.pop(a.key, None)
-                self.workspace.fork_points[a.key] = dict(a.params["then_state"])
-                self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
-            for a in plan.actions:
-                if a.op != "share" or str(a.params.get("with")) not in done:
-                    continue
-                ref = done[str(a.params["with"])]
-                done[a.key] = ref
-                self.workspace.working_refs[a.key] = ref
-                self.workspace.pending_forks.pop(a.key, None)
-                self.workspace.pending_resets.pop(a.key, None)
-                self.workspace.fork_points[a.key] = dict(a.params["then_state"])
-                self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
-            # What the branch now holds is deliberate: it corresponds to the
-            # working tree's manifest as far as staleness is concerned.
-            self._mark_base_states(done)
-            write_workspace(self.root, self.workspace)
+                adopt(a.key, ref, dict(a.params["then_state"]))
+                for sibling in shares.values():
+                    if str(sibling.params["with"]) == a.key:
+                        adopt(sibling.key, ref, dict(sibling.params["then_state"]))
+                # What the branch now holds is deliberate: it corresponds to the
+                # working tree's manifest as far as staleness is concerned.
+                self._mark_base_states(done)
+                write_workspace(self.root, self.workspace)
             self._end_op(
                 op,
                 result={

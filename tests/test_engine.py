@@ -1188,6 +1188,57 @@ def test_new_killed_during_its_forks_leaves_vcs_and_workspace_in_agreement(
     assert not fresh.workspace.pending_forks
 
 
+def test_restore_killed_between_resets_describes_what_it_reset(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two objects on two systems, restored together; the process dies on the
+    second reset. The first branch was reset *and* the workspace says so (fork
+    point, base state), so nothing looks like foreign writes afterwards."""
+    repo = Repo.init(vcs_root)
+    system_a = _mem_object(repo, "a")
+    system_b = _mem_object(repo, "b")
+    store = default_store()
+    store.write(system_a, "main", {"v": 0})
+    store.write(system_b, "main", {"v": 0})
+    c0 = repo.commit("v0").vcs_commit
+    assert c0 is not None
+    repo.new(bookmark="work", eager=True)
+    refs = dict(repo.workspace.working_refs)
+    store.write(system_a, refs["a"], {"v": 1})
+    store.write(system_b, refs["b"], {"v": 1})
+    repo.commit("v1")
+
+    backend = repo.backend_for("memory")
+    real_fork = backend.fork
+
+    def dies_on_b(locator: Locator, source: Pin | State, name: str) -> str:
+        if locator["system"] == system_b:
+            raise SystemExit(137)
+        return real_fork(locator, source, name)
+
+    before = dict(repo.workspace.fork_points)
+    monkeypatch.setattr(backend, "fork", dies_on_b)
+    with pytest.raises(SystemExit):
+        repo.restore(["a", "b"], c0)
+    monkeypatch.setattr(backend, "fork", real_fork)
+
+    fresh = Repo.find(vcs_root)
+    assert store.read(system_a, refs["a"]) == {"v": 0}  # reset happened...
+    assert store.read(system_b, refs["b"]) == {"v": 1}  # ...this one did not
+    # ...and the workspace describes exactly that: a's fork point moved to the
+    # restored state, b's is what it was.
+    assert fresh.workspace.fork_points["a"] == {
+        "snapshot_id": store.system(system_a).branches[refs["a"]]
+    }
+    assert fresh.workspace.fork_points["b"] == before["b"]
+    assert not fresh.is_stale()
+    (incomplete,) = fresh.incomplete_ops()
+    assert [(r["action"], r["key"]) for r in incomplete.progress] == [("fork", "a")]
+    # Re-running finishes the job.
+    fresh.restore(["a", "b"], c0)
+    assert store.read(system_b, refs["b"]) == {"v": 0}
+
+
 def test_an_interrupted_operation_leaves_a_started_journal_entry(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
