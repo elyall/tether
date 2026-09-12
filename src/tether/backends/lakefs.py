@@ -42,6 +42,7 @@ MAIN = "main"
 
 class LakeFSBackend(ObjectBackend):
     kind = "lakefs"
+    MATURITY = "experimental"
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

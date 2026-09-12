@@ -216,6 +216,7 @@ class SqlDoltClient:
 
 class DoltBackend(ObjectBackend):
     kind = "dolt"
+    MATURITY = "experimental"
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

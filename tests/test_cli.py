@@ -862,3 +862,21 @@ def test_cli_set(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code != 0 and "nothing to set" in r.output
     r = runner.invoke(app, ["set", "--pin", "native"])
     assert r.exit_code != 0 and "--all" in r.output
+
+
+def test_cli_version_and_backends() -> None:
+    from tether import __version__
+
+    r = runner.invoke(app, ["--version"])
+    assert r.exit_code == 0 and r.output.strip() == f"tether {__version__}"
+    r = runner.invoke(app, ["backends"])
+    assert r.exit_code == 0
+    lines = {line.split()[0]: line for line in r.output.splitlines()}
+    assert "stable" in lines["memory"] and "forkable" in lines["memory"]
+    assert "experimental" in lines["neon"]
+    r = runner.invoke(app, ["backends", "--json"])
+    rows = {row["kind"]: row for row in json.loads(r.output)}
+    assert (
+        rows["file"]["maturity"] == "stable" and "diff" in rows["file"]["capabilities"]
+    )
+    assert rows["dolt"]["maturity"] == "experimental"

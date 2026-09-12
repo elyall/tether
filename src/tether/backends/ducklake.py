@@ -97,6 +97,7 @@ def attach_sql(
 
 class DuckLakeBackend(ObjectBackend):
     kind = "ducklake"
+    MATURITY = "experimental"
     LOCAL_PATH_KEYS = ("data_path",)
     capabilities = (
         Capability.FINGERPRINT

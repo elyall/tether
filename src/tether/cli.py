@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 try:
     import typer
@@ -19,7 +19,7 @@ except ImportError as exc:  # pragma: no cover - optional dep
         "the tether CLI requires the 'cli' extra: pip install tether-vcs[cli]"
     ) from exc
 
-from tether.backends.base import HistoryEntry
+from tether.backends.base import Capability, HistoryEntry, tier_of
 from tether.errors import TetherError
 from tether.handles import (
     DeltaHandle,
@@ -51,6 +51,27 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        from tether import __version__
+
+        typer.echo(f"tether {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Print the installed tether-vcs version and exit.",
+        callback=_show_version,
+        is_eager=True,
+    ),
+) -> None:
+    """jj-style version control for heterogeneous datasets."""
 
 
 # --------------------------------------------------------------------------- #
@@ -276,6 +297,60 @@ def add(
         _fail(exc)
     suffix = f" at {loc['at']}" if "at" in loc else ""
     typer.echo(f"added {key} ({kind}){suffix}")
+    if repo.backend_for(kind).MATURITY != "stable":
+        typer.secho(
+            f"note: the {kind} backend is {repo.backend_for(kind).MATURITY}: tested "
+            "against a fake of the service, not the service itself (`tether "
+            "backends`)",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@app.command()
+def backends(
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """List backend kinds with their maturity, tier, and capabilities."""
+    from tether.backends.base import build_backend, known_kinds
+
+    rows: list[dict[str, Any]] = []
+    for kind in known_kinds():
+        try:
+            backend = build_backend(kind)
+        except TetherError as exc:
+            rows.append(
+                {
+                    "kind": kind,
+                    "installed": False,
+                    "maturity": None,
+                    "tier": None,
+                    "capabilities": [],
+                    "note": str(exc),
+                }
+            )
+            continue
+        rows.append(
+            {
+                "kind": kind,
+                "installed": True,
+                "maturity": backend.MATURITY,
+                "tier": tier_of(backend.capabilities).name.lower(),
+                "capabilities": [
+                    c.name.lower() for c in Capability if c in backend.capabilities
+                ],
+                "note": None,
+            }
+        )
+    if as_json:
+        _emit(rows, as_json=True)
+        return
+    for r in rows:
+        if not r["installed"]:
+            typer.echo(f"{r['kind']:<10} not installed")
+            continue
+        caps = ", ".join(str(c) for c in r["capabilities"])
+        typer.echo(f"{r['kind']:<10} {r['maturity']:<13} {r['tier']:<11} {caps}")
 
 
 def _build_locator(

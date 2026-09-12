@@ -251,6 +251,13 @@ class ObjectBackend(Protocol):
     kind: str
     capabilities: Capability
 
+    MATURITY: str = "stable"
+    """How much the backend has been exercised: ``"stable"`` runs its full
+    lifecycle against the real system in CI (embedded stores and libraries);
+    ``"experimental"`` is tested against a fake of a network service and has
+    not been run against the service itself by the maintainers. `tether
+    backends` prints it; `add` mentions it for experimental kinds."""
+
     VOLATILE_KEYS: frozenset[str] = frozenset()
     """State keys that *address* the data without identifying it -- a Neon LSN
     that advances on checkpoints, a change id derived from a sha. They stay in

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tether.backends.base import ObjectBackend
 from tether.backends.git import GitBackend
 from tether.errors import BackendError
 from tether.handles import GitHandle
@@ -35,6 +36,43 @@ def _commit_on(path: Path, branch: str, text: str) -> str:
     _git(path, "add", "-A")
     _git(path, "commit", "-qm", "change")
     return _git(path, "rev-parse", "HEAD")
+
+
+class GitHarness:
+    """Conformance harness: one code repository per object, commits as writes."""
+
+    def __init__(self, tmp: Path) -> None:
+        self.backend: ObjectBackend = GitBackend()
+        self.tmp = tmp
+        self._n = 0
+
+    def new_object(self) -> dict:
+        self._n += 1
+        path = self.tmp / f"code{self._n}"
+        _init_code_repo(path)
+        return {
+            "path": str(path),
+            "ref": "main" if _default_is_main(path) else "master",
+        }
+
+    def mutate(self, locator: dict, working_ref: str | None) -> None:
+        self._n += 1
+        path = Path(locator["path"])
+        branch = working_ref or locator["ref"]
+        _commit_on(path, branch, f"print({self._n})\n")
+        # Leave HEAD on the base branch: git refuses to move a checked-out
+        # branch (`branch -f`), which is what a fork reset does.
+        _git(path, "checkout", "-q", locator["ref"])
+
+
+def _default_is_main(path: Path) -> bool:
+    return _git(path, "symbolic-ref", "--short", "HEAD") == "main"
+
+
+def test_git_backend_conformance(tmp_path: Path) -> None:
+    from tether.testing import run_conformance
+
+    run_conformance(GitHarness(tmp_path))
 
 
 def test_git_backend_lifecycle(vcs_root: Path) -> None:
