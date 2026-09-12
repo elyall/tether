@@ -2126,7 +2126,21 @@ class Repo:
                 if name in backend.list_working_refs(m.locator):
                     existing = name
             except TetherError as exc:
-                plan.notes.append(f"{key}: could not list branches ({exc})")
+                # Not knowing whether the branch exists is not the same as it
+                # being absent: a fork of an existing branch resets it. Refuse.
+                plan.actions.append(
+                    Action(
+                        "refuse",
+                        key,
+                        m.kind,
+                        target=name,
+                        detail=(
+                            f"could not list branches ({exc}); whether {name} "
+                            "exists is unknown and a fork would reset it blind"
+                        ),
+                    )
+                )
+                continue
             if existing is not None:
                 try:
                     head = backend.fingerprint(m.locator, existing)
@@ -2303,6 +2317,18 @@ class Repo:
                             a.params.get("head"),
                             what=f"new {a.key}",
                         )
+                    elif a.op == "fork":
+                        # Planned as a fresh branch: if one appeared since
+                        # (another checkout joined the bookmark), a fork would
+                        # reset it.
+                        m = self.objects[a.key]
+                        if a.target in self.backend_for(a.kind).list_working_refs(
+                            m.locator
+                        ):
+                            raise StalePlanError(
+                                f"new {a.key}: {a.target} exists since the plan "
+                                "was made; re-run the plan"
+                            )
             pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
             # The heads `new` will reset are known from the plan; journal them now
             # so an interrupted run still says what it was about to replace.
@@ -2958,6 +2984,10 @@ class Repo:
                 "force_prune": force_prune,
                 "manifest_hash": self.current_manifest_hash(),
                 "vcs_head": self._vcs_head_or_none(),
+                # Every visible commit, not just this checkout's: a bookmark
+                # committed in another workspace may reference a pin this plan
+                # would release, and this checkout's head would not move.
+                "history_digest": self.vcs.history_digest(),
             },
         )
 
@@ -3222,6 +3252,13 @@ class Repo:
                             "history moved since the gc plan was made (a new commit "
                             "may reference a pin it would release); re-run the plan"
                         )
+            digest_then = plan.context.get("history_digest")
+            if digest_then is not None and self.vcs.history_digest() != digest_then:
+                raise StalePlanError(
+                    "history changed since the gc plan was made -- a commit in this "
+                    "or another workspace may reference a pin it would release; "
+                    "re-run the plan"
+                )
             if plan.context.get("manifest_hash") != self.current_manifest_hash():
                 raise StalePlanError(
                     "manifests changed since the gc plan was made; re-run the plan"
@@ -3603,14 +3640,28 @@ class Repo:
                         )
                     # ... and the source: what lands must be what was reviewed.
                     source = a.params.get("source") or {}
+                    target_state = a.params.get("target_state")
                     if "ref" in source:
                         self._require_head(
                             backend,
                             locator,
                             str(source["ref"]),
-                            a.params.get("target_state"),
+                            target_state,
                             what=f"promote {a.key}",
                         )
+                    elif "pin" in source and target_state is not None:
+                        # A pin is a name someone can move; land only what it
+                        # named when the plan was reviewed.
+                        pin = Pin.from_dict(dict(source["pin"]))
+                        checked = backend.verify(
+                            locator, dict(target_state), pin, deep=False
+                        )
+                        if checked.status is not VerifyStatus.OK:
+                            raise StalePlanError(
+                                f"promote {a.key}: pin {pin.ref} no longer names the "
+                                f"reviewed state ({checked.status.value}: "
+                                f"{checked.message}); re-run the plan"
+                            )
 
             message = str(plan.context.get("message") or "tether promote")
             by_key = {a.key: a for a in writes}

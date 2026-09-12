@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           uv venv /tmp/smoke
-          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          uv pip install --python /tmp/smoke/bin/python "$(ls dist/*.whl)[cli]"
           cd /tmp
           /tmp/smoke/bin/tether --version
           git init -q smoke-ds && cd smoke-ds

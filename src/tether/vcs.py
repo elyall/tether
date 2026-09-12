@@ -19,6 +19,7 @@ plumbing works there), which is ~50x cheaper per read.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 import shutil
 import subprocess
@@ -80,6 +81,11 @@ class _Run:
     returncode: int
     stdout: str
     stderr: str
+
+
+def _digest_revs(revs: list[str]) -> str:
+    """Order-independent digest of a set of commit ids."""
+    return hashlib.sha256("\n".join(sorted(revs)).encode()).hexdigest()[:16]
 
 
 def _run(
@@ -342,6 +348,11 @@ class VcsAdapter(Protocol):
 
     def history_revs(self) -> list[str]:
         """Return commit ids reachable in the repository."""
+
+    def history_digest(self) -> str:
+        """A digest of every visible commit id: changes whenever any workspace
+        or bookmark of this repository gains or loses a commit. Plans whose
+        safety rests on what history references (``gc``) bind to it."""
 
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         """Yield ``(commit id, files_at(commit, reldir))`` across all history.
@@ -615,6 +626,9 @@ class JjAdapter:
             'commit_id ++ "\\n"',
         )
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def history_digest(self) -> str:
+        return _digest_revs(self.history_revs())
 
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         revs = self.history_revs()
@@ -1096,6 +1110,9 @@ class GitAdapter:
         if out.returncode != 0:
             return []
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def history_digest(self) -> str:
+        return _digest_revs(self.history_revs())
 
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         revs = self.history_revs()

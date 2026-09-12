@@ -494,6 +494,55 @@ def test_saved_gc_plan_is_bound_to_history(vcs_root: Path) -> None:
         repo.apply_gc(plan)
 
 
+def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """A pin that was an orphan at plan time may be referenced by a commit
+    another checkout made since -- this checkout's head and manifests do not
+    move. The plan is bound to every visible commit, so apply refuses."""
+    import subprocess
+
+    from tether.errors import StalePlanError
+    from tether.manifest import compute_pin_id
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    # An orphan pin: a state no commit names.
+    backend = repo.backend_for("memory")
+    m = repo.objects["db"]
+    orphan_state = {"snapshot_id": store.write(system, "main", {"v": 9})}
+    orphan = backend.pin(
+        m.locator,
+        orphan_state,
+        compute_pin_id(
+            "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
+        ),
+    )
+    plan = repo.plan_gc()
+    assert [a.target for a in plan.actions if a.op == "unpin"] == [orphan.ref]
+
+    # Meanwhile another checkout commits a manifest naming that state.
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    other = Repo.find(other_root)
+    _someone_else_commits(other, "db", orphan_state)
+    other.vcs.commit(other._vcs_paths(), "theirs names the orphan")
+
+    assert repo.vcs.current_rev() == plan.context["vcs_head"]  # our head did not move
+    with pytest.raises(StalePlanError, match="another workspace"):
+        repo.apply_gc(plan)
+    assert orphan.ref in store.system(system).tags
+    # A fresh plan sees the reference and keeps the pin.
+    assert not [a for a in repo.plan_gc().actions if a.op == "unpin"]
+
+
 def test_promote_checks_the_source_it_reviewed(vcs_root: Path) -> None:
     """What lands must be what the plan showed: a fork that gained writes after
     planning is not promoted from a stale plan."""
@@ -513,6 +562,81 @@ def test_promote_checks_the_source_it_reviewed(vcs_root: Path) -> None:
         repo.apply_promote(plan)
     heads = store.system(system).branches
     assert heads["main"] != heads[branch]  # nothing landed
+
+
+def test_promote_rev_checks_the_pin_it_reviewed(vcs_root: Path) -> None:
+    """A saved `promote --rev` plan names a pin; if the pin is moved before
+    apply, what it names is not what was reviewed -- refuse."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 0})
+    repo.commit("v0")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"v": 1})
+    c1 = repo.commit("v1").vcs_commit
+    pin = repo.objects["db"].pin
+    assert c1 is not None and pin is not None
+    store.write(system, branch, {"v": 2})
+    repo.commit("v2")
+    plan = repo.plan_promote(rev=c1)  # land v1 (by its pin) on main, not v2
+    (write,) = [a for a in plan.actions if a.op == "fast-forward"]
+    assert "pin" in write.params["source"]
+
+    s_other = store.write(system, branch, {"v": 3})
+    store.system(system).tags[pin.ref] = s_other  # moved after review
+    with pytest.raises(StalePlanError, match="no longer names the reviewed state"):
+        repo.apply_promote(plan)
+    assert store.read(system, "main") == {"v": 0}
+
+
+def test_new_refuses_when_branches_cannot_be_listed(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not knowing whether the bookmark's branch exists is not the same as it
+    being absent: a fork would reset it. `new` refuses, and a fork planned as
+    fresh is re-checked for absence at apply."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    store.write(system, branch, {"mine": 1})
+    repo.new("main")  # leave the bookmark; its branch keeps the writes
+
+    backend = repo.backend_for("memory")
+    real_list = backend.list_working_refs
+
+    def blind(locator: Locator) -> list[str]:
+        raise BackendError("listing unavailable", kind="memory")
+
+    monkeypatch.setattr(backend, "list_working_refs", blind)
+    plan = repo.plan_new("work", eager=True)
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert "could not list branches" in refuse.detail
+    with pytest.raises(TetherError, match="could not list branches"):
+        repo.new("work", eager=True)
+    monkeypatch.setattr(backend, "list_working_refs", real_list)
+    assert store.read(system, branch) == {"mine": 1}  # untouched
+
+    # A plan made while the branch was absent must not reset one that
+    # appeared since.
+    repo.vcs.bookmark_delete("work")
+    repo.gc(dry_run=False, prune_bookmarks=True, force_prune=True)
+    assert branch not in store.system(system).branches
+    plan = repo.plan_new(bookmark="work", eager=True)
+    (fork,) = [a for a in plan.actions if a.op == "fork"]
+    assert not fork.params.get("existing")
+    store.system(system).branches[branch] = store.write(system, "main", {"late": 1})
+    with pytest.raises(StalePlanError, match="exists since the plan was made"):
+        repo.apply_new(plan)
+    assert store.read(system, branch) == {"late": 1}
 
 
 def test_lazy_fork_never_resets_a_branch_new_did_not_see(vcs_root: Path) -> None:
