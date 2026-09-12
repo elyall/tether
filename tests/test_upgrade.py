@@ -502,3 +502,36 @@ def test_upgrade_v4_moves_dotted_keys_to_their_own_manifest_file(
     repo.add("features", "memory", {"system": system, "branch": "main"})
     assert (vcs_root / ".tether" / "objects" / "features.toml").exists()
     assert set(Repo.find(vcs_root).objects) == {"features", "features.v2"}
+
+
+def test_upgrade_v4_resolves_relative_locators_against_the_root(
+    vcs_root: Path,
+) -> None:
+    """A pre-v4 manifest with a relative local path meant a different file from
+    each directory; v4 resolves it against the dataset root, the only directory
+    a committed manifest can be said to mean."""
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/cache\n"
+    )
+    (vcs_root / "tether.toml").write_text(V3_CONFIG)
+    data = vcs_root / "data"
+    data.mkdir()
+    (data / "a.bin").write_bytes(b"a")
+    text = ObjectManifest(
+        key="raw", kind="file", locator={"uri": "data"}, policy=Policy()
+    ).to_toml()
+    (vcs_root / ".tether" / "objects" / "raw.toml").write_text(text)
+    vcs = detect_vcs(vcs_root)
+    vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v3")
+
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan = repo.plan_upgrade()
+    (rewrite,) = [a for a in plan.actions if a.op == "rewrite-locator"]
+    assert rewrite.key == "raw" and rewrite.params["locator"]["uri"] == str(
+        data.resolve()
+    )
+    report = repo.apply_upgrade(plan)
+    assert not report.failed and report.rewritten_manifests == ["raw"]
+    repo = Repo.find(vcs_root)
+    assert repo.objects["raw"].locator["uri"] == str(data.resolve())

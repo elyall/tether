@@ -726,6 +726,30 @@ def test_one_writer_per_checkout(vcs_root: Path) -> None:
     repo.new(bookmark="work")
 
 
+def test_relative_local_paths_are_pinned_down_at_add(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` from a subdirectory with a relative path stores the absolute path
+    it meant, so every later command (and every clone) reads the same files
+    regardless of its working directory."""
+    sub = vcs_root / "analysis" / "notebooks"
+    sub.mkdir(parents=True)
+    data = vcs_root / "analysis" / "data"
+    data.mkdir()
+    (data / "a.bin").write_bytes(b"a")
+    repo = Repo.init(vcs_root)
+    monkeypatch.chdir(sub)
+    repo.add("raw", "file", {"uri": "../data"})
+    stored = repo.objects["raw"].locator["uri"]
+    assert Path(stored).is_absolute() and Path(stored) == data.resolve()
+    # URLs and absolute paths pass through untouched.
+    repo.add("remote", "file", {"uri": "s3://bucket/prefix/"})
+    assert repo.objects["remote"].locator["uri"] == "s3://bucket/prefix/"
+    repo.remove("remote")
+    monkeypatch.chdir(vcs_root)
+    assert "raw" in repo.commit("from the root").unrecoverable  # recorded from here
+
+
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
     """`diff REV` is REV -> working tree, not REV -> nothing."""
     repo = Repo.init(vcs_root)

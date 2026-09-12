@@ -33,6 +33,7 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 class IcechunkBackend(ObjectBackend):
     kind = "icechunk"
+    LOCAL_PATH_KEYS = ("uri",)
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

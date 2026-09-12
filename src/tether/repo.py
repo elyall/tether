@@ -31,6 +31,7 @@ from tether.backends.base import (
     Tier,
     VerifyReport,
     VerifyStatus,
+    absolutize_locator,
     base_at,
     build_backend,
     content_state,
@@ -1181,12 +1182,14 @@ class Repo:
     ) -> ObjectManifest:
         if key in self.objects:
             raise ConfigError(f"object already exists: {key}")
-        # Validate the backend kind eagerly.
-        self.backend_for(kind)
+        # Validate the backend kind eagerly -- and pin down relative local
+        # paths now, against the caller's directory: the manifest is read from
+        # every directory and every clone.
+        backend = self.backend_for(kind)
         manifest = ObjectManifest(
             key=key,
             kind=kind,
-            locator=dict(locator),
+            locator=absolutize_locator(backend, dict(locator), Path.cwd()),
             policy=policy or self.config.defaults,
         )
         write_object(self.root, manifest)
@@ -4700,7 +4703,10 @@ class Repo:
         for key in sorted(wanted):
             spec = wanted[key]
             current = self.objects.get(key)
-            params = {"locator": dict(spec.locator), "policy": spec.policy.to_dict()}
+            locator = absolutize_locator(
+                self.backend_for(spec.kind), dict(spec.locator), Path.cwd()
+            )
+            params = {"locator": locator, "policy": spec.policy.to_dict()}
             if current is None:
                 plan.actions.append(
                     Action(
@@ -4719,7 +4725,7 @@ class Repo:
                     f"{spec.kind!r}; remove and re-add it to change kinds"
                 )
             changed = []
-            if dict(current.locator) != dict(spec.locator):
+            if dict(current.locator) != locator:
                 changed.append("locator")
             if current.policy != spec.policy:
                 changed.append("policy")

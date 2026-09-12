@@ -271,6 +271,7 @@ def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
 
 class FileBackend(ObjectBackend):
     kind = "file"
+    LOCAL_PATH_KEYS = ("uri", "path")
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

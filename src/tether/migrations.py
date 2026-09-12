@@ -567,7 +567,44 @@ def _misplaced_manifests(repo: Repo) -> list[tuple[Path, Path, str]]:
     return out
 
 
+def _relative_locators(repo: Repo) -> list[tuple[str, dict, dict]]:
+    """Objects whose locator holds a relative local path: `(key, old, new)`.
+
+    Before v4 a relative path was stored as typed and resolved against
+    whatever directory each later command ran in. The only directory the
+    committed manifest can be said to mean is the dataset root, so that is
+    what the path is resolved against here.
+    """
+    from tether.backends.base import absolutize_locator
+
+    out: list[tuple[str, dict, dict]] = []
+    for key in sorted(repo.objects):
+        m = repo.objects[key]
+        try:
+            backend = repo.backend_for(m.kind)
+        except TetherError:
+            continue  # an uninstalled extra; the locator stays as it is
+        resolved = absolutize_locator(backend, dict(m.locator), repo.root)
+        if resolved != dict(m.locator):
+            out.append((key, dict(m.locator), resolved))
+    return out
+
+
 def _plan_v4(repo: Repo, plan: Plan) -> None:
+    for key, old, new in _relative_locators(repo):
+        changed = ", ".join(
+            f"{k}: {old[k]!r} -> {new[k]!r}" for k in new if old.get(k) != new[k]
+        )
+        plan.actions.append(
+            Action(
+                "rewrite-locator",
+                key,
+                detail=f"resolve the relative path against the dataset root "
+                f"({changed}); a locator used to mean a different path from each "
+                "directory",
+                params={"migration": 4, "locator": new},
+            )
+        )
     moves = _misplaced_manifests(repo)
     for path, want, key in moves:
         plan.actions.append(
@@ -581,23 +618,32 @@ def _plan_v4(repo: Repo, plan: Plan) -> None:
                 params={"migration": 4},
             )
         )
-    if not moves:
-        plan.notes.append("v4: every manifest already sits at its key's path")
+    if not moves and not any(a.op == "rewrite-locator" for a in plan.actions):
+        plan.notes.append(
+            "v4: every manifest already sits at its key's path and no locator "
+            "holds a relative path"
+        )
     plan.actions.append(
         Action(
             "vcs-commit",
-            target="tether upgrade: v3 -> v4 (one manifest file per key)",
+            target="tether upgrade: v3 -> v4 (one manifest file per key; absolute "
+            "local paths)",
             detail="manifests of keys whose last segment contains a dot move to "
-            "`<key>.toml`; history is read by the key each manifest embeds and "
-            "stays as it is",
+            "`<key>.toml`, and relative local paths in locators become absolute; "
+            "history is read by the key each manifest embeds and stays as it is",
             params={"migration": 4},
         )
     )
 
 
 def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
-    from tether.manifest import read_objects, write_config
+    from tether.manifest import read_objects, write_config, write_object
 
+    for key, _old, new in _relative_locators(repo):
+        updated = dataclasses.replace(repo.objects[key], locator=new)
+        write_object(repo.root, updated)
+        repo.objects[key] = updated
+        report.rewritten_manifests.append(key)
     for path, want, key in _misplaced_manifests(repo):
         want.parent.mkdir(parents=True, exist_ok=True)
         if want.exists():

@@ -264,6 +264,12 @@ class ObjectBackend(Protocol):
         (region, credential references, source branch, ...).
         """
 
+    LOCAL_PATH_KEYS: tuple[str, ...] = ()
+    """Locator keys whose value may be a local filesystem path. The engine
+    turns a relative one into an absolute path when the object is registered
+    (`add`, `import`), against the caller's working directory, so a committed
+    locator means the same path from every directory and every clone."""
+
     def branch_scope(self, locator: Locator) -> str:
         """The native resource that owns branches, as a stable string.
 
@@ -565,6 +571,28 @@ def content_state(backend: ObjectBackend, state: State | None) -> State | None:
     if not volatile:
         return state
     return {k: v for k, v in state.items() if k not in volatile}
+
+
+def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> Locator:
+    """Resolve relative local paths in `locator` against `base`.
+
+    Only the keys the backend lists in :attr:`ObjectBackend.LOCAL_PATH_KEYS`
+    are touched, and only when the value is a bare relative path: URLs
+    (`s3://`, `file://`, `ducklake:`...) and absolute paths pass through. A
+    locator is committed and read from any directory and any clone, so the
+    path it names must not depend on where `add` happened to run.
+    """
+    from urllib.parse import urlparse
+
+    out = dict(locator)
+    for key in backend.LOCAL_PATH_KEYS:
+        value = out.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        if urlparse(value).scheme or Path(value).is_absolute():
+            continue
+        out[key] = str((base / value).resolve())
+    return out
 
 
 def effective_capabilities(

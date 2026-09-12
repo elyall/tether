@@ -51,6 +51,7 @@ def _tag_target(meta: dict[str, Any]) -> tuple[str, int]:
 
 class LanceBackend(ObjectBackend):
     kind = "lance"
+    LOCAL_PATH_KEYS = ("uri",)
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

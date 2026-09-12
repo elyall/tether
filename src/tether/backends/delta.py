@@ -35,6 +35,7 @@ from tether.manifest import Locator, Pin, State
 
 class DeltaBackend(ObjectBackend):
     kind = "delta"
+    LOCAL_PATH_KEYS = ("uri",)
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
