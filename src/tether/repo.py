@@ -1071,6 +1071,24 @@ class Repo:
         for rev, files in self.vcs.iter_history_files(self._objects_reldir()):
             yield rev, self._parse_manifests(files)
 
+    def _vcs_commit_landed(self, before: Mapping[str, Any] | None) -> str | None:
+        """The commit id if the VCS position moved since `before` (a commit
+        landed even though the adapter raised afterwards), else `None`."""
+        try:
+            now = self.vcs.position()
+        except VcsError:
+            return None
+        then = dict(before or {})
+        if now.get("kind") == "jj":
+            # The working-copy commit id changes on every snapshot; what tells
+            # a landed commit is `@` having moved onto a new parent.
+            if now.get("parent") and now.get("parent") != then.get("parent"):
+                return str(now["parent"])
+            return None
+        if now.get("commit") and now.get("commit") != then.get("commit"):
+            return str(now["commit"])
+        return None
+
     def _vcs_head_or_none(self) -> str | None:
         """The current VCS revision, or `None` before the first commit."""
         try:
@@ -1821,6 +1839,34 @@ class Repo:
                         self._vcs_paths(), message, advance=self.workspace.bookmark
                     )
             except Exception as exc:
+                landed = self._vcs_commit_landed(pre["vcs"]) if vcs else None
+                if landed is not None:
+                    # The dataset commit exists: it names the pins and carries
+                    # the manifests, so releasing them would break history.
+                    # Keep everything, finish the operation as a commit that
+                    # succeeded, and surface the trailing error.
+                    result.vcs_commit = landed
+                    self.objects = read_objects(self.root)
+                    self._mark_base_states(
+                        k
+                        for k in outcomes
+                        if k in self.workspace.working_refs
+                        or k in self.workspace.pending_forks
+                    )
+                    write_workspace(self.root, self.workspace)
+                    self._end_op(
+                        op,
+                        result={
+                            "vcs_commit": landed,
+                            "pinned": {
+                                k: (p.id if p else None)
+                                for k, p in result.pinned.items()
+                            },
+                            "unrecoverable": list(result.unrecoverable),
+                            "failed_after_commit": str(exc),
+                        },
+                    )
+                    raise
                 # Compensate everything this call did: pins it created, manifests
                 # and listings it wrote, so the working tree is as before and the
                 # journal says what was attempted and that it did not finish.

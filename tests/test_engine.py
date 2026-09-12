@@ -837,6 +837,45 @@ def test_commit_compensates_manifests_and_journals_the_attempt(
     assert newest.result["rolled_back"] and "disk full" in newest.result["failed"]
 
 
+def test_commit_keeps_its_pins_when_the_vcs_commit_landed_before_the_error(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter that writes the commit and then fails (say, on moving the
+    bookmark) must not trigger compensation: history now names the new pin, so
+    releasing it would leave a commit whose pin is missing."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 1})
+    repo.commit("v1")
+    store.write(system, "main", {"v": 2})
+
+    real_commit = repo.vcs.commit
+
+    def commit_then_raise(
+        paths: list[str], message: str, *, advance: str | None = None
+    ) -> str:
+        real_commit(paths, message, advance=advance)
+        raise VcsError("bookmark could not be moved")
+
+    monkeypatch.setattr(repo.vcs, "commit", commit_then_raise)
+    with pytest.raises(VcsError, match="bookmark could not be moved"):
+        repo.commit("v2")
+    fresh = Repo.find(vcs_root)
+    # The commit is history, the manifest records v2, and its pin is alive.
+    m = fresh.objects["db"]
+    assert m.pin is not None and m.pin.ref in store.system(system).tags
+    assert len(store.system(system).tags) == 2
+    assert all(r.ok for r in fresh.verify().values())
+    newest = fresh.ops()[0]
+    assert newest.command == "commit" and not newest.incomplete
+    assert (
+        newest.result["vcs_commit"]
+        and "bookmark" in newest.result["failed_after_commit"]
+    )
+    assert not fresh.is_stale()
+
+
 def test_an_interrupted_operation_leaves_a_started_journal_entry(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
