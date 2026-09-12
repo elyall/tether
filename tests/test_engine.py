@@ -593,6 +593,40 @@ def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
     assert not [a for a in repo.plan_gc().actions if a.op == "unpin"]
 
 
+def test_commit_and_gc_serialize_across_checkouts_of_one_repository(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """The checkout lock cannot order a gc here against a commit in another
+    workspace; the repository-wide lock does. Both checkouts resolve the same
+    shared store, and a commit waits while a gc holds it."""
+    import subprocess
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    other = Repo.find(other_root)
+    assert other.vcs.shared_dir() == repo.vcs.shared_dir()
+    assert other.vcs.shared_dir().is_dir()
+
+    other.REPO_LOCK_TIMEOUT = 0.3
+    store.write(system, "main", {"v": 2})
+    # What apply_gc holds while it decides and releases:
+    with (
+        repo._repo_lock(),
+        pytest.raises(TetherError, match="committing or collecting"),
+    ):
+        other.commit("racing")
+    other.commit("after")  # released: no lock error
+
+
 def test_promote_checks_the_source_it_reviewed(vcs_root: Path) -> None:
     """What lands must be what the plan showed: a fork that gained writes after
     planning is not promoted from a stale plan."""
@@ -949,6 +983,35 @@ def test_an_interrupted_operation_leaves_a_started_journal_entry(
     assert fresh.undo().op.command == "commit"
     notes = fresh.plan_repair().notes
     assert any(incomplete.id in n and "never finished" in n for n in notes)
+
+
+def test_a_long_lived_repo_does_not_write_back_stale_workspace_state(
+    vcs_root: Path,
+) -> None:
+    """A Repo constructed earlier (a notebook, a service) snapshots after
+    another process moved the checkout to a bookmark: the snapshot cache must
+    land in the workspace as it is *now*, not clobber it with the old one --
+    and every writing command starts from the on-disk state."""
+    stale = Repo.init(vcs_root)
+    system = _mem_object(stale)
+    store = default_store()
+    stale.commit("baseline")
+    assert stale.workspace.bookmark == "main"
+
+    fresh = Repo.find(vcs_root)
+    fresh.new(bookmark="work", eager=True)
+    branch = fresh.workspace.working_refs["db"]
+
+    store.write(system, branch, {"v": 1})
+    stale.snapshot()  # in-memory view still says trunk
+    now = Repo.find(vcs_root).workspace
+    assert now.bookmark == "work" and now.working_refs == {"db": branch}
+    # And the stale Repo learnt where the checkout is: its writable open goes
+    # to the bookmark's branch, not the trunk.
+    handle = stale.open("db", read_only=False)
+    assert isinstance(handle, MemoryHandle) and handle.ref == branch
+    assert stale.commit("from the stale repo").pinned["db"] is not None
+    assert Repo.find(vcs_root).workspace.bookmark == "work"
 
 
 def test_one_writer_per_checkout(vcs_root: Path) -> None:

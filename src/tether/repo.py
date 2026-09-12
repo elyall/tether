@@ -528,6 +528,7 @@ class Repo:
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
         self._lock_depth = 0
+        self._repo_lock_depth = 0
 
     @contextlib.contextmanager
     def _writer_lock(self) -> Iterator[None]:
@@ -538,6 +539,12 @@ class Repo:
         other's half-done work. The lock is advisory (`flock` on
         `.tether/lock`), re-entrant within one `Repo`, and held only while the
         command runs, so a stale file after a crash locks nothing.
+
+        Taking the lock also re-reads `workspace.toml` and the manifests: a
+        `Repo` that has lived a while (a notebook, a service) must not write
+        back the workspace it loaded at construction over what another
+        process wrote since. Between commands a `Repo` holds no unsaved state,
+        so the refresh loses nothing.
         """
         if self._lock_depth:
             self._lock_depth += 1
@@ -547,6 +554,7 @@ class Repo:
                 self._lock_depth -= 1
             return
         if fcntl is None:
+            self._refresh()
             yield
             return
         path = _m.tether_path(self.root) / _m.LOCK_FILENAME
@@ -561,11 +569,72 @@ class Repo:
                 ) from exc
             self._lock_depth = 1
             try:
+                self._refresh()
                 yield
             finally:
                 self._lock_depth = 0
                 with contextlib.suppress(OSError):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    REPO_LOCK_TIMEOUT = 60.0
+    """Seconds a command waits for the repository-wide lock before giving up."""
+
+    @contextlib.contextmanager
+    def _repo_lock(self) -> Iterator[None]:
+        """One writer per *repository*, across every checkout of it.
+
+        The checkout lock cannot order a `gc` here against a `commit` in
+        another workspace of the same repository, and that pair races: the
+        commit references a pin after gc decided it was unreferenced and
+        before it was released. Commands that create references to pins
+        (`commit`, `pull`) or release pins (`gc`), and the ones that remove
+        commits from history (`undo`, `abandon`), take this lock -- a `flock`
+        on `tether.lock` in the store every checkout shares (git's common
+        dir, jj's repo dir). Waiting, not failing: these commands are short.
+        """
+        if self._repo_lock_depth or fcntl is None:
+            self._repo_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._repo_lock_depth -= 1
+            return
+        import time
+
+        path = self.vcs.shared_dir() / "tether.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", encoding="utf-8") as fh:
+            deadline = time.monotonic() + self.REPO_LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TetherError(
+                            "another tether command is committing or collecting "
+                            f"in a checkout of this repository ({path} is locked); "
+                            "wait for it to finish"
+                        ) from exc
+                    time.sleep(0.05)
+            self._repo_lock_depth = 1
+            try:
+                yield
+            finally:
+                self._repo_lock_depth = 0
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _refresh(self) -> None:
+        """Reload the per-checkout state from disk (see `_writer_lock`).
+
+        A checkout that has never written `workspace.toml` keeps the in-memory
+        state: its workspace id was minted at construction and is written with
+        the first command.
+        """
+        if _m.workspace_path(self.root).is_file():
+            self.workspace = read_workspace(self.root)
+        self.objects = read_objects(self.root)
 
     # -- construction ---------------------------------------------------- #
     @classmethod
@@ -1482,17 +1551,22 @@ class Repo:
         # Cache what was actually read. A partial (commit-time) snapshot must
         # not overwrite what an earlier fan-out learned about upstream: a
         # `behind` object stays `behind` in a local `status` after an unrelated
-        # commit. Objects no longer registered drop out.
-        cached = {
-            k: v for k, v in self.workspace.last_snapshot.items() if k in self.objects
-        }
-        for key in keys:  # fingerprinted now
-            if key in states:
-                cached[key] = states[key]
-        for key, state in states.items():  # positions filled in: only where unknown
-            cached.setdefault(key, state)
-        self.workspace.touch_snapshot(cached)
-        write_workspace(self.root, self.workspace)
+        # commit. Objects no longer registered drop out. The cache is written
+        # under the lock, into the workspace as it is *now* on disk -- not the
+        # one this Repo loaded, which another process may have moved since.
+        with self._writer_lock():
+            cached = {
+                k: v
+                for k, v in self.workspace.last_snapshot.items()
+                if k in self.objects
+            }
+            for key in keys:  # fingerprinted now
+                if key in states:
+                    cached[key] = states[key]
+            for key, state in states.items():  # positions: only where unknown
+                cached.setdefault(key, state)
+            self.workspace.touch_snapshot(cached)
+            write_workspace(self.root, self.workspace)
         return states
 
     def _enforce_immutability(self, states: dict[str, State]) -> None:
@@ -1743,7 +1817,7 @@ class Repo:
             BackendError: A pin failed (pins created by this call are released
                 best-effort).
         """
-        with self._writer_lock():
+        with self._writer_lock(), self._repo_lock():
             if plan.command != "commit":
                 raise ConfigError(f"expected a commit plan, got {plan.command!r}")
             message = str(plan.context.get("message", ""))
@@ -3293,7 +3367,7 @@ class Repo:
         failures are aggregated into `MultiObjectError` after every action has
         been attempted.
         """
-        with self._writer_lock():
+        with self._writer_lock(), self._repo_lock():
             if plan.command != "gc":
                 raise ConfigError(f"expected a gc plan, got {plan.command!r}")
             # Unpins are justified by what history references; a commit made since
@@ -4279,7 +4353,7 @@ class Repo:
             VcsError: The revision cannot be abandoned (git: not on the current
                 branch, dirty tree, or a conflict outside the dataset).
         """
-        with self._writer_lock():
+        with self._writer_lock(), self._repo_lock():
             pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
             # A bookmark on a commit being abandoned must survive: jj deletes it,
             # git leaves it on the dropped commit. Move it to the nearest kept
@@ -4457,7 +4531,7 @@ class Repo:
             TetherError: Nothing to undo, an unknown id, a branch with writes
                 (without `discard`), or an operation that cannot be reversed.
         """
-        with self._writer_lock():
+        with self._writer_lock(), self._repo_lock():
             entries = self.ops()
             if op_id is None:
                 target = next((e for e in entries if e.undoable), None)

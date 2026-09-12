@@ -354,6 +354,11 @@ class VcsAdapter(Protocol):
         or bookmark of this repository gains or loses a commit. Plans whose
         safety rests on what history references (``gc``) bind to it."""
 
+    def shared_dir(self) -> Path:
+        """The directory every checkout of this repository shares (git's common
+        dir; jj's repo dir), where a lock that must be seen by all of them
+        can live. For a single checkout it is the checkout's own store."""
+
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         """Yield ``(commit id, files_at(commit, reldir))`` across all history.
 
@@ -629,6 +634,15 @@ class JjAdapter:
 
     def history_digest(self) -> str:
         return _digest_revs(self.history_revs())
+
+    def shared_dir(self) -> Path:
+        repo = self.root / ".jj" / "repo"
+        if repo.is_file():
+            # A secondary workspace: the file holds the path of the primary
+            # workspace's repo dir, relative to this `.jj/`.
+            target = repo.read_text(encoding="utf-8").strip()
+            return (repo.parent / target).resolve()
+        return repo
 
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         revs = self.history_revs()
@@ -1113,6 +1127,11 @@ class GitAdapter:
 
     def history_digest(self) -> str:
         return _digest_revs(self.history_revs())
+
+    def shared_dir(self) -> Path:
+        out = self._git("rev-parse", "--git-common-dir", check=False)
+        common = out.stdout.strip() if out.returncode == 0 else ".git"
+        return (self.root / common).resolve()
 
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         revs = self.history_revs()
