@@ -1126,6 +1126,13 @@ def test_a_long_lived_repo_does_not_write_back_stale_workspace_state(
     stale.snapshot()  # in-memory view still says trunk
     now = Repo.find(vcs_root).workspace
     assert now.bookmark == "work" and now.working_refs == {"db": branch}
+    # The snapshot was decided *after* the refresh: it read the work branch
+    # (which has writes), not main, so a local status sees the modification.
+    assert now.last_snapshot["db"] == {
+        "snapshot_id": store.system(system).branches[branch]
+    }
+    (db,) = Repo.find(vcs_root).status(do_snapshot=False).objects
+    assert db.changed
     # And the stale Repo learnt where the checkout is: its writable open goes
     # to the bookmark's branch, not the trunk.
     handle = stale.open("db", read_only=False)

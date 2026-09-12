@@ -1451,65 +1451,66 @@ class Repo:
                 changed; re-register it to accept the new state.
             MultiObjectError: A fingerprint failed.
         """
-        mine = self.workspace.bookmark
-        if mine is None:
-            raise ConfigError(
-                "this working copy is on no bookmark; `tether new NAME` to work on "
-                "one, then pull"
-            )
-        if bookmark is not None and bookmark != mine:
-            raise ConfigError(
-                f"this workspace works on {mine!r}; `tether new {bookmark}` first"
-            )
-        self._check_on_bookmark()
-        if self.vcs.dirty(self._vcs_paths()):
-            raise ConfigError(
-                "manifests have uncommitted edits; `tether commit` them (or undo) "
-                "before pulling"
-            )
-        report = PullReport(bookmark=mine)
-        moving = set(self.moving_keys())
-        targets: list[str] = []
-        for key, m in self.objects.items():
-            if m.state is None:
-                report.skipped[key] = "not committed yet; the first commit reads it"
-            elif key in moving:
-                targets.append(key)  # a working branch: its head is the position
-            elif self.on_trunk():
-                targets.append(key)  # upstream branch, or the object itself
-            else:
-                report.skipped[key] = "no branch yet; sits at its pin"
+        with self._writer_lock():
+            mine = self.workspace.bookmark
+            if mine is None:
+                raise ConfigError(
+                    "this working copy is on no bookmark; `tether new NAME` to work on "
+                    "one, then pull"
+                )
+            if bookmark is not None and bookmark != mine:
+                raise ConfigError(
+                    f"this workspace works on {mine!r}; `tether new {bookmark}` first"
+                )
+            self._check_on_bookmark()
+            if self.vcs.dirty(self._vcs_paths()):
+                raise ConfigError(
+                    "manifests have uncommitted edits; `tether commit` them (or undo) "
+                    "before pulling"
+                )
+            report = PullReport(bookmark=mine)
+            moving = set(self.moving_keys())
+            targets: list[str] = []
+            for key, m in self.objects.items():
+                if m.state is None:
+                    report.skipped[key] = "not committed yet; the first commit reads it"
+                elif key in moving:
+                    targets.append(key)  # a working branch: its head is the position
+                elif self.on_trunk():
+                    targets.append(key)  # upstream branch, or the object itself
+                else:
+                    report.skipped[key] = "no branch yet; sits at its pin"
 
-        def fp(key: str) -> State:
-            m = self.objects[key]
-            backend = self.backend_for(m.kind)
-            ref = self._working_ref(key)
-            if ref is None:
-                return backend.fingerprint(self._upstream_locator(m), None)
-            return backend.fingerprint(m.locator, ref)
+            def fp(key: str) -> State:
+                m = self.objects[key]
+                backend = self.backend_for(m.kind)
+                ref = self._working_ref(key)
+                if ref is None:
+                    return backend.fingerprint(self._upstream_locator(m), None)
+                return backend.fingerprint(m.locator, ref)
 
-        heads = self._fanout(fp, targets)
-        self._enforce_immutability(heads)
-        fetched: dict[str, State] = {}
-        for key in targets:
-            m = self.objects[key]
-            assert m.state is not None
-            if self._same(m.kind, heads[key], m.state):
-                report.unchanged.append(key)
-            else:
-                report.committed[key] = (dict(m.state), dict(heads[key]))
-            fetched[key] = dict(heads[key])
-            self.workspace.last_snapshot[key] = dict(heads[key])
-        if not report.committed:
-            write_workspace(self.root, self.workspace)
+            heads = self._fanout(fp, targets)
+            self._enforce_immutability(heads)
+            fetched: dict[str, State] = {}
+            for key in targets:
+                m = self.objects[key]
+                assert m.state is not None
+                if self._same(m.kind, heads[key], m.state):
+                    report.unchanged.append(key)
+                else:
+                    report.committed[key] = (dict(m.state), dict(heads[key]))
+                fetched[key] = dict(heads[key])
+                self.workspace.last_snapshot[key] = dict(heads[key])
+            if not report.committed:
+                write_workspace(self.root, self.workspace)
+                return report
+            n = len(report.committed)
+            text = message or f"pull {mine}: {n} object{'s' if n != 1 else ''}"
+            plan = self.plan_commit(text, fetched=fetched)
+            result = self.apply_commit(plan, verify=False)
+            report.vcs_commit = result.vcs_commit
+            report.pinned = dict(result.pinned)
             return report
-        n = len(report.committed)
-        text = message or f"pull {mine}: {n} object{'s' if n != 1 else ''}"
-        plan = self.plan_commit(text, fetched=fetched)
-        result = self.apply_commit(plan, verify=False)
-        report.vcs_commit = result.vcs_commit
-        report.pinned = dict(result.pinned)
-        return report
 
     # -- snapshot / status ---------------------------------------------- #
     def moving_keys(self) -> list[str]:
@@ -1557,33 +1558,40 @@ class Repo:
                 "immutable"` changed since it was committed.
             MultiObjectError: One or more fingerprints failed.
         """
-        moving = set(self.moving_keys())
-        # Upstream only means something where the position *could* follow it:
-        # on the trunk (or on no bookmark). A feature bookmark forked from pins;
-        # the world moving on is not its business until it is promoted.
-        ask_upstream = upstream and (self.on_trunk() or self.workspace.bookmark is None)
-        keys = list(self.objects) if ask_upstream else sorted(moving)
-
-        def fp(key: str) -> State:
-            m = self.objects[key]
-            backend = self.backend_for(m.kind)
-            ref = self._working_ref(key)
-            if ref is None and key not in moving:
-                return backend.fingerprint(self._upstream_locator(m), None)
-            return backend.fingerprint(m.locator, ref)
-
-        states: dict[str, State] = self._fanout(fp, keys)
-        for key, m in self.objects.items():
-            if key not in states and m.state is not None:
-                states[key] = dict(m.state)
-        self._enforce_immutability(states)
-        # Cache what was actually read. A partial (commit-time) snapshot must
-        # not overwrite what an earlier fan-out learned about upstream: a
-        # `behind` object stays `behind` in a local `status` after an unrelated
-        # commit. Objects no longer registered drop out. The cache is written
-        # under the lock, into the workspace as it is *now* on disk -- not the
-        # one this Repo loaded, which another process may have moved since.
+        # Under the lock from the first decision to the last write: which refs
+        # to read comes from the workspace as it is *now* on disk (the lock
+        # refreshes it), not from the one this Repo loaded, which another
+        # process may have moved to a different bookmark since. Reading first
+        # and locking only the write would cache one bookmark's states under
+        # another's name.
         with self._writer_lock():
+            moving = set(self.moving_keys())
+            # Upstream only means something where the position *could* follow
+            # it: on the trunk (or on no bookmark). A feature bookmark forked
+            # from pins; the world moving on is not its business until it is
+            # promoted.
+            ask_upstream = upstream and (
+                self.on_trunk() or self.workspace.bookmark is None
+            )
+            keys = list(self.objects) if ask_upstream else sorted(moving)
+
+            def fp(key: str) -> State:
+                m = self.objects[key]
+                backend = self.backend_for(m.kind)
+                ref = self._working_ref(key)
+                if ref is None and key not in moving:
+                    return backend.fingerprint(self._upstream_locator(m), None)
+                return backend.fingerprint(m.locator, ref)
+
+            states: dict[str, State] = self._fanout(fp, keys)
+            for key, m in self.objects.items():
+                if key not in states and m.state is not None:
+                    states[key] = dict(m.state)
+            self._enforce_immutability(states)
+            # Cache what was actually read. A partial (commit-time) snapshot
+            # must not overwrite what an earlier fan-out learned about
+            # upstream: a `behind` object stays `behind` in a local `status`
+            # after an unrelated commit. Objects no longer registered drop out.
             cached = {
                 k: v
                 for k, v in self.workspace.last_snapshot.items()
