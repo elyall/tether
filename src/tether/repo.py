@@ -11,6 +11,11 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+
+try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -82,7 +87,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.migrations import UpgradeReport, pending
-from tether.oplog import OpEntry, append_op, mark_undone, read_ops
+from tether.oplog import OpEntry, append_op, mark_done, mark_undone, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
@@ -516,6 +521,45 @@ class Repo:
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
+        self._lock_depth = 0
+
+    @contextlib.contextmanager
+    def _writer_lock(self) -> Iterator[None]:
+        """One writer per checkout, for the duration of a writing command.
+
+        Two `tether` processes racing in the same checkout would interleave
+        journal entries and `workspace.toml` writes and plan against each
+        other's half-done work. The lock is advisory (`flock` on
+        `.tether/lock`), re-entrant within one `Repo`, and held only while the
+        command runs, so a stale file after a crash locks nothing.
+        """
+        if self._lock_depth:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
+        if fcntl is None:
+            yield
+            return
+        path = _m.tether_path(self.root) / _m.LOCK_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", encoding="utf-8") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise TetherError(
+                    "another tether command is writing in this checkout "
+                    f"({path} is locked); wait for it to finish"
+                ) from exc
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
     # -- construction ---------------------------------------------------- #
     @classmethod
@@ -907,6 +951,7 @@ class Repo:
         pre: Mapping[str, Any] | None = None,
         undoes: str | None = None,
     ) -> OpEntry:
+        """Record an operation after the fact (working-tree-only commands)."""
         entry = OpEntry.now(
             command,
             plan=plan.to_dict() if plan is not None else None,
@@ -916,6 +961,50 @@ class Repo:
         )
         append_op(self.root, entry)
         return entry
+
+    def _begin_op(
+        self,
+        command: str,
+        *,
+        plan: Plan | None = None,
+        pre: Mapping[str, Any] | None = None,
+        undoes: str | None = None,
+    ) -> OpEntry:
+        """Journal an operation *before* its first side effect on a store.
+
+        The entry carries the plan and what `undo` needs, is synced to disk,
+        and stays `started` until `_end_op` marks it done. An interruption in
+        between leaves a visible, non-undoable record of what was attempted
+        instead of silence.
+        """
+        entry = OpEntry.now(
+            command,
+            plan=plan.to_dict() if plan is not None else None,
+            pre=dict(pre or {}),
+            undoes=undoes,
+        )
+        entry.status = "started"
+        append_op(self.root, entry)
+        return entry
+
+    def _end_op(
+        self,
+        entry: OpEntry,
+        *,
+        result: Mapping[str, Any] | None = None,
+        pre: Mapping[str, Any] | None = None,
+    ) -> OpEntry:
+        """Complete a journaled operation with its result (and late `pre`)."""
+        entry.result = dict(result or {})
+        if pre:
+            entry.pre = {**entry.pre, **dict(pre)}
+        entry.status = "done"
+        mark_done(self.root, entry.id, entry.result, dict(pre or {}))
+        return entry
+
+    def incomplete_ops(self) -> list[OpEntry]:
+        """Journal entries that began and never completed (an interrupted run)."""
+        return [e for e in read_ops(self.root) if e.incomplete]
 
     def _manifest_texts(self, keys: Iterable[str]) -> dict[str, str | None]:
         """Current manifest TOML per key (`None` where the object does not exist)."""
@@ -1616,107 +1705,127 @@ class Repo:
             BackendError: A pin failed (pins created by this call are released
                 best-effort).
         """
-        if plan.command != "commit":
-            raise ConfigError(f"expected a commit plan, got {plan.command!r}")
-        message = str(plan.context.get("message", ""))
-        if vcs:
-            self._check_on_bookmark()
-        object_actions = [a for a in plan.actions if a.op in ("pin", "record")]
-        if verify:
-            if plan.context.get("manifest_hash") != self.current_manifest_hash():
-                raise StalePlanError(
-                    "manifests changed since the plan was made; re-run the plan"
-                )
-            current = self.snapshot()
-            for a in object_actions:
-                if not self._same(a.kind, current.get(a.key), a.params.get("state")):
+        with self._writer_lock():
+            if plan.command != "commit":
+                raise ConfigError(f"expected a commit plan, got {plan.command!r}")
+            message = str(plan.context.get("message", ""))
+            if vcs:
+                self._check_on_bookmark()
+            object_actions = [a for a in plan.actions if a.op in ("pin", "record")]
+            if verify:
+                if plan.context.get("manifest_hash") != self.current_manifest_hash():
                     raise StalePlanError(
-                        f"{a.key!r} changed since the plan was made "
-                        f"({short_state(a.params.get('state'))} -> "
-                        f"{short_state(current.get(a.key))}); re-run the plan"
+                        "manifests changed since the plan was made; re-run the plan"
                     )
+                current = self.snapshot()
+                for a in object_actions:
+                    if not self._same(
+                        a.kind, current.get(a.key), a.params.get("state")
+                    ):
+                        raise StalePlanError(
+                            f"{a.key!r} changed since the plan was made "
+                            f"({short_state(a.params.get('state'))} -> "
+                            f"{short_state(current.get(a.key))}); re-run the plan"
+                        )
 
-        result = CommitResult(message=message)
-        for note in plan.notes:
-            key, _, why = note.partition(": ")
-            if why == "unchanged":
-                result.unchanged.append(key)
+            result = CommitResult(message=message)
+            for note in plan.notes:
+                key, _, why = note.partition(": ")
+                if why == "unchanged":
+                    result.unchanged.append(key)
 
-        created_pins: list[tuple[str, Pin]] = []
-        outcomes: dict[str, tuple[State, Pin | None, bool]] = {}
-        pre = {
-            "vcs": self.vcs.position() if vcs else None,
-            "objects": self._manifest_texts(a.key for a in object_actions),
-            "workspace": self.workspace.to_toml(),
-        }
-        try:
-            for a in object_actions:
-                m = self.objects[a.key]
-                backend = self.backend_for(m.kind)
-                state = dict(a.params["state"])
-                if a.op == "pin":
-                    pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
-                    # Roll back only what this commit created: a pin the
-                    # backend found already carrying the state belongs to
-                    # the commit (or the sibling key) that made it.
-                    if pin.created:
-                        created_pins.append((a.key, pin))
-                    outcomes[a.key] = (state, pin, True)
-                    result.pinned[a.key] = pin
-                else:
-                    recoverable = bool(a.params.get("recoverable", True))
-                    outcomes[a.key] = (state, None, recoverable)
-                    if recoverable:
-                        result.pinned[a.key] = None
-                    else:
-                        result.unrecoverable.append(a.key)
-        except Exception:
-            self._rollback_pins(created_pins)
-            raise
-
-        # Persist manifests (and listings for backends that provide them).
-        is_pull = bool(plan.context.get("pull"))
-        for key, (state, pin, recoverable) in outcomes.items():
-            m = self.objects[key]
-            if is_pull and "at" in m.locator:
-                # Pulled onto the branch: the state it was first registered at
-                # is history now, not where it sits.
-                m = dataclasses.replace(m, locator=self._upstream_locator(m))
-            updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
-            self.objects[key] = updated
-            write_object(self.root, updated)
-            backend = self.backend_for(m.kind)
-            if Capability.DIFF in effective_capabilities(backend, m.locator, m.policy):
-                text = backend.listing(m.locator, state)
-                if text is not None:
-                    name = listing_name(
-                        m.kind,
-                        backend.identity(m.locator),
-                        self._content_of(m.kind, state),
-                    )
-                    write_listing(self.root, name, text)
-
-        # Commit when something was pinned, and also when the manifests are
-        # already dirty in the working tree (an undone commit, an `add`, an
-        # `import`): the dataset commit is what makes them history.
-        if vcs and (outcomes or self.vcs.dirty(self._vcs_paths())):
-            # The bookmark follows the commit: its store branches' heads are
-            # what the commit pinned.
-            result.vcs_commit = self.vcs.commit(
-                self._vcs_paths(), message, advance=self.workspace.bookmark
+            created_pins: list[tuple[str, Pin]] = []
+            outcomes: dict[str, tuple[State, Pin | None, bool]] = {}
+            is_pull = bool(plan.context.get("pull"))
+            will_write = bool(object_actions) or (
+                vcs and self.vcs.dirty(self._vcs_paths())
             )
+            if not will_write:
+                return result
+            pre = {
+                "vcs": self.vcs.position() if vcs else None,
+                "objects": self._manifest_texts(a.key for a in object_actions),
+                "workspace": self.workspace.to_toml(),
+            }
+            op = self._begin_op("pull" if is_pull else "commit", plan=plan, pre=pre)
+            written_listings: list[str] = []
+            try:
+                for a in object_actions:
+                    m = self.objects[a.key]
+                    backend = self.backend_for(m.kind)
+                    state = dict(a.params["state"])
+                    if a.op == "pin":
+                        pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
+                        # Roll back only what this commit created: a pin the
+                        # backend found already carrying the state belongs to
+                        # the commit (or the sibling key) that made it.
+                        if pin.created:
+                            created_pins.append((a.key, pin))
+                        outcomes[a.key] = (state, pin, True)
+                        result.pinned[a.key] = pin
+                    else:
+                        recoverable = bool(a.params.get("recoverable", True))
+                        outcomes[a.key] = (state, None, recoverable)
+                        if recoverable:
+                            result.pinned[a.key] = None
+                        else:
+                            result.unrecoverable.append(a.key)
 
-        # What this workspace just committed is, by definition, not stale.
-        self._mark_base_states(
-            k
-            for k in outcomes
-            if k in self.workspace.working_refs or k in self.workspace.pending_forks
-        )
-        write_workspace(self.root, self.workspace)
-        if outcomes or result.vcs_commit:
-            self._log_op(
-                "pull" if is_pull else "commit",
-                plan=plan,
+                # Persist manifests (and listings for backends that provide them).
+                for key, (state, pin, recoverable) in outcomes.items():
+                    m = self.objects[key]
+                    if is_pull and "at" in m.locator:
+                        # Pulled onto the branch: the state it was first registered
+                        # at is history now, not where it sits.
+                        m = dataclasses.replace(m, locator=self._upstream_locator(m))
+                    updated = m.with_pin(state=state, pin=pin, recoverable=recoverable)
+                    self.objects[key] = updated
+                    write_object(self.root, updated)
+                    backend = self.backend_for(m.kind)
+                    if Capability.DIFF in effective_capabilities(
+                        backend, m.locator, m.policy
+                    ):
+                        text = backend.listing(m.locator, state)
+                        if text is not None:
+                            name = listing_name(
+                                m.kind,
+                                backend.identity(m.locator),
+                                self._content_of(m.kind, state),
+                            )
+                            if not (listings_dir(self.root) / name).exists():
+                                written_listings.append(name)
+                            write_listing(self.root, name, text)
+
+                # Commit when something was pinned, and also when the manifests are
+                # already dirty in the working tree (an undone commit, an `add`, an
+                # `import`): the dataset commit is what makes them history.
+                if vcs and (outcomes or self.vcs.dirty(self._vcs_paths())):
+                    # The bookmark follows the commit: its store branches' heads
+                    # are what the commit pinned.
+                    result.vcs_commit = self.vcs.commit(
+                        self._vcs_paths(), message, advance=self.workspace.bookmark
+                    )
+            except Exception as exc:
+                # Compensate everything this call did: pins it created, manifests
+                # and listings it wrote, so the working tree is as before and the
+                # journal says what was attempted and that it did not finish.
+                self._rollback_pins(created_pins)
+                self._restore_manifests(pre["objects"])
+                for name in written_listings:
+                    (listings_dir(self.root) / name).unlink(missing_ok=True)
+                self.objects = read_objects(self.root)
+                self._end_op(op, result={"failed": str(exc), "rolled_back": True})
+                raise
+
+            # What this workspace just committed is, by definition, not stale.
+            self._mark_base_states(
+                k
+                for k in outcomes
+                if k in self.workspace.working_refs or k in self.workspace.pending_forks
+            )
+            write_workspace(self.root, self.workspace)
+            self._end_op(
+                op,
                 result={
                     "vcs_commit": result.vcs_commit,
                     "pinned": {
@@ -1724,9 +1833,8 @@ class Repo:
                     },
                     "unrecoverable": list(result.unrecoverable),
                 },
-                pre=pre,
             )
-        return result
+            return result
 
     def commit(
         self,
@@ -2119,178 +2227,193 @@ class Repo:
             StalePlanError: The manifests at the target differ from the plan's.
             MultiObjectError: A pin is missing or a fork failed.
         """
-        if plan.command != "new":
-            raise ConfigError(f"expected a new plan, got {plan.command!r}")
-        refused = [a for a in plan.actions if a.op == "refuse"]
-        if refused:
-            if all(a.key for a in refused):
-                raise TetherError(
-                    "refusing to reset working branches with unpinned writes:\n"
-                    + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
+        with self._writer_lock():
+            if plan.command != "new":
+                raise ConfigError(f"expected a new plan, got {plan.command!r}")
+            refused = [a for a in plan.actions if a.op == "refuse"]
+            if refused:
+                if all(a.key for a in refused):
+                    raise TetherError(
+                        "refusing to reset working branches with unpinned writes:\n"
+                        + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
+                    )
+                raise TetherError("; ".join(a.detail for a in refused))
+            rev = plan.context.get("rev")
+            bookmark = plan.context.get("bookmark")
+            create = bool(plan.context.get("create"))
+            if verify:
+                # Check the target *before* touching the VCS working copy, so a
+                # stale plan leaves the checkout where it was.
+                target = (
+                    self._objects_at(self.vcs.resolve(str(rev)))
+                    if rev
+                    else self.objects
                 )
-            raise TetherError("; ".join(a.detail for a in refused))
-        rev = plan.context.get("rev")
-        bookmark = plan.context.get("bookmark")
-        create = bool(plan.context.get("create"))
-        if verify:
-            # Check the target *before* touching the VCS working copy, so a
-            # stale plan leaves the checkout where it was.
-            target = (
-                self._objects_at(self.vcs.resolve(str(rev))) if rev else self.objects
-            )
-            if plan.context.get("manifest_hash") != manifest_hash(target):
+                if plan.context.get("manifest_hash") != manifest_hash(target):
+                    raise StalePlanError(
+                        "manifests at the target differ from the plan; re-run the plan"
+                    )
+            if plan.context.get("workspace_id") not in (
+                None,
+                self.workspace.workspace_id,
+            ):
                 raise StalePlanError(
-                    "manifests at the target differ from the plan; re-run the plan"
+                    "this plan was made in another workspace; re-run the plan here"
                 )
-        if plan.context.get("workspace_id") not in (None, self.workspace.workspace_id):
-            raise StalePlanError(
-                "this plan was made in another workspace; re-run the plan here"
-            )
-        if (
-            verify
-            and bookmark
-            and bookmark != self.config.trunk
-            and not plan.context.get("shared")
-            and (holders := self.bookmark_holders(str(bookmark)))
-        ):
-            # A holder that appeared since the plan was made.
-            raise StalePlanError(
-                f"bookmark {bookmark!r} is now held by live workspace(s) "
-                f"{', '.join(holders)}; re-run the plan (or pass --shared)"
-            )
-        if verify:
-            # Branches the plan keeps or resets must still hold what it saw.
+            if (
+                verify
+                and bookmark
+                and bookmark != self.config.trunk
+                and not plan.context.get("shared")
+                and (holders := self.bookmark_holders(str(bookmark)))
+            ):
+                # A holder that appeared since the plan was made.
+                raise StalePlanError(
+                    f"bookmark {bookmark!r} is now held by live workspace(s) "
+                    f"{', '.join(holders)}; re-run the plan (or pass --shared)"
+                )
+            if verify:
+                # Branches the plan keeps or resets must still hold what it saw.
+                for a in plan.actions:
+                    if a.op == "reuse":
+                        self._require_head(
+                            self.backend_for(a.kind),
+                            self.objects[a.key].locator,
+                            a.target,
+                            a.params.get("then_state"),
+                            what=f"new {a.key}",
+                        )
+                    elif a.op == "fork" and a.params.get("existing"):
+                        self._require_head(
+                            self.backend_for(a.kind),
+                            self.objects[a.key].locator,
+                            str(a.params["existing"]),
+                            a.params.get("head"),
+                            what=f"new {a.key}",
+                        )
+            pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
+            # The heads `new` will reset are known from the plan; journal them now
+            # so an interrupted run still says what it was about to replace.
+            pre["heads"] = {
+                a.key: a.params.get("head")
+                for a in plan.actions
+                if a.op == "fork" and a.params.get("existing")
+            }
+            op = self._begin_op("new", plan=plan, pre=pre)
+            if create:
+                self.vcs.new_bookmark(str(bookmark), str(rev) if rev else None)
+                self.objects = read_objects(self.root)
+            elif rev:
+                self.vcs.new(str(rev))
+                self.objects = read_objects(self.root)
+            self.workspace.bookmark = str(bookmark) if bookmark else None
+            if plan.context.get("keep"):
+                self._mark_base_states(
+                    set(self.workspace.working_refs) | set(self.workspace.pending_forks)
+                )
+                write_workspace(self.root, self.workspace)
+                self._end_op(op, result={"vcs": self.vcs.position()})
+                return
+
+            working_refs: dict[str, str] = {}
+            pending: dict[str, str] = {}
+            pending_resets: dict[str, State] = {}
+            reused: dict[str, State] = {}
+            forks = {a.key: a for a in plan.actions if a.op == "fork"}
             for a in plan.actions:
-                if a.op == "reuse":
-                    self._require_head(
-                        self.backend_for(a.kind),
-                        self.objects[a.key].locator,
-                        a.target,
-                        a.params.get("then_state"),
-                        what=f"new {a.key}",
-                    )
-                elif a.op == "fork" and a.params.get("existing"):
-                    self._require_head(
-                        self.backend_for(a.kind),
-                        self.objects[a.key].locator,
-                        str(a.params["existing"]),
-                        a.params.get("head"),
-                        what=f"new {a.key}",
-                    )
-        pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
-        if create:
-            self.vcs.new_bookmark(str(bookmark), str(rev) if rev else None)
-            self.objects = read_objects(self.root)
-        elif rev:
-            self.vcs.new(str(rev))
-            self.objects = read_objects(self.root)
-        self.workspace.bookmark = str(bookmark) if bookmark else None
-        if plan.context.get("keep"):
-            self._mark_base_states(
-                set(self.workspace.working_refs) | set(self.workspace.pending_forks)
-            )
+                if a.op == "trunk":
+                    working_refs[a.key] = a.target
+                elif a.op == "defer-fork":
+                    pending[a.key] = a.target
+                    if a.params.get("existing") and a.params.get("head") is not None:
+                        pending_resets[a.key] = dict(a.params["head"])
+                elif a.op == "reuse":
+                    working_refs[a.key] = a.target
+                    reused[a.key] = dict(a.params["then_state"])
+
+            def fork_one(key: str) -> str:
+                m = self.objects[key]
+                return self._fork_from_manifest(m, forks[key].target)
+
+            # Fork concurrently; a failure for one object must not hide the branches
+            # created for the others, so record everything that succeeded before
+            # reporting what did not. A second `new` completes the job (existing
+            # branches are reset onto the pin, not duplicated).
+            forked, errors = self._fanout_collect(fork_one, list(forks))
+            working_refs.update(forked)
+            # Objects sharing a branch follow the member that planned it.
+            for a in plan.actions:
+                if a.op != "share":
+                    continue
+                first = str(a.params["with"])
+                if first in forked:
+                    working_refs[a.key] = forked[first]
+                elif first in pending:
+                    pending[a.key] = pending[first]
+                    if first in pending_resets:
+                        pending_resets[a.key] = pending_resets[first]
+                elif first in reused:
+                    working_refs[a.key] = a.target
+                    reused[a.key] = dict(a.params["state"])
+
+            # Keep refs of removed objects around until `gc` deletes their branches.
+            leftovers = {
+                k: v
+                for k, v in self.workspace.working_refs.items()
+                if k not in self.objects
+            }
+            self.workspace.working_refs = {**leftovers, **working_refs}
+            self.workspace.pending_forks = pending
+            self.workspace.pending_resets = pending_resets
+            # Fork points: what each branch was created from (promote's baseline).
+            fork_points = {
+                k: v for k, v in self.workspace.fork_points.items() if k in leftovers
+            }
+            shared = {
+                a.key for a in plan.actions if a.op == "share" and a.key in working_refs
+            }
+            for key in set(forked) | shared:
+                state = self.objects[key].state
+                if state is not None:
+                    fork_points[key] = dict(state)
+            fork_points.update(
+                reused
+            )  # the branch sits at the pin: that is its fork point
+            self.workspace.fork_points = fork_points
+            self.workspace.base_states = {
+                k: v for k, v in self.workspace.base_states.items() if k in leftovers
+            }
+            self._mark_base_states(set(working_refs) | set(pending))
             write_workspace(self.root, self.workspace)
-            self._log_op("new", plan=plan, result={"vcs": self.vcs.position()}, pre=pre)
-            return
-
-        working_refs: dict[str, str] = {}
-        pending: dict[str, str] = {}
-        pending_resets: dict[str, State] = {}
-        reused: dict[str, State] = {}
-        forks = {a.key: a for a in plan.actions if a.op == "fork"}
-        for a in plan.actions:
-            if a.op == "trunk":
-                working_refs[a.key] = a.target
-            elif a.op == "defer-fork":
-                pending[a.key] = a.target
-                if a.params.get("existing") and a.params.get("head") is not None:
-                    pending_resets[a.key] = dict(a.params["head"])
-            elif a.op == "reuse":
-                working_refs[a.key] = a.target
-                reused[a.key] = dict(a.params["then_state"])
-
-        def fork_one(key: str) -> str:
-            m = self.objects[key]
-            return self._fork_from_manifest(m, forks[key].target)
-
-        # Fork concurrently; a failure for one object must not hide the branches
-        # created for the others, so record everything that succeeded before
-        # reporting what did not. A second `new` completes the job (existing
-        # branches are reset onto the pin, not duplicated).
-        forked, errors = self._fanout_collect(fork_one, list(forks))
-        working_refs.update(forked)
-        # Objects sharing a branch follow the member that planned it.
-        for a in plan.actions:
-            if a.op != "share":
-                continue
-            first = str(a.params["with"])
-            if first in forked:
-                working_refs[a.key] = forked[first]
-            elif first in pending:
-                pending[a.key] = pending[first]
-                if first in pending_resets:
-                    pending_resets[a.key] = pending_resets[first]
-            elif first in reused:
-                working_refs[a.key] = a.target
-                reused[a.key] = dict(a.params["state"])
-
-        # Keep refs of removed objects around until `gc` deletes their branches.
-        leftovers = {
-            k: v
-            for k, v in self.workspace.working_refs.items()
-            if k not in self.objects
-        }
-        self.workspace.working_refs = {**leftovers, **working_refs}
-        self.workspace.pending_forks = pending
-        self.workspace.pending_resets = pending_resets
-        # Fork points: what each branch was created from (promote's baseline).
-        fork_points = {
-            k: v for k, v in self.workspace.fork_points.items() if k in leftovers
-        }
-        shared = {
-            a.key for a in plan.actions if a.op == "share" and a.key in working_refs
-        }
-        for key in set(forked) | shared:
-            state = self.objects[key].state
-            if state is not None:
-                fork_points[key] = dict(state)
-        fork_points.update(reused)  # the branch sits at the pin: that is its fork point
-        self.workspace.fork_points = fork_points
-        self.workspace.base_states = {
-            k: v for k, v in self.workspace.base_states.items() if k in leftovers
-        }
-        self._mark_base_states(set(working_refs) | set(pending))
-        write_workspace(self.root, self.workspace)
-        # What this op did to the stores, and what it replaced, for undo.
-        reset = {
-            k: a.params
-            for k, a in forks.items()
-            if k in forked and a.params.get("existing")
-        }
-        pre["heads"] = {k: p.get("head") for k, p in reset.items()}
-        self._log_op(
-            "new",
-            plan=plan,
-            result={
-                "vcs": self.vcs.position(),
-                "bookmark": bookmark,
-                "created_bookmark": bookmark if create else None,
-                "created": sorted(k for k in forked if k not in reset),
-                "reset": sorted(reset),
-                "reused": sorted(reused),
-                "working_refs": dict(working_refs),
-                "pending_forks": dict(pending),
-                "failed": sorted(errors),
-            },
-            pre=pre,
-        )
-        if errors:
-            raise MultiObjectError(
-                f"could not fork working refs for {', '.join(sorted(errors))} "
-                f"({len(forked)} of {len(forks)} forked and recorded; run `new` again "
-                "-- it resets those branches too, so do not write to them first)",
-                errors,
+            # What this op did to the stores, and what it replaced, for undo.
+            reset = {
+                k: a.params
+                for k, a in forks.items()
+                if k in forked and a.params.get("existing")
+            }
+            self._end_op(
+                op,
+                result={
+                    "vcs": self.vcs.position(),
+                    "bookmark": bookmark,
+                    "created_bookmark": bookmark if create else None,
+                    "created": sorted(k for k in forked if k not in reset),
+                    "reset": sorted(reset),
+                    "reused": sorted(reused),
+                    "working_refs": dict(working_refs),
+                    "pending_forks": dict(pending),
+                    "failed": sorted(errors),
+                },
+                pre={"heads": {k: p.get("head") for k, p in reset.items()}},
             )
+            if errors:
+                raise MultiObjectError(
+                    f"could not fork working refs for {', '.join(sorted(errors))} "
+                    f"({len(forked)} of {len(forks)} forked and recorded; run `new` "
+                    "again -- it resets those branches too, so do not write to them "
+                    "first)",
+                    errors,
+                )
 
     def _fork_from_manifest(self, m: ObjectManifest, name: str) -> str:
         """Create working branch `name` from a manifest's pin (or recorded state)."""
@@ -2330,93 +2453,99 @@ class Repo:
             StaleWorkingCopyError: The workspace is stale; run `new` first.
             TetherError: The pin (or recorded state) to fork from is gone.
         """
-        existing = self.workspace.working_refs.get(key)
-        if existing is not None:
-            return existing
-        name = self.workspace.pending_forks.get(key)
-        if name is None:
-            raise ConfigError(f"no working branch pending for {key!r}; run `new`")
-        stale = self.stale_keys()
-        if stale:
-            raise StaleWorkingCopyError(
-                f"working copy is stale: the committed state of {', '.join(stale)} "
-                "changed since `new`; run `tether new` before writing"
-            )
-        m = self.objects[key]
-        backend = self.backend_for(m.kind)
-        pre: dict[str, Any] = {"workspace": self.workspace.to_toml()}
-        scope = (m.kind, backend.branch_scope(m.locator))
-
-        def siblings() -> list[str]:
-            """Other keys whose pending fork is this very branch."""
-            return [
-                k
-                for k, n in self.workspace.pending_forks.items()
-                if k != key
-                and n == name
-                and k in self.objects
-                and (
-                    self.objects[k].kind,
-                    self.backend_for(self.objects[k].kind).branch_scope(
-                        self.objects[k].locator
-                    ),
-                )
-                == scope
-            ]
-
-        def adopt(ref: str, keys: list[str]) -> None:
-            for k in keys:
-                self.workspace.working_refs[k] = ref
-                self.workspace.pending_forks.pop(k, None)
-                self.workspace.pending_resets.pop(k, None)
-                state = self.objects[k].state
-                if state is not None:
-                    self.workspace.fork_points[k] = dict(state)
-            self._mark_base_states(keys)
-
-        if name in backend.list_working_refs(m.locator):
-            # The branch exists. A writable open resets it only when `new`
-            # reviewed exactly this head and agreed (`pending_resets`); a
-            # branch already at this object's pin, or one a sibling of the
-            # same scope already writes through, is reused as it is; any
-            # other head -- it moved since `new` -- stops here and `new`
-            # decides again.
-            head = backend.fingerprint(m.locator, name)
-            owned = any(
-                r == name
-                and k != key
-                and k in self.objects
-                and (
-                    self.objects[k].kind,
-                    self.backend_for(self.objects[k].kind).branch_scope(
-                        self.objects[k].locator
-                    ),
-                )
-                == scope
-                for k, r in self.workspace.working_refs.items()
-            )
-            if owned or (m.state is not None and self._same(m.kind, head, m.state)):
-                adopt(name, [key, *siblings()])
-                write_workspace(self.root, self.workspace)
-                return name
-            agreed = self.workspace.pending_resets.get(key)
-            if agreed is None or not self._same(m.kind, head, agreed):
+        with self._writer_lock():
+            existing = self.workspace.working_refs.get(key)
+            if existing is not None:
+                return existing
+            name = self.workspace.pending_forks.get(key)
+            if name is None:
+                raise ConfigError(f"no working branch pending for {key!r}; run `new`")
+            stale = self.stale_keys()
+            if stale:
                 raise StaleWorkingCopyError(
-                    f"branch {name} holds writes ({short_state(head)}) that `new` "
-                    f"did not see; a writable open never resets a branch -- run "
-                    "`tether new` to decide (it refuses while the branch holds "
-                    "uncommitted writes; --discard throws them away)"
+                    f"working copy is stale: the committed state of {', '.join(stale)} "
+                    "changed since `new`; run `tether new` before writing"
                 )
-            pre["heads"] = {key: head}
-        ref = self._fork_from_manifest(m, name)
-        adopt(ref, [key, *siblings()])
-        write_workspace(self.root, self.workspace)
-        self._log_op(
-            "fork",
-            result={"key": key, "ref": ref, "kind": m.kind, "locator": dict(m.locator)},
-            pre=pre,
-        )
-        return ref
+            m = self.objects[key]
+            backend = self.backend_for(m.kind)
+            pre: dict[str, Any] = {"workspace": self.workspace.to_toml()}
+            scope = (m.kind, backend.branch_scope(m.locator))
+
+            def siblings() -> list[str]:
+                """Other keys whose pending fork is this very branch."""
+                return [
+                    k
+                    for k, n in self.workspace.pending_forks.items()
+                    if k != key
+                    and n == name
+                    and k in self.objects
+                    and (
+                        self.objects[k].kind,
+                        self.backend_for(self.objects[k].kind).branch_scope(
+                            self.objects[k].locator
+                        ),
+                    )
+                    == scope
+                ]
+
+            def adopt(ref: str, keys: list[str]) -> None:
+                for k in keys:
+                    self.workspace.working_refs[k] = ref
+                    self.workspace.pending_forks.pop(k, None)
+                    self.workspace.pending_resets.pop(k, None)
+                    state = self.objects[k].state
+                    if state is not None:
+                        self.workspace.fork_points[k] = dict(state)
+                self._mark_base_states(keys)
+
+            if name in backend.list_working_refs(m.locator):
+                # The branch exists. A writable open resets it only when `new`
+                # reviewed exactly this head and agreed (`pending_resets`); a
+                # branch already at this object's pin, or one a sibling of the
+                # same scope already writes through, is reused as it is; any
+                # other head -- it moved since `new` -- stops here and `new`
+                # decides again.
+                head = backend.fingerprint(m.locator, name)
+                owned = any(
+                    r == name
+                    and k != key
+                    and k in self.objects
+                    and (
+                        self.objects[k].kind,
+                        self.backend_for(self.objects[k].kind).branch_scope(
+                            self.objects[k].locator
+                        ),
+                    )
+                    == scope
+                    for k, r in self.workspace.working_refs.items()
+                )
+                if owned or (m.state is not None and self._same(m.kind, head, m.state)):
+                    adopt(name, [key, *siblings()])
+                    write_workspace(self.root, self.workspace)
+                    return name
+                agreed = self.workspace.pending_resets.get(key)
+                if agreed is None or not self._same(m.kind, head, agreed):
+                    raise StaleWorkingCopyError(
+                        f"branch {name} holds writes ({short_state(head)}) that `new` "
+                        f"did not see; a writable open never resets a branch -- run "
+                        "`tether new` to decide (it refuses while the branch holds "
+                        "uncommitted writes; --discard throws them away)"
+                    )
+                pre["heads"] = {key: head}
+            op = self._begin_op("fork", pre=pre)
+            ref = self._fork_from_manifest(m, name)
+            adopt(ref, [key, *siblings()])
+            write_workspace(self.root, self.workspace)
+            self._end_op(
+                op,
+                result={
+                    "key": key,
+                    "ref": ref,
+                    "kind": m.kind,
+                    "locator": dict(m.locator),
+                },
+            )
+            return ref
 
     def new(
         self,
@@ -3068,73 +3197,79 @@ class Repo:
         failures are aggregated into `MultiObjectError` after every action has
         been attempted.
         """
-        if plan.command != "gc":
-            raise ConfigError(f"expected a gc plan, got {plan.command!r}")
-        # Unpins are justified by what history references; a commit made since
-        # the plan (here or in another checkout) may reference one of them.
-        head_then = plan.context.get("vcs_head")
-        if head_then is not None:
-            with contextlib.suppress(VcsError):
-                if self.vcs.current_rev() != head_then:
-                    raise StalePlanError(
-                        "history moved since the gc plan was made (a new commit may "
-                        "reference a pin it would release); re-run the plan"
-                    )
-        if plan.context.get("manifest_hash") != self.current_manifest_hash():
-            raise StalePlanError(
-                "manifests changed since the gc plan was made; re-run the plan"
-            )
-        report = GcReport(dry_run=False, plan=plan)
-        errors: dict[str, Exception] = {}
-        forgot = False
-        pre = {"workspace": self.workspace.to_toml()}
-        for a in plan.actions:
-            try:
-                if a.op == "unpin":
-                    backend = self.backend_for(a.kind)
-                    pid = str(a.params["pin_id"])
-                    backend.unpin(dict(a.params["locator"]), Pin(id=pid, ref=a.target))
-                    report.unpinned.setdefault(a.kind, []).append(pid)
-                elif a.op == "forget-working-ref":
-                    self.workspace.working_refs.pop(a.key, None)
-                    forgot = True
-                    report.forgotten_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "delete-branch":
-                    backend = self.backend_for(a.kind)
-                    locator = dict(a.params["locator"])
-                    self._require_head(
-                        backend,
-                        locator,
-                        a.target,
-                        a.params.get("head"),
-                        what=f"gc {a.key}",
-                    )
-                    backend.delete_working_ref(locator, a.target)
-                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "keep-branch":
-                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "delete-listing":
-                    (listings_dir(self.root) / a.target).unlink(missing_ok=True)
-                    report.deleted_listings.append(a.target)
-            except StalePlanError:
-                raise  # the plan is stale as a whole: stop, do not aggregate
-            except Exception as exc:
-                errors[f"{a.op} {a.target}"] = exc
-        if forgot:
-            write_workspace(self.root, self.workspace)
-        if plan.writes:
-            self._log_op(
-                "gc",
-                plan=plan,
-                result={
-                    **_report_dict(report),
-                    "failed": {k: str(v) for k, v in errors.items()},
-                },
-                pre=pre,
-            )
-        if errors:
-            raise MultiObjectError("gc failed for some actions", errors)
-        return report
+        with self._writer_lock():
+            if plan.command != "gc":
+                raise ConfigError(f"expected a gc plan, got {plan.command!r}")
+            # Unpins are justified by what history references; a commit made since
+            # the plan (here or in another checkout) may reference one of them.
+            head_then = plan.context.get("vcs_head")
+            if head_then is not None:
+                with contextlib.suppress(VcsError):
+                    if self.vcs.current_rev() != head_then:
+                        raise StalePlanError(
+                            "history moved since the gc plan was made (a new commit "
+                            "may reference a pin it would release); re-run the plan"
+                        )
+            if plan.context.get("manifest_hash") != self.current_manifest_hash():
+                raise StalePlanError(
+                    "manifests changed since the gc plan was made; re-run the plan"
+                )
+            report = GcReport(dry_run=False, plan=plan)
+            errors: dict[str, Exception] = {}
+            forgot = False
+            pre = {"workspace": self.workspace.to_toml()}
+            op = self._begin_op("gc", plan=plan, pre=pre) if plan.writes else None
+            for a in plan.actions:
+                try:
+                    if a.op == "unpin":
+                        backend = self.backend_for(a.kind)
+                        pid = str(a.params["pin_id"])
+                        backend.unpin(
+                            dict(a.params["locator"]), Pin(id=pid, ref=a.target)
+                        )
+                        report.unpinned.setdefault(a.kind, []).append(pid)
+                    elif a.op == "forget-working-ref":
+                        self.workspace.working_refs.pop(a.key, None)
+                        forgot = True
+                        report.forgotten_working_refs.setdefault(a.key, []).append(
+                            a.target
+                        )
+                    elif a.op == "delete-branch":
+                        backend = self.backend_for(a.kind)
+                        locator = dict(a.params["locator"])
+                        self._require_head(
+                            backend,
+                            locator,
+                            a.target,
+                            a.params.get("head"),
+                            what=f"gc {a.key}",
+                        )
+                        backend.delete_working_ref(locator, a.target)
+                        report.deleted_working_refs.setdefault(a.key, []).append(
+                            a.target
+                        )
+                    elif a.op == "keep-branch":
+                        report.kept_working_refs.setdefault(a.key, []).append(a.target)
+                    elif a.op == "delete-listing":
+                        (listings_dir(self.root) / a.target).unlink(missing_ok=True)
+                        report.deleted_listings.append(a.target)
+                except StalePlanError:
+                    raise  # the plan is stale as a whole: stop, do not aggregate
+                except Exception as exc:
+                    errors[f"{a.op} {a.target}"] = exc
+            if forgot:
+                write_workspace(self.root, self.workspace)
+            if op is not None:
+                self._end_op(
+                    op,
+                    result={
+                        **_report_dict(report),
+                        "failed": {k: str(v) for k, v in errors.items()},
+                    },
+                )
+            if errors:
+                raise MultiObjectError("gc failed for some actions", errors)
+            return report
 
     def gc(
         self,
@@ -3425,120 +3560,125 @@ class Repo:
             StalePlanError: A base branch moved since the plan was made.
             MultiObjectError: A backend failed for reasons other than conflicts.
         """
-        if plan.command != "promote":
-            raise ConfigError(f"expected a promote plan, got {plan.command!r}")
-        report = PromoteReport(plan=plan)
-        writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
-        for a in plan.actions:
-            if a.op == "refuse":
-                report.refused[a.key] = a.detail
-            elif a.op == "hold":
-                report.held[a.key] = a.detail
-        for note in plan.notes:
-            key, _, why = note.partition(": ")
-            if "already at the target" in why or "nothing to promote" in why:
-                report.skipped.append(key)
-        if verify:
-            for a in writes:
-                m = self.objects.get(a.key)
-                locator = dict(a.params["locator"])
+        with self._writer_lock():
+            if plan.command != "promote":
+                raise ConfigError(f"expected a promote plan, got {plan.command!r}")
+            report = PromoteReport(plan=plan)
+            writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
+            for a in plan.actions:
+                if a.op == "refuse":
+                    report.refused[a.key] = a.detail
+                elif a.op == "hold":
+                    report.held[a.key] = a.detail
+            for note in plan.notes:
+                key, _, why = note.partition(": ")
+                if "already at the target" in why or "nothing to promote" in why:
+                    report.skipped.append(key)
+            if verify:
+                for a in writes:
+                    m = self.objects.get(a.key)
+                    locator = dict(a.params["locator"])
+                    backend = self.backend_for(a.kind)
+                    base_locator = {k: v for k, v in locator.items() if k != "at"}
+                    current = backend.fingerprint(base_locator, None)
+                    if m is not None and not self._same(
+                        a.kind, current, a.params["base_state"]
+                    ):
+                        raise StalePlanError(
+                            f"{a.key!r}: base branch moved since the plan was made "
+                            f"({short_state(a.params['base_state'])} -> "
+                            f"{short_state(current)}); re-run the plan"
+                        )
+                    # ... and the source: what lands must be what was reviewed.
+                    source = a.params.get("source") or {}
+                    if "ref" in source:
+                        self._require_head(
+                            backend,
+                            locator,
+                            str(source["ref"]),
+                            a.params.get("target_state"),
+                            what=f"promote {a.key}",
+                        )
+
+            message = str(plan.context.get("message") or "tether promote")
+            by_key = {a.key: a for a in writes}
+            pre = {
+                "workspace": self.workspace.to_toml(),
+                "base_states": {a.key: a.params.get("base_state") for a in writes},
+            }
+            op = self._begin_op("promote", plan=plan, pre=pre) if writes else None
+
+            def run_one(key: str) -> tuple[str, State]:
+                a = by_key[key]
                 backend = self.backend_for(a.kind)
-                base_locator = {k: v for k, v in locator.items() if k != "at"}
-                current = backend.fingerprint(base_locator, None)
-                if m is not None and not self._same(
-                    a.kind, current, a.params["base_state"]
-                ):
-                    raise StalePlanError(
-                        f"{a.key!r}: base branch moved since the plan was made "
-                        f"({short_state(a.params['base_state'])} -> "
-                        f"{short_state(current)}); re-run the plan"
-                    )
-                # ... and the source: what lands must be what was reviewed.
-                source = a.params.get("source") or {}
-                if "ref" in source:
-                    self._require_head(
-                        backend,
-                        locator,
-                        str(source["ref"]),
-                        a.params.get("target_state"),
-                        what=f"promote {a.key}",
-                    )
+                locator = dict(a.params["locator"])
+                source = _source_object(a.params["source"])
+                if a.op == "fast-forward":
+                    return "ff", backend.promote(locator, source)
+                ref = source.ref if isinstance(source, Pin) else str(source)
+                return "merge", backend.merge(locator, ref, message)
 
-        message = str(plan.context.get("message") or "tether promote")
-        by_key = {a.key: a for a in writes}
-        pre = {
-            "workspace": self.workspace.to_toml(),
-            "base_states": {a.key: a.params.get("base_state") for a in writes},
-        }
+            results, errors = self._fanout_collect(run_one, list(by_key))
+            for key, exc in list(errors.items()):
+                if isinstance(exc, MergeConflict):
+                    report.conflicts[key] = list(exc.conflicts)
+                    report.refused[key] = str(exc)
+                    errors.pop(key)
 
-        def run_one(key: str) -> tuple[str, State]:
-            a = by_key[key]
-            backend = self.backend_for(a.kind)
-            locator = dict(a.params["locator"])
-            source = _source_object(a.params["source"])
-            if a.op == "fast-forward":
-                return "ff", backend.promote(locator, source)
-            ref = source.ref if isinstance(source, Pin) else str(source)
-            return "merge", backend.merge(locator, ref, message)
-
-        results, errors = self._fanout_collect(run_one, list(by_key))
-        for key, exc in list(errors.items()):
-            if isinstance(exc, MergeConflict):
-                report.conflicts[key] = list(exc.conflicts)
-                report.refused[key] = str(exc)
-                errors.pop(key)
-
-        touched = False
-        for key, (how, new_state) in results.items():
-            (report.fast_forwarded if how == "ff" else report.merged)[key] = new_state
-            m = self.objects.get(key)
-            working_ref = self.workspace.working_refs.get(key)
-            if how == "merge" and m is not None and working_ref is not None:
-                # The fork now lags the base; reset it onto the merge result so
-                # the next commit pins what the base holds.
-                self.workspace.working_refs[key] = self.backend_for(m.kind).fork(
-                    m.locator, new_state, working_ref
+            touched = False
+            for key, (how, new_state) in results.items():
+                (report.fast_forwarded if how == "ff" else report.merged)[key] = (
+                    new_state
                 )
-            if key in self.workspace.working_refs or key in self.workspace.fork_points:
-                self.workspace.fork_points[key] = dict(new_state)
-                self.workspace.last_snapshot[key] = dict(new_state)
-                touched = True
-        if touched:
-            write_workspace(self.root, self.workspace)
-        # The dataset side of the promotion: when the whole bookmark landed
-        # cleanly, its commit now describes the upstream branches, so the
-        # trunk bookmark moves to it -- `jj bookmark set main -r feature`.
-        # A merge leaves states the commit does not describe; commit first,
-        # then promote again (a fast-forward) to move the trunk. A subset
-        # (`promote KEY...`) never moves it: the rest has not landed.
-        bookmark = self.workspace.bookmark
-        if (
-            results
-            and bookmark
-            and not self.on_trunk()
-            and plan.context.get("rev") is None
-            and not plan.context.get("subset")
-            and not report.refused
-            and not report.merged
-            and not errors
-        ):
-            commit = self.vcs.bookmarks().get(bookmark)
-            if commit:
-                self.vcs.bookmark_set(self.config.trunk, commit)
-                report.trunk_moved = commit
-        if results or errors:
-            self._log_op(
-                "promote",
-                plan=plan,
-                result={
-                    **_report_dict(report),
-                    "failed": {k: str(v) for k, v in errors.items()},
-                },
-                pre=pre,
-            )
-        if errors:
-            raise MultiObjectError("promote failed for some objects", errors)
-        return report
+                m = self.objects.get(key)
+                working_ref = self.workspace.working_refs.get(key)
+                if how == "merge" and m is not None and working_ref is not None:
+                    # The fork now lags the base; reset it onto the merge result so
+                    # the next commit pins what the base holds.
+                    self.workspace.working_refs[key] = self.backend_for(m.kind).fork(
+                        m.locator, new_state, working_ref
+                    )
+                if (
+                    key in self.workspace.working_refs
+                    or key in self.workspace.fork_points
+                ):
+                    self.workspace.fork_points[key] = dict(new_state)
+                    self.workspace.last_snapshot[key] = dict(new_state)
+                    touched = True
+            if touched:
+                write_workspace(self.root, self.workspace)
+            # The dataset side of the promotion: when the whole bookmark landed
+            # cleanly, its commit now describes the upstream branches, so the
+            # trunk bookmark moves to it -- `jj bookmark set main -r feature`.
+            # A merge leaves states the commit does not describe; commit first,
+            # then promote again (a fast-forward) to move the trunk. A subset
+            # (`promote KEY...`) never moves it: the rest has not landed.
+            bookmark = self.workspace.bookmark
+            if (
+                results
+                and bookmark
+                and not self.on_trunk()
+                and plan.context.get("rev") is None
+                and not plan.context.get("subset")
+                and not report.refused
+                and not report.merged
+                and not errors
+            ):
+                commit = self.vcs.bookmarks().get(bookmark)
+                if commit:
+                    self.vcs.bookmark_set(self.config.trunk, commit)
+                    report.trunk_moved = commit
+            if op is not None:
+                self._end_op(
+                    op,
+                    result={
+                        **_report_dict(report),
+                        "failed": {k: str(v) for k, v in errors.items()},
+                    },
+                )
+            if errors:
+                raise MultiObjectError("promote failed for some objects", errors)
+            return report
 
     def promote(
         self,
@@ -3652,63 +3792,68 @@ class Repo:
                 revision is gone.
             StalePlanError: The manifests changed since the plan was made.
         """
-        if plan.command != "restore":
-            raise ConfigError(f"expected a restore plan, got {plan.command!r}")
-        refused = [a for a in plan.actions if a.op == "refuse"]
-        if refused:
-            raise TetherError(
-                "cannot restore:\n"
-                + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
-            )
-        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
-            raise StalePlanError(
-                "manifests changed since the plan was made; re-run the plan"
-            )
-        forks = [a for a in plan.actions if a.op == "fork"]
-        pre = {
-            "workspace": self.workspace.to_toml(),
-            "heads": {
-                a.key: a.params.get("head") for a in forks if a.params.get("existing")
-            },
-        }
-        done: dict[str, str] = {}
-        for a in forks:
-            m = ObjectManifest.from_toml(str(a.params["then"]))
-            if verify and a.params.get("existing"):
-                self._require_head(
-                    self.backend_for(a.kind),
-                    self.objects[a.key].locator,
-                    str(a.params["existing"]),
-                    a.params.get("head"),
-                    what=f"restore {a.key}",
+        with self._writer_lock():
+            if plan.command != "restore":
+                raise ConfigError(f"expected a restore plan, got {plan.command!r}")
+            refused = [a for a in plan.actions if a.op == "refuse"]
+            if refused:
+                raise TetherError(
+                    "cannot restore:\n"
+                    + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
                 )
-            ref = self._fork_from_manifest(m, a.target)
-            done[a.key] = ref
-            self.workspace.working_refs[a.key] = ref
-            self.workspace.pending_forks.pop(a.key, None)
-            self.workspace.pending_resets.pop(a.key, None)
-            self.workspace.fork_points[a.key] = dict(a.params["then_state"])
-            self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
-        # What the branch now holds is deliberate: it corresponds to the
-        # working tree's manifest as far as staleness is concerned.
-        self._mark_base_states(done)
-        write_workspace(self.root, self.workspace)
-        self._log_op(
-            "restore",
-            plan=plan,
-            result={
-                "created": sorted(
-                    k
-                    for k, a in ((a.key, a) for a in forks)
-                    if not a.params.get("existing")
-                ),
-                "reset": sorted(a.key for a in forks if a.params.get("existing")),
-                "working_refs": done,
-                "from_commit": plan.context.get("from_commit"),
-            },
-            pre=pre,
-        )
-        return done
+            if (
+                verify
+                and plan.context.get("manifest_hash") != self.current_manifest_hash()
+            ):
+                raise StalePlanError(
+                    "manifests changed since the plan was made; re-run the plan"
+                )
+            forks = [a for a in plan.actions if a.op == "fork"]
+            pre = {
+                "workspace": self.workspace.to_toml(),
+                "heads": {
+                    a.key: a.params.get("head")
+                    for a in forks
+                    if a.params.get("existing")
+                },
+            }
+            op = self._begin_op("restore", plan=plan, pre=pre)
+            done: dict[str, str] = {}
+            for a in forks:
+                m = ObjectManifest.from_toml(str(a.params["then"]))
+                if verify and a.params.get("existing"):
+                    self._require_head(
+                        self.backend_for(a.kind),
+                        self.objects[a.key].locator,
+                        str(a.params["existing"]),
+                        a.params.get("head"),
+                        what=f"restore {a.key}",
+                    )
+                ref = self._fork_from_manifest(m, a.target)
+                done[a.key] = ref
+                self.workspace.working_refs[a.key] = ref
+                self.workspace.pending_forks.pop(a.key, None)
+                self.workspace.pending_resets.pop(a.key, None)
+                self.workspace.fork_points[a.key] = dict(a.params["then_state"])
+                self.workspace.last_snapshot[a.key] = dict(a.params["then_state"])
+            # What the branch now holds is deliberate: it corresponds to the
+            # working tree's manifest as far as staleness is concerned.
+            self._mark_base_states(done)
+            write_workspace(self.root, self.workspace)
+            self._end_op(
+                op,
+                result={
+                    "created": sorted(
+                        k
+                        for k, a in ((a.key, a) for a in forks)
+                        if not a.params.get("existing")
+                    ),
+                    "reset": sorted(a.key for a in forks if a.params.get("existing")),
+                    "working_refs": done,
+                    "from_commit": plan.context.get("from_commit"),
+                },
+            )
+            return done
 
     def restore(
         self, keys: Sequence[str], rev: str, *, discard: bool = False
@@ -4028,55 +4173,64 @@ class Repo:
             TetherError: Nothing to undo, an unknown id, a branch with writes
                 (without `discard`), or an operation that cannot be reversed.
         """
-        entries = self.ops()
-        if op_id is None:
-            target = next((e for e in entries if e.undoable), None)
-            if target is None:
-                raise TetherError("nothing to undo")
-        else:
-            target = next((e for e in entries if e.id == op_id), None)
-            if target is None:
-                raise TetherError(f"no operation {op_id!r} in this workspace's log")
-            if target.undone_by:
-                raise TetherError(f"{op_id} was already undone by {target.undone_by}")
-            if target.undoes is not None or not target.undoable:
-                raise TetherError(f"cannot undo {target.command!r}")
+        with self._writer_lock():
+            entries = self.ops()
+            if op_id is None:
+                target = next((e for e in entries if e.undoable), None)
+                if target is None:
+                    raise TetherError("nothing to undo")
+            else:
+                target = next((e for e in entries if e.id == op_id), None)
+                if target is None:
+                    raise TetherError(f"no operation {op_id!r} in this workspace's log")
+                if target.undone_by:
+                    raise TetherError(
+                        f"{op_id} was already undone by {target.undone_by}"
+                    )
+                if target.incomplete:
+                    raise TetherError(
+                        f"{op_id} ({target.command}) never finished, so what it did "
+                        "is not known; `tether verify` and `tether gc --dry-run` show "
+                        "what it left behind"
+                    )
+                if target.undoes is not None or not target.undoable:
+                    raise TetherError(f"cannot undo {target.command!r}")
 
-        report = UndoReport(op=target)
-        handler = {
-            "commit": self._undo_commit,
-            "new": self._undo_new,
-            "restore": self._undo_new,
-            "fork": self._undo_fork,
-            "gc": self._undo_gc,
-            "promote": self._undo_promote,
-            "import": self._undo_manifests,
-            "add": self._undo_manifests,
-            "remove": self._undo_manifests,
-            "pull": self._undo_commit,
-            "set": self._undo_manifests,
-        }.get(target.command)
-        if handler is None:
-            raise TetherError(f"cannot undo {target.command!r}")
-        handler(target, report, discard)
-        if not report.restored and report.irreversible:
-            raise TetherError(
-                f"cannot undo {target.id} ({target.command}):\n"
-                + "\n".join(f"  {line}" for line in report.irreversible)
+            report = UndoReport(op=target)
+            handler = {
+                "commit": self._undo_commit,
+                "new": self._undo_new,
+                "restore": self._undo_new,
+                "fork": self._undo_fork,
+                "gc": self._undo_gc,
+                "promote": self._undo_promote,
+                "import": self._undo_manifests,
+                "add": self._undo_manifests,
+                "remove": self._undo_manifests,
+                "pull": self._undo_commit,
+                "set": self._undo_manifests,
+            }.get(target.command)
+            if handler is None:
+                raise TetherError(f"cannot undo {target.command!r}")
+            handler(target, report, discard)
+            if not report.restored and report.irreversible:
+                raise TetherError(
+                    f"cannot undo {target.id} ({target.command}):\n"
+                    + "\n".join(f"  {line}" for line in report.irreversible)
+                )
+            entry = self._log_op(
+                "undo",
+                result={
+                    "summary": f"{target.command} {target.summary()}",
+                    "restored": list(report.restored),
+                    "irreversible": list(report.irreversible),
+                    "skipped": list(report.skipped),
+                },
+                undoes=target.id,
             )
-        entry = self._log_op(
-            "undo",
-            result={
-                "summary": f"{target.command} {target.summary()}",
-                "restored": list(report.restored),
-                "irreversible": list(report.irreversible),
-                "skipped": list(report.skipped),
-            },
-            undoes=target.id,
-        )
-        report.undo_id = entry.id
-        mark_undone(self.root, target.id, entry.id)
-        return report
+            report.undo_id = entry.id
+            mark_undone(self.root, target.id, entry.id)
+            return report
 
     def undo_to(self, op_id: str, *, discard: bool = False) -> UndoToReport:
         """Undo every operation newer than `op_id`, newest first.
@@ -4094,26 +4248,30 @@ class Repo:
         Raises:
             TetherError: `op_id` is not in this workspace's log.
         """
-        entries = self.ops()
-        try:
-            idx = next(i for i, e in enumerate(entries) if e.id == op_id)
-        except StopIteration:
-            raise TetherError(
-                f"no operation {op_id!r} in this workspace's log"
-            ) from None
-        report = UndoToReport(target=entries[idx])
-        for e in entries[:idx]:
-            if e.undoes is not None or e.undone_by is not None:
-                continue
-            if not e.undoable:
-                report.stopped_at, report.reason = e, f"{e.command} cannot be undone"
-                break
+        with self._writer_lock():
+            entries = self.ops()
             try:
-                report.reports.append(self.undo(e.id, discard=discard))
-            except TetherError as exc:
-                report.stopped_at, report.reason = e, str(exc)
-                break
-        return report
+                idx = next(i for i, e in enumerate(entries) if e.id == op_id)
+            except StopIteration:
+                raise TetherError(
+                    f"no operation {op_id!r} in this workspace's log"
+                ) from None
+            report = UndoToReport(target=entries[idx])
+            for e in entries[:idx]:
+                if e.undoes is not None or e.undone_by is not None:
+                    continue
+                if not e.undoable:
+                    report.stopped_at, report.reason = (
+                        e,
+                        f"{e.command} cannot be undone",
+                    )
+                    break
+                try:
+                    report.reports.append(self.undo(e.id, discard=discard))
+                except TetherError as exc:
+                    report.stopped_at, report.reason = e, str(exc)
+                    break
+            return report
 
     def _reload(self) -> None:
         self.objects = read_objects(self.root)
@@ -4127,15 +4285,19 @@ class Repo:
         self.workspace = read_workspace(self.root)
         report.restored.append("workspace.toml restored")
 
-    def _restore_manifests(self, texts: Mapping[str, Any], report: UndoReport) -> None:
+    def _restore_manifests(
+        self, texts: Mapping[str, Any], report: UndoReport | None = None
+    ) -> None:
         for key, text in sorted(texts.items()):
             if text is None:
                 remove_object(self.root, key)
-                report.restored.append(f"{key}: manifest removed again")
+                if report is not None:
+                    report.restored.append(f"{key}: manifest removed again")
             else:
                 _m.object_path(self.root, key).parent.mkdir(parents=True, exist_ok=True)
                 _m.object_path(self.root, key).write_text(str(text), encoding="utf-8")
-                report.restored.append(f"{key}: manifest restored")
+                if report is not None:
+                    report.restored.append(f"{key}: manifest restored")
         self.objects = read_objects(self.root)
 
     def _branch_has_new_writes(self, key: str, ref: str) -> State | None:
@@ -4365,6 +4527,12 @@ class Repo:
                 not just the working tree's.
         """
         plan = Plan(command="repair", context={"all_history": all_history})
+        for e in self.incomplete_ops():
+            plan.notes.append(
+                f"operation {e.id} ({e.command}, {e.at}) never finished; pins it "
+                "created and no commit names are released by `gc`, branches it "
+                "made are judged by `gc --prune-bookmarks`"
+            )
         targets: dict[str, ObjectManifest] = {}
         for key, m in self.objects.items():
             if m.pin is not None and m.state is not None:
@@ -4431,43 +4599,45 @@ class Repo:
 
     def apply_repair(self, plan: Plan) -> RepairReport:
         """Execute a plan from `plan_repair`; failures are reported, not raised."""
-        if plan.command != "repair":
-            raise ConfigError(f"expected a repair plan, got {plan.command!r}")
-        report = RepairReport(plan=plan)
-        pre = {"workspace": self.workspace.to_toml()}
-        for a in plan.actions:
-            try:
-                if a.op == "repin":
-                    backend = self.backend_for(a.kind)
-                    backend.pin(
-                        dict(a.params["locator"]),
-                        dict(a.params["state"]),
-                        str(a.params["pin_id"]),
-                    )
-                    report.repinned[a.key] = str(a.params["pin_id"])
-                elif a.op == "refork":
-                    m = self.objects[a.key]
-                    # Planned because the branch was missing; if it is back
-                    # (another checkout re-created it), do not reset it.
-                    backend = self.backend_for(m.kind)
-                    if a.target in backend.list_working_refs(m.locator):
-                        raise StalePlanError(
-                            f"{a.target} exists again since the plan was made; "
-                            "re-run the plan"
+        with self._writer_lock():
+            if plan.command != "repair":
+                raise ConfigError(f"expected a repair plan, got {plan.command!r}")
+            report = RepairReport(plan=plan)
+            pre = {"workspace": self.workspace.to_toml()}
+            op = self._begin_op("repair", plan=plan, pre=pre) if plan.writes else None
+            for a in plan.actions:
+                try:
+                    if a.op == "repin":
+                        backend = self.backend_for(a.kind)
+                        backend.pin(
+                            dict(a.params["locator"]),
+                            dict(a.params["state"]),
+                            str(a.params["pin_id"]),
                         )
-                    ref = self._fork_from_manifest(m, a.target)
-                    self.workspace.working_refs[a.key] = ref
-                    if m.state is not None:
-                        self.workspace.fork_points[a.key] = dict(m.state)
-                    self._mark_base_states([a.key])
-                    report.reforked[a.key] = ref
-            except TetherError as exc:
-                report.failed[f"{a.op} {a.target}"] = str(exc)
-        if report.reforked:
-            write_workspace(self.root, self.workspace)
-        if plan.writes:
-            self._log_op("repair", plan=plan, result=_report_dict(report), pre=pre)
-        return report
+                        report.repinned[a.key] = str(a.params["pin_id"])
+                    elif a.op == "refork":
+                        m = self.objects[a.key]
+                        # Planned because the branch was missing; if it is back
+                        # (another checkout re-created it), do not reset it.
+                        backend = self.backend_for(m.kind)
+                        if a.target in backend.list_working_refs(m.locator):
+                            raise StalePlanError(
+                                f"{a.target} exists again since the plan was made; "
+                                "re-run the plan"
+                            )
+                        ref = self._fork_from_manifest(m, a.target)
+                        self.workspace.working_refs[a.key] = ref
+                        if m.state is not None:
+                            self.workspace.fork_points[a.key] = dict(m.state)
+                        self._mark_base_states([a.key])
+                        report.reforked[a.key] = ref
+                except TetherError as exc:
+                    report.failed[f"{a.op} {a.target}"] = str(exc)
+            if report.reforked:
+                write_workspace(self.root, self.workspace)
+            if op is not None:
+                self._end_op(op, result=_report_dict(report))
+            return report
 
     def repair(self, *, all_history: bool = False) -> RepairReport:
         """Recreate missing pins and working branches from the manifests.

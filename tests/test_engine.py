@@ -12,6 +12,7 @@ from tether.errors import (
     ImmutableObjectModified,
     StaleWorkingCopyError,
     TetherError,
+    VcsError,
 )
 from tether.handles import MemoryHandle
 from tether.manifest import Locator, Pin, Policy, State, ref_for_pin
@@ -630,6 +631,99 @@ def test_gc_collects_references_over_the_whole_pin_namespace(vcs_root: Path) -> 
     assert not [a for a in plan.actions if a.op == "unpin"], plan.actions
     repo.gc(dry_run=False)
     assert {p1.ref, p2.ref} <= set(store.system(system).tags)
+
+
+def test_commit_compensates_manifests_and_journals_the_attempt(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after the pins -- here the VCS commit -- rolls back the pins
+    this commit created *and* the manifests it wrote, and the journal keeps a
+    completed entry saying the commit failed and was rolled back."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 1})
+    repo.commit("v1")
+    before = repo.objects["db"].to_toml()
+    store.write(system, "main", {"v": 2})
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise VcsError("disk full")
+
+    monkeypatch.setattr(repo.vcs, "commit", boom)
+    with pytest.raises(VcsError, match="disk full"):
+        repo.commit("v2")
+    # Working tree as before; the v2 pin is gone; the v1 pin is untouched.
+    assert Repo.find(vcs_root).objects["db"].to_toml() == before
+    tags = store.system(system).tags
+    assert len(tags) == 1 and repo.objects["db"].pin is not None
+    assert repo.objects["db"].pin.ref in tags
+    newest = repo.ops()[0]
+    assert newest.command == "commit" and not newest.incomplete
+    assert newest.result["rolled_back"] and "disk full" in newest.result["failed"]
+
+
+def test_an_interrupted_operation_leaves_a_started_journal_entry(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal entry is written before the first side effect. A process
+    that dies mid-way (simulated: the backend raises SystemExit) leaves it
+    `started`; `ops` shows it, `undo` refuses it, `repair` names it."""
+    repo = Repo.init(vcs_root)
+    _mem_object(repo, "a")
+    _mem_object(repo, "b")
+    repo.commit("baseline")
+    backend = repo.backend_for("memory")
+    real_fork = backend.fork
+
+    def dies(locator: Locator, source: object, name: str) -> str:
+        raise SystemExit(137)  # what a kill looks like from inside
+
+    monkeypatch.setattr(backend, "fork", dies)
+    with pytest.raises(SystemExit):
+        repo.new(bookmark="work", eager=True)
+    monkeypatch.setattr(backend, "fork", real_fork)
+
+    fresh = Repo.find(vcs_root)
+    (incomplete,) = fresh.incomplete_ops()
+    assert incomplete.command == "new" and incomplete.plan is not None
+    assert fresh.ops()[0].id == incomplete.id and not fresh.ops()[0].undoable
+    with pytest.raises(TetherError, match="never finished"):
+        fresh.undo(incomplete.id)
+    # A bare `undo` skips the incomplete entry: the newest *undoable* one is
+    # the baseline commit.
+    assert fresh.undo().op.command == "commit"
+    notes = fresh.plan_repair().notes
+    assert any(incomplete.id in n and "never finished" in n for n in notes)
+
+
+def test_one_writer_per_checkout(vcs_root: Path) -> None:
+    """A second Repo on the same checkout cannot write while the first holds
+    the lock; the lock is re-entrant within one Repo."""
+    import fcntl
+
+    from tether.manifest import LOCK_FILENAME, tether_path
+
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    lock = tether_path(vcs_root) / LOCK_FILENAME
+    with (
+        repo._writer_lock(),
+        repo._writer_lock(),
+    ):  # re-entrant
+        assert lock.exists()
+        other = Repo.find(vcs_root)
+        with pytest.raises(TetherError, match="another tether command is writing"):
+            other.commit("blocked")
+    # Released: the other Repo can write now.
+    other.commit("unblocked")
+    # And a foreign holder of the file lock blocks us the same way.
+    with lock.open("a+") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(TetherError, match="another tether command is writing"):
+            repo.new(bookmark="work")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    repo.new(bookmark="work")
 
 
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:

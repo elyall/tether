@@ -632,7 +632,8 @@ def find_dataset_root(start: Path) -> Path | None:
 
 
 CACHE_DIR = "cache"
-UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl", CACHE_DIR)
+LOCK_FILENAME = "lock"
+UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl", CACHE_DIR, LOCK_FILENAME)
 """Per-workspace files under ``.tether/`` that must never be committed."""
 
 

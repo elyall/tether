@@ -912,7 +912,9 @@ def ops(
         return
     for e in entries:
         flag = ""
-        if e.undone_by:
+        if e.incomplete:
+            flag = "  (INCOMPLETE: never finished; see `tether repair --dry-run`)"
+        elif e.undone_by:
             flag = f"  (undone by {e.undone_by})"
         elif e.id in drifted:
             flag = "  (vcs commit gone)"

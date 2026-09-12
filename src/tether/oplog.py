@@ -19,6 +19,7 @@ appends loses at most the line being written, never the log.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ __all__ = [
     "OPS_FILENAME",
     "OpEntry",
     "append_op",
+    "mark_done",
     "mark_undone",
     "new_op_id",
     "ops_path",
@@ -67,6 +69,12 @@ class OpEntry:
             before they were rewritten.
         undoes: For an `undo` entry, the id of the operation it reversed.
         undone_by: Set on an entry once an `undo` has reversed it.
+        status: `"started"` while the operation runs -- the entry is appended
+            (and synced) *before* the first side effect, with the plan and what
+            `undo` would need -- and `"done"` once a completion mark with the
+            result follows. An entry still `"started"` in a log nobody is
+            writing to is an operation that was interrupted: `ops` flags it,
+            `undo` refuses it (what happened is not known), `repair` names it.
     """
 
     id: str
@@ -77,6 +85,7 @@ class OpEntry:
     pre: dict[str, Any] = field(default_factory=dict)
     undoes: str | None = None
     undone_by: str | None = None
+    status: str = "done"
 
     @classmethod
     def now(
@@ -98,6 +107,11 @@ class OpEntry:
             undoes=undoes,
         )
 
+    @property
+    def incomplete(self) -> bool:
+        """The operation began but no completion mark followed."""
+        return self.status == "started"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -108,6 +122,7 @@ class OpEntry:
             "pre": self.pre,
             "undoes": self.undoes,
             "undone_by": self.undone_by,
+            "status": self.status,
         }
 
     @classmethod
@@ -121,14 +136,17 @@ class OpEntry:
             pre=dict(data.get("pre") or {}),
             undoes=data.get("undoes"),
             undone_by=data.get("undone_by"),
+            status=str(data.get("status") or "done"),
         )
 
     @property
     def undoable(self) -> bool:
-        """Not itself an undo, not already undone, and of a reversible kind."""
+        """Not itself an undo, not already undone, complete, and of a
+        reversible kind."""
         return (
             self.undoes is None
             and self.undone_by is None
+            and not self.incomplete
             and self.command
             not in ("undo", "repair", "upgrade", "abandon", "forget-workspace")
         )
@@ -219,6 +237,7 @@ def read_ops(root: Path) -> list[OpEntry]:
         return []
     entries: list[OpEntry] = []
     marks: dict[str, str] = {}
+    done: dict[str, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -231,22 +250,46 @@ def read_ops(root: Path) -> list[OpEntry]:
             entries.append(OpEntry.from_dict(obj))
         elif "undone" in obj:
             marks[str(obj["undone"])] = str(obj.get("by", ""))
+        elif "done" in obj:
+            done[str(obj["done"])] = obj
     for e in entries:
         if e.id in marks:
             e.undone_by = marks[e.id] or None
+        if e.id in done:
+            mark = done[e.id]
+            e.status = "done"
+            e.result = dict(mark.get("result") or e.result)
+            if mark.get("pre"):
+                e.pre = {**e.pre, **dict(mark["pre"])}
     return entries
 
 
-def append_op(root: Path, entry: OpEntry) -> None:
+def _append_line(root: Path, obj: dict[str, Any]) -> None:
+    """Append one JSON line and sync it: the log is a journal, and a started
+    entry must survive whatever interrupts the operation after it."""
     path = ops_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry.to_dict(), default=str) + "\n")
+        fh.write(json.dumps(obj, default=str) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def append_op(root: Path, entry: OpEntry) -> None:
+    _append_line(root, entry.to_dict())
+
+
+def mark_done(
+    root: Path,
+    op_id: str,
+    result: dict[str, Any],
+    pre: dict[str, Any] | None = None,
+) -> None:
+    """Complete a started entry: what happened, and anything `undo` learnt
+    only while the operation ran (branch heads it replaced, for one)."""
+    _append_line(root, {"done": op_id, "result": result, "pre": dict(pre or {})})
 
 
 def mark_undone(root: Path, op_id: str, by: str) -> None:
     """Record that `op_id` was reversed by the undo entry `by` (an appended mark)."""
-    path = ops_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"undone": op_id, "by": by}) + "\n")
+    _append_line(root, {"undone": op_id, "by": by})
