@@ -29,9 +29,9 @@ read a bookmark as a branch and `@` as `HEAD`.
 
 {{< include _generated/06/01-init.sh >}}
 
-{{< include _generated/06/02-init.txt >}}
+{{< include _generated/06/01-init.txt >}}
 
-{{< include _generated/06/01-init.sh >}}
+{{< include _generated/06/02-init.sh >}}
 
 {{< include _generated/06/02-init.txt >}}
 
