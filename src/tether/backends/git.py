@@ -362,7 +362,8 @@ class GitBackend(ObjectBackend):
             self._run(locator, "update-ref", f"refs/heads/{base}", target, head)
         return self.fingerprint(locator, base)
 
-    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+        source_ref = self._source_ref(source)
         base = self._base_branch(locator)
         if self._checked_out(locator) != base:
             raise BackendError(

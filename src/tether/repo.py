@@ -4047,18 +4047,16 @@ class Repo:
                 backend = self.backend_for(a.kind)
                 locator = dict(a.params["locator"])
                 source = _source_object(a.params["source"])
+                # Land what was reviewed: the target state the plan captured,
+                # not whatever the ref's head is by now. Every Forkable backend
+                # promotes and merges from a state.
+                reviewed = a.params.get("target_state")
+                what: str | Pin | State = dict(reviewed) if reviewed else source
                 if a.op == "fast-forward":
-                    # Land what was reviewed: the target state the plan
-                    # captured, not whatever the ref's head is by now. Every
-                    # Forkable backend promotes from a state.
-                    reviewed = a.params.get("target_state")
-                    new_state = backend.promote(
-                        locator, dict(reviewed) if reviewed else source
-                    )
+                    new_state = backend.promote(locator, what)
                     self._progress(op, "fast-forward", key=key, state=new_state)
                     return "ff", new_state
-                ref = source.ref if isinstance(source, Pin) else str(source)
-                new_state = backend.merge(locator, ref, message)
+                new_state = backend.merge(locator, what, message)
                 self._progress(op, "merge", key=key, state=new_state)
                 return "merge", new_state
 

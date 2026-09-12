@@ -124,6 +124,9 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
     plan = repo.plan_promote()
     (a,) = plan.actions
     assert a.op == "merge" and "base moved since fork" in a.detail
+    # A write that slips onto the fork after the plan is *not* merged: the
+    # merge takes the state the plan reviewed, not the live ref.
+    store.write(system, wref, {"a": 1, "b": 2, "c": 3, "late": True})
     report = repo.apply_promote(plan, verify=False)
     merged = report.merged["db"]
     assert store.read(system, "main") == {"a": 9, "b": 2, "c": 3}
@@ -333,10 +336,19 @@ def test_git_promote_and_merge(tmp_path: Path) -> None:
     _git(code, "commit", "-qm", "main moved")
     with pytest.raises(BackendError, match="not an ancestor"):
         b.promote(loc, "tether.ws.x.code")
-    merged = b.merge(loc, "tether.ws.x.code", "merge the fork")
+    # Merge from a *state*: the fork commit the plan reviewed. A commit added
+    # to the fork after review is not part of the merge.
+    reviewed = b.fingerprint(loc, "tether.ws.x.code")
+    _git(code, "checkout", "-q", "tether.ws.x.code")
+    (code / "late.py").write_text("late = 1\n")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-qm", "after review")
+    _git(code, "checkout", "-q", "main")
+    merged = b.merge(loc, reviewed, "merge the fork")
     assert merged["sha"] == _git(code, "rev-parse", "main")
     assert _git(code, "log", "-1", "--format=%P").count(" ") == 1  # two parents
     assert (code / "c.py").exists() and (code / "a.py").read_text() == "a = 10\n"
+    assert not (code / "late.py").exists()
 
     # Same file on both sides: conflict, aborted, tree clean, main unchanged.
     _git(code, "checkout", "-q", "tether.ws.x.code")
@@ -439,7 +451,10 @@ def test_lakefs_promote_and_merge(monkeypatch: pytest.MonkeyPatch) -> None:
     repo.branch("main").commit("main moved")
     with pytest.raises(BackendError, match="not an ancestor"):
         b.promote(loc, "tether.ws.x.lake")
-    merged = b.merge(loc, "tether.ws.x.lake", "merge")
+    reviewed = b.fingerprint(loc, "tether.ws.x.lake")
+    repo.branch("tether.ws.x.lake").stage("data/late", b"late")
+    repo.branch("tether.ws.x.lake").commit("after review")
+    merged = b.merge(loc, reviewed, "merge")  # the reviewed commit, not the head
     tree = f.repos[loc["repository"]].commits[merged["commit_id"]]
     assert {k for k in tree if k.startswith("data/")} == {"data/1", "data/2", "data/3"}
 
@@ -473,7 +488,9 @@ def test_dolt_promote_and_merge(monkeypatch: pytest.MonkeyPatch) -> None:
     db.commit("main", "main moved", {"v": 2})
     with pytest.raises(BackendError, match="not an ancestor"):
         b.promote(loc, "tether.ws.x.ledger")
-    merged = b.merge(loc, "tether.ws.x.ledger", "merge")
+    reviewed = b.fingerprint(loc, "tether.ws.x.ledger")
+    db.commit("tether.ws.x.ledger", "after review", {"late": 1})
+    merged = b.merge(loc, reviewed, "merge")  # the reviewed commit, not the head
     assert db.commits[merged["commit"]] == {"t": 5, "u": 1, "v": 2}
 
     db.commit("tether.ws.x.ledger", "k", {"k": 1})

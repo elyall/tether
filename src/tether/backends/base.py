@@ -426,9 +426,12 @@ class ObjectBackend(Protocol):
         """
         raise CapabilityError(f"{self.kind} backend cannot promote", kind=self.kind)
 
-    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
-        """Three-way merge working branch ``source_ref`` into the base branch.
+    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+        """Three-way merge ``source`` into the base branch.
 
+        ``source`` is a working ref, a ``Pin``, or a ``State``. The engine
+        passes the *state* the plan reviewed, so what is merged is what was
+        shown -- a ref is a name someone can move between plan and apply.
         Requires ``MERGE``. Raises :class:`~tether.errors.MergeConflict` (and
         leaves the base untouched) when the system reports conflicts. Returns
         the base branch's new state.

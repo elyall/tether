@@ -271,12 +271,12 @@ class MemoryBackend(ObjectBackend):
         sys.branches[base] = target
         return {"snapshot_id": target}
 
-    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
         name = self._system(locator)
         sys = self.store.system(name)
         base = self._base_branch(locator)
         head = sys.branches[base]
-        src = self.store.resolve(name, source_ref)
+        src = self._source_sid(name, source)
         if src == head or src in self.store.ancestors(name, head):
             return {"snapshot_id": head}
         if head in self.store.ancestors(name, src):
@@ -303,7 +303,7 @@ class MemoryBackend(ObjectBackend):
                 conflicts.append(k)
         if conflicts:
             raise MergeConflict(
-                f"{len(conflicts)} key(s) changed on both {base} and {source_ref}",
+                f"{len(conflicts)} key(s) changed on both {base} and {src}",
                 conflicts=conflicts,
                 key=name,
                 kind="memory",

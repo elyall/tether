@@ -339,8 +339,10 @@ class LakeFSBackend(ObjectBackend):
             )
         return self._merge(locator, ref, f"tether promote: {ref} -> {base}")
 
-    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
-        return self._merge(locator, source_ref, message)
+    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+        return self._merge(
+            locator, self._source_ref(self._repo(locator), source), message
+        )
 
     def _uri(self, locator: Locator, ref: str) -> str:
         prefix = self._prefix(locator)

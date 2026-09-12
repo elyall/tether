@@ -483,8 +483,9 @@ class DoltBackend(ObjectBackend):
         )
         return self._merged_state(locator, result, src)
 
-    def merge(self, locator: Locator, source_ref: str, message: str) -> State:
+    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
         client = self._client(locator)
+        source_ref = self._source_ref(source)
         result = client.merge(
             self._base_branch(locator), source_ref, message, ff_only=False
         )
