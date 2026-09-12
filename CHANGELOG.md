@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a9] - 2026-09-11
+
 ### Added
 
 - **Bookmark-shaped branches.** The dataset's jj/git bookmarks and the
