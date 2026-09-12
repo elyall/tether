@@ -80,6 +80,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`promote` lands a bookmark whole or not at all.** It used to fast-forward
+  the systems it could while refusing the others -- the executed guide showed
+  Icechunk's `main` moving while Lance was refused, so readers of `main` saw
+  new labels with old features, and the trunk bookmark could not follow.
+  Now, when any object is refused and no keys were named, the rest are
+  `held` (`PromoteReport.held`, printed with what each would have done) and
+  nothing is written. `tether promote KEY...` lands a subset on purpose; the
+  trunk bookmark never moves for a subset, since the rest has not landed.
+  Exit status is still `1` on refusals.
 - **`[new] auto_fork` is gone.** It re-ran `new` after every commit to give
   jj's "fresh working copy" rhythm; since `new` reuses a branch that already
   sits at the pin, it had stopped doing anything. `commit` leaves working
@@ -137,15 +146,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory: .file-hashes.json.tmp`: the shared content-hash cache was written
   by two threads through one temp file. The cache is now locked around its
   table and its save; hashing itself still runs in parallel.
-- A deleted Icechunk pin: `repair` crashed with Icechunk's `RefNotFoundError`
-  when re-creating the tag, because Icechunk keeps a tombstone for every
-  deleted tag and never lets the name be reused. The backend now raises a
-  `BackendError` that says so and `repair` reports the failure (exit 2).
-  `open --rev` at such a commit crashed the same way; `Repo.open` (at a
-  revision or at the object's position) and `new`'s fork now fall back to the
-  recorded state when the pin's native ref is gone and the backend is
-  Addressable, so the snapshot stays readable and forkable while the store
-  has it.
+- A deleted Icechunk pin could never come back: Icechunk keeps a tombstone
+  for every deleted tag and never lets the name be reused, and pin ids are
+  content-addressed, so `repair` crashed with `RefNotFoundError` and any later
+  commit recording that same snapshot for that object failed too. The pin id
+  stays content-addressed; the *ref* moves on: the Icechunk backend walks
+  generations -- `tether.<id>`, `tether.<id>.2`, `.3`, ... -- past tombstones
+  (a name carrying a *different* snapshot is still an error), and `verify`,
+  `open`, `fork`, and `promote` resolve a pin through the newest live
+  generation when the manifest's ref is gone, so manifests and history stay
+  as they are (`verify` says `pinned as tether.<id>.2`). `list_pins` folds
+  generations onto their id and `unpin` clears them all, so `gc` counts one
+  pin. Until a repair, `Repo.open` (at a revision or at the object's
+  position) and `new`'s fork fall back to the recorded state when the pin's
+  native ref is gone and the backend is Addressable.
 - `tether new -b NEW` from a commit on bookmark `OLD` handed `NEW` the store
   branches of `OLD` wherever they sat exactly at the pin ("already at pin;
   kept"), so two bookmarks shared a branch and `NEW`'s writes landed on

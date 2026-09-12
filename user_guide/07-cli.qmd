@@ -318,11 +318,12 @@ working branch this workspace expects but the store lost is forked again.
 that exist but point elsewhere are reported as notes, never overwritten. It is
 a plan/apply command like the others.
 
-One store will not cooperate: Icechunk keeps a tombstone for every deleted tag
-and never lets the name be reused, so a deleted Icechunk pin cannot come back
-under its id -- `repair` reports the failure (exit `2`). The recorded snapshot
-is still readable while the store has it: `open --rev` and `new` fall back to
-it when the tag is gone.
+Icechunk keeps a tombstone for every deleted tag and never lets the name be
+reused, so there a repinned pin lives under the next *generation* of its id
+(`tether.<id>.2`, `.3`, ...). The pin id and the manifests do not change;
+`verify` reports `ok  pinned as tether.<id>.2`, and every reader resolves a
+pin through its live generation. Until the repair, `open --rev` and `new`
+fall back to the recorded snapshot while the store has it.
 
 ## `upgrade`
 
@@ -382,11 +383,16 @@ when the bookmark's branch was created (or, with `--rev`, to the target's
 ancestry): unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` ->
 `merge`; otherwise `refuse` with the backend's recipe. `--strategy ff` turns
 merges into refusals, `--strategy merge` turns fast-forwards into refusals.
-When everything fast-forwarded and nothing was refused, the trunk bookmark is
-moved to this bookmark's commit (`main -> <commit>` in the output). After a
-merge the branch is reset onto the merge result so the next `commit` pins it,
-and a second `promote` moves the trunk. Exit status is `1` when anything was
-refused (conflicts included) so CI notices. See
+A bookmark lands whole or not at all: if any object is refused and no keys
+were named, the others are `held` (the output says what each would have
+done) and nothing is written -- `main` never shows a mix of landed and
+unlanded systems. `tether promote KEY...` lands a subset on purpose; the
+trunk bookmark never moves for a subset. When everything fast-forwarded and
+nothing was refused, the trunk bookmark is moved to this bookmark's commit
+(`main -> <commit>` in the output). After a merge the branch is reset onto
+the merge result so the next `commit` pins it, and a second `promote` moves
+the trunk. Exit status is `1` when anything was refused (conflicts included)
+so CI notices. See
 [Branching and writing](04-branching-and-writing.qmd#landing-it-tether-promote).
 
 ## What `open` prints

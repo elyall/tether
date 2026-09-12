@@ -32,10 +32,11 @@ by `undo` or by `new`.
 
 **Icechunk never reuses a deleted tag name.** A `tether.*` tag deleted by
 hand, or released by a `gc` you then regret, cannot be recreated under the
-same id: Icechunk keeps a tombstone. `repair` reports it; `verify
---all-history` keeps flagging the commit; reads and forks at that commit fall
-back to the recorded snapshot while the store has it. Protect the tag
-namespace and run `gc` with `--dry-run` first.
+same name: Icechunk keeps a tombstone. tether keeps the pin id and moves the
+*ref* on instead -- `repair` (or the next commit of that state) creates
+`tether.<id>.2`, then `.3`, and readers resolve a pin through its live
+generation -- so nothing is lost while the store keeps the snapshot. The
+generation names are the visible trace; there are a thousand of them per id.
 
 **Pin-then-commit ordering.** Pins are created before the VCS commit; if the
 commit never lands, the pins leak until `gc` (which scans VCS history plus the

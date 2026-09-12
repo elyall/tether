@@ -1,0 +1,7 @@
+        ok  code  
+        ok  features  
+        ok  qc/focus  
+        ok  raw/plate1  
+        ok  raw/plate2  
+        ok  raw/plate3  
+        ok  zarr/imaging  pinned as tether.0a1b2c3d.4f2ff54c238bea8f.2

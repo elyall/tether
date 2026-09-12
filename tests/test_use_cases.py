@@ -137,7 +137,12 @@ class Normalizer:
         for real, fake in self._snap.items():
             if real.startswith(prefix):
                 return fake[:16] + "…"
-        return m.group(0)
+        # Only ever seen truncated (a base head nothing else prints): mint a
+        # stand-in for the prefix itself so it is at least stable.
+        if prefix not in self._snap:
+            digest = hashlib.sha256(f"snap:{len(self._snap)}".encode()).digest()
+            self._snap[prefix] = base64.b32encode(digest).decode()[:20]
+        return self._snap[prefix][:16] + "…"
 
     def _change_id(self, m: re.Match[str]) -> str:
         tok = m.group(0)
@@ -561,6 +566,7 @@ def test_use_cases_story(
     story.tether("diff-relabel", "diff", "main", "--content")
     story.jj("log-relabel", "log")
     story.tether("promote-relabel", "promote")
+    story.tether("promote-imaging", "promote", "zarr/imaging")
     story.tether("new-main", "new", "main")
     story.python(
         "finish-features",
@@ -664,6 +670,7 @@ def test_use_cases_story(
     )
     story.tether("verify-missing", "verify")
     story.tether("repair", "repair")
+    story.tether("verify-repaired", "verify")
     inventory_commit = story.jj_value(
         "log", "--no-graph", "-r", "main", "-T", "commit_id.short(12)"
     )

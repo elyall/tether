@@ -1,2 +1,0 @@
-repinned  features -> 0a1b2c3d.e04adf84a168acd1
-FAILED    repin tether.0a1b2c3d.4f2ff54c238bea8f: [icechunk] tag tether.0a1b2c3d.4f2ff54c238bea8f was deleted and Icechunk does not allow reusing a deleted tag name; snapshot CVQNZW3XBIOVWIPOLW4M is still reachable but cannot be re-pinned under this id

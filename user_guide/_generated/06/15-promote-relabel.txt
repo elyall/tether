@@ -1,4 +1,5 @@
-  fast-forwarded zarr/imaging -> {'snapshot_id': 'RJL5IZZDMBO5QO75LEAH'}
   skipped        code
   skipped        raw/plate1
   refused        features: the lance backend cannot move a branch; Lance cannot move a branch head; write the result onto the base branch (or keep reading the fork) -- there is no branch merge or fast-forward yet
+  held           zarr/imaging: would fast-forward: main snapshot_id=363DSWSOMCFUBPNP… -> snapshot_id=RJL5IZZDMBO5QO75… (base unchanged since fork); held because features refused, and a bookmark lands whole or not at all
+nothing moved: a bookmark lands whole or not at all; name keys to land a subset, or finish the refused systems on the trunk and promote again
