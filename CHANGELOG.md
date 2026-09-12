@@ -112,12 +112,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `promote KEY...` refuses a subset that leaves unnamed siblings whose base
   branch the write would move, whatever the source (a working ref, or a pin
   by `--rev`), as `restore` does.
-- `promote` fast-forwards from the *state* the plan reviewed, not the source
-  ref's current head: what lands is what was shown, whatever the timing. The
-  inline convenience methods (`commit`, `new`, `promote`, `restore`, `gc`,
-  `import`) plan and apply under one checkout lock, and `new`/`promote`/
-  `restore`/`import` re-verify at apply (`commit` does not need to: a pin
-  names the captured state).
+- `promote` fast-forwards *and merges* from the state the plan reviewed, not
+  the source ref's current head: what lands is what was shown, whatever the
+  timing. `ObjectBackend.merge` takes `str | Pin | State` like `promote`
+  (git, lakeFS, Dolt, and memory resolve a state to its commit). The inline
+  convenience methods (`commit`, `new`, `promote`, `restore`, `gc`, `import`)
+  plan and apply under one checkout lock, and `new`/`promote`/`restore`/
+  `import` re-verify at apply (`commit` does not need to: a pin names the
+  captured state). The CLI's immediate `tether commit` goes through
+  `Repo.commit` too; only `--dry-run`/`--plan` build a separate plan.
+- `gc` plans take the history digest *before* walking history, so a commit
+  landing during the walk stales the plan instead of slipping between the
+  references and the digest.
+- `restore` checks every head before the first reset and writes the
+  workspace after each one (with the siblings sharing the branch), so a kill
+  between two resets leaves each reset branch described as such.
+- `apply_commit` turns a planned key that is no longer registered into
+  `StalePlanError` (rolling back the pins it made before reaching it) rather
+  than a `KeyError`.
 - `snapshot` and `pull` run whole under the checkout lock: which refs to read
   is decided from the workspace as it is on disk, not from the one a
   long-lived `Repo` loaded.

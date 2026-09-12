@@ -160,12 +160,12 @@ the reviewed state, `new` refuses when it cannot list a system's branches
 `open` resets an existing branch only onto the head `new` reviewed and agreed
 to reset. A branch that moves *after* gc's preflight -- a race, not a stale
 plan -- is kept and reported while the rest of the plan finishes. `promote`
-lands the *state* the plan reviewed, not the source branch's head at apply
-time, so a fork write that slips in between plan and apply is not promoted
-by accident. The convenience forms (`tether new`, `tether promote`, the
-Python `Repo.new()`, ...) plan and apply under one lock and re-verify at
-apply; `commit` needs no re-verification, since a pin names the state the
-plan captured.
+lands the *state* the plan reviewed -- fast-forward and merge alike -- not
+the source branch's head at apply time, so a fork write that slips in between
+plan and apply is not promoted by accident. The convenience forms (`tether
+new`, `tether promote`, `tether commit`, the Python `Repo.new()`, ...) plan
+and apply under one lock and re-verify at apply; `commit` needs no
+re-verification, since a pin names the state the plan captured.
 
 ## The operation log
 
@@ -190,7 +190,8 @@ state is idempotent; a reset needs the head reviewed again). `new` in
 particular writes the workspace -- bookmark set, every fork pending -- right
 after moving the VCS and before its first store write, so a kill in the fork
 fan-out leaves a lazy `new` that the next open completes, never a VCS on one
-bookmark and a workspace on another.
+bookmark and a workspace on another; `restore` writes the workspace after
+each branch it resets, so what a kill leaves is described exactly.
 
 One writer holds `.tether/lock` for the duration of a writing command, so
 two `tether` processes in one checkout cannot interleave journal entries and
