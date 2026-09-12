@@ -186,8 +186,16 @@ class LakeFSBackend(ObjectBackend):
         return Pin(id=pin_id, ref=ref, created=before is None)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
-        with contextlib.suppress(*self._errors()):
-            self._repo(locator).tag(pin.ref).delete()
+        repo = self._repo(locator)
+        error: BaseException | None = None
+        try:
+            repo.tag(pin.ref).delete()
+        except self._errors() as exc:
+            error = exc
+        if self._tag_commit(repo, pin.ref) is not None:
+            raise BackendError(
+                f"tag {pin.ref} was not deleted: {error}", kind="lakefs"
+            ) from error
 
     def list_pins(self, locator: Locator) -> set[str]:
         prefix = ref_for_pin("")
@@ -239,8 +247,11 @@ class LakeFSBackend(ObjectBackend):
         branch = repo.branch(name)
         try:
             branch.create(source_reference=origin, exist_ok=True)
-            if str(branch.get_commit().id) != target:
-                # Reset semantics, like icechunk: recreate at the source.
+            dirty = any(True for _ in branch.uncommitted(max_amount=1))
+            if str(branch.get_commit().id) != target or dirty:
+                # Reset semantics, like icechunk: recreate at the source. Staged
+                # but uncommitted objects are divergence too -- a branch whose
+                # commit matches but carries them is not at the source.
                 branch.delete()
                 branch.create(source_reference=origin)
         except self._errors() as exc:
@@ -253,8 +264,16 @@ class LakeFSBackend(ObjectBackend):
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         if ref == self._base_branch(locator) or ref == MAIN:
             return
-        with contextlib.suppress(*self._errors()):
-            self._repo(locator).branch(ref).delete()
+        repo = self._repo(locator)
+        error: BaseException | None = None
+        try:
+            repo.branch(ref).delete()
+        except self._errors() as exc:
+            error = exc
+        if ref in self.list_working_refs(locator):
+            raise BackendError(
+                f"branch {ref} was not deleted: {error}", kind="lakefs"
+            ) from error
 
     def list_working_refs(self, locator: Locator) -> list[str]:
         repo = self._repo(locator)

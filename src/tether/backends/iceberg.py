@@ -321,12 +321,18 @@ class IcebergBackend(ObjectBackend):
         table = self._table(locator)
         if isinstance(target, Pin):
             ref = self._refs(table).get(target.ref)
+            if ref is None:
+                # No coordinate to open: say so rather than hand back a handle
+                # that reads the table's head under a pin's name.
+                raise BackendError(
+                    f"iceberg tag {target.ref} not found", kind="iceberg"
+                )
             return IcebergHandle(
                 key=self._identifier(locator),
                 read_only=True,
                 table=table,
                 ref=target.ref,
-                snapshot_id=int(ref.snapshot_id) if ref else None,
+                snapshot_id=int(ref.snapshot_id),
             )
         if isinstance(target, dict):
             return IcebergHandle(
@@ -334,6 +340,15 @@ class IcebergBackend(ObjectBackend):
                 read_only=True,
                 table=table,
                 snapshot_id=int(target["snapshot_id"]),
+            )
+        if target is None and read_only and (at := base_at(locator)) is not None:
+            # Registered at a snapshot: a read-only open sits there, as
+            # fingerprint does, not at the branch head.
+            return IcebergHandle(
+                key=self._identifier(locator),
+                read_only=True,
+                table=table,
+                snapshot_id=self._resolve(table, at),
             )
         branch = target or self._base_branch(locator)
         return IcebergHandle(

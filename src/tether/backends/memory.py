@@ -145,9 +145,9 @@ class MemoryBackend(ObjectBackend):
         head = self.store.resolve(
             name, ref or base_at(locator) or self._base_branch(locator)
         )
-        # Snapshots are created in order; everything up to the head is its past.
-        ids = list(sys.snapshots)
-        upto = ids[: ids.index(head) + 1]
+        # The head's own past, through parent links -- not every snapshot the
+        # system ever made (a sibling branch's snapshots are not ancestors).
+        past = self.store.ancestors(name, head)
         pointing: dict[str, list[str]] = {}
         for branch, sid in sys.branches.items():
             pointing.setdefault(sid, []).append(branch)
@@ -157,7 +157,7 @@ class MemoryBackend(ObjectBackend):
             HistoryEntry(
                 id=sid, message=f"snapshot {sid}", refs=sorted(pointing.get(sid, []))
             )
-            for sid in reversed(upto)
+            for sid in past
         ][:limit]
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:

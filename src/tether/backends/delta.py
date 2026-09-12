@@ -187,6 +187,10 @@ class DeltaBackend(ObjectBackend):
         read_only: bool,
     ) -> Handle:
         version = int(target["version"]) if isinstance(target, dict) else None
+        if version is None and target is None and (at := base_at(locator)) is not None:
+            # A read-only open at the object's registered position honours
+            # `at`, as fingerprint does, instead of showing the table's head.
+            version = int(at)
         dt = self._table(locator, version=version)
         return DeltaHandle(
             key=self._uri(locator),

@@ -122,7 +122,24 @@ class NeonBackend(ObjectBackend):
         return str(locator.get("branch", "main"))
 
     def _branches(self, project_id: str) -> list[dict]:
-        return self._api.get(f"/projects/{project_id}/branches").get("branches", [])
+        # The branch list is paginated: follow the cursor until a page comes
+        # back without one (or empty). A project with more branches than one
+        # page holds -- every pin is a branch -- must not lose the tail: gc
+        # would take the unseen pins for absent and repin or miss them.
+        out: list[dict] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        while True:
+            page = self._api.get(
+                f"/projects/{project_id}/branches", limit=500, cursor=cursor
+            )
+            branches = page.get("branches", [])
+            out.extend(branches)
+            pagination = page.get("pagination") or {}
+            cursor = pagination.get("cursor") or pagination.get("next")
+            if not branches or not cursor or cursor in seen:
+                return out
+            seen.add(cursor)
 
     def _branch_by_name(self, project_id: str, name: str) -> dict | None:
         for br in self._branches(project_id):
@@ -257,8 +274,18 @@ class NeonBackend(ObjectBackend):
     def unpin(self, locator: Locator, pin: Pin) -> None:
         project_id = self._project(locator)
         br = self._branch_by_name(project_id, pin.ref)
-        if br is not None:
-            self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
+        if br is None:
+            return
+        if br.get("protected"):
+            # Pins are created protected (Neon refuses to delete a protected
+            # branch); releasing one lifts the protection first.
+            self._api.patch(
+                f"/projects/{project_id}/branches/{br['id']}",
+                {"branch": {"protected": False}},
+            )
+        self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
+        if self._branch_by_name(project_id, pin.ref) is not None:
+            raise BackendError(f"pin {pin.ref} was not deleted", kind="neon")
 
     def list_pins(self, locator: Locator) -> set[str]:
         project_id = self._project(locator)
@@ -297,9 +324,16 @@ class NeonBackend(ObjectBackend):
             )
         if br.get("last_reset_at"):
             return VerifyReport(VerifyStatus.DRIFTED, "branch was reset")
-        if self._endpoints_for(project_id, br["id"]):
+        writable = [
+            e
+            for e in self._endpoints_for(project_id, br["id"])
+            if e.get("type") == "read_write"
+        ]
+        if writable:
+            # tether itself attaches a read-only endpoint to serve `open`; a
+            # read-write one means someone can change what the pin names.
             return VerifyReport(
-                VerifyStatus.DRIFTED, "pin branch unexpectedly has an endpoint"
+                VerifyStatus.DRIFTED, "pin branch has a read-write endpoint"
             )
         return VerifyReport(VerifyStatus.OK)
 

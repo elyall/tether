@@ -440,8 +440,13 @@ class DoltBackend(ObjectBackend):
     ) -> bool | None:
         client = self._client(locator)
         wanted = str(ancestor["commit"])
-        rows = client.log(self._source_ref(descendant), 100_000)
-        return any(str(r.get("commit_hash")) == wanted for r in rows)
+        limit = 100_000
+        rows = client.log(self._source_ref(descendant), limit)
+        if any(str(r.get("commit_hash")) == wanted for r in rows):
+            return True
+        # Absent from a *truncated* log is not "not an ancestor": say unknown
+        # so promote refuses to guess rather than treating it as divergence.
+        return False if len(rows) < limit else None
 
     def _merged_state(
         self, locator: Locator, result: dict[str, Any], src: str

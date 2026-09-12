@@ -182,7 +182,24 @@ class GitBackend(ObjectBackend):
                     f"pin {pin.ref} was not deleted on {remote}: {out.stderr.strip()}",
                     kind="git",
                 )
-        self._run(locator, "tag", "-d", pin.ref, check=False)
+        out = subprocess.run(
+            [self._git, "-C", str(self._path(locator)), "tag", "-d", pin.ref],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0 and self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/tags/{pin.ref}",
+            check=False,
+        ):
+            # Still there: not "already gone" but a real failure (permissions,
+            # a hook, a locked ref). Say so instead of reporting success.
+            raise BackendError(
+                f"tag {pin.ref} was not deleted: {out.stderr.strip()}", kind="git"
+            )
 
     def list_pins(self, locator: Locator) -> set[str]:
         prefix = ref_for_pin("")
@@ -236,7 +253,22 @@ class GitBackend(ObjectBackend):
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
-        self._run(locator, "branch", "-D", ref, check=False)
+        out = subprocess.run(
+            [self._git, "-C", str(self._path(locator)), "branch", "-D", ref],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0 and self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{ref}",
+            check=False,
+        ):
+            raise BackendError(
+                f"branch {ref} was not deleted: {out.stderr.strip()}", kind="git"
+            )
 
     def list_working_refs(self, locator: Locator) -> list[str]:
         out = self._run(

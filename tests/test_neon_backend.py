@@ -37,9 +37,9 @@ class FakeNeon:
         self._n = 0
 
     def install(self, router: respx.MockRouter) -> None:
-        router.get(url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches$").mock(
-            side_effect=self._list_branches
-        )
+        router.get(
+            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches(\?.*)?$"
+        ).mock(side_effect=self._list_branches)
         router.post(url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches$").mock(
             side_effect=self._create_branch
         )
@@ -63,8 +63,22 @@ class FakeNeon:
         ).mock(side_effect=self._connection_uri)
 
     # handlers
+    PAGE = 2  # small pages, so every listing in the tests exercises pagination
+
     def _list_branches(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"branches": list(self.branches.values())})
+        # The real API pages: `cursor` names the last item seen, the reply
+        # carries `pagination.cursor` while more follow.
+        items = list(self.branches.values())
+        cursor = request.url.params.get("cursor")
+        start = 0
+        if cursor:
+            ids = [b["id"] for b in items]
+            start = ids.index(cursor) + 1 if cursor in ids else len(items)
+        page = items[start : start + self.PAGE]
+        body: dict = {"branches": page}
+        if start + self.PAGE < len(items) and page:
+            body["pagination"] = {"cursor": page[-1]["id"]}
+        return httpx.Response(200, json=body)
 
     def _create_branch(self, request: httpx.Request) -> httpx.Response:
         import json
@@ -88,6 +102,10 @@ class FakeNeon:
             return httpx.Response(
                 409, json={"message": "branch has children; delete them first"}
             )
+        if self.branches.get(bid, {}).get("protected"):
+            return httpx.Response(
+                422, json={"message": "protected branches cannot be deleted"}
+            )
         self.branches.pop(bid, None)
         return httpx.Response(200, json={})
 
@@ -99,6 +117,8 @@ class FakeNeon:
         br = self.branches[bid]
         if "name" in body:
             br["name"] = body["name"]
+        if "protected" in body:
+            br["protected"] = bool(body["protected"])
         return httpx.Response(200, json={"branch": br})
 
     def _restore_branch(self, request: httpx.Request) -> httpx.Response:

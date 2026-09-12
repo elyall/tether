@@ -236,10 +236,20 @@ class IcechunkBackend(ObjectBackend):
         # Every generation of this id: the plan may know only `tether.<id>`
         # while the live tag is a later one.
         wanted = self._pin_id_of(pin.ref) or pin.id
+        errors: list[str] = []
         for tag in {pin.ref, *repo.list_tags()}:
             if tag == pin.ref or self._pin_id_of(tag) == wanted:
-                with contextlib.suppress(ic.IcechunkError):
-                    repo.delete_tag(tag)  # ignore if already gone
+                try:
+                    repo.delete_tag(tag)
+                except ic.IcechunkError as exc:
+                    errors.append(f"{tag}: {exc}")
+        left = [t for t in repo.list_tags() if self._pin_id_of(t) == wanted]
+        if left:  # not "already gone": the store refused
+            raise BackendError(
+                f"pin {pin.id} was not released ({', '.join(left)} remain): "
+                + "; ".join(errors),
+                kind="icechunk",
+            )
 
     def list_pins(self, locator: Locator) -> set[str]:
         ids = (self._pin_id_of(t) for t in self._repo(locator).list_tags())
@@ -296,8 +306,16 @@ class IcechunkBackend(ObjectBackend):
 
         if ref == self._base_branch(locator) or ref == "main":
             return
-        with contextlib.suppress(ic.IcechunkError):
-            self._repo(locator).delete_branch(ref)
+        repo = self._repo(locator)
+        error: BaseException | None = None
+        try:
+            repo.delete_branch(ref)
+        except ic.IcechunkError as exc:
+            error = exc
+        if ref in repo.list_branches():
+            raise BackendError(
+                f"branch {ref} was not deleted: {error}", kind="icechunk"
+            ) from error
 
     def list_working_refs(self, locator: Locator) -> list[str]:
         branches = self._repo(locator).list_branches()

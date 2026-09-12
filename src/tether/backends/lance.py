@@ -19,7 +19,6 @@ Two Lance specifics shape the mapping:
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 from tether.backends.base import (
@@ -162,8 +161,17 @@ class LanceBackend(ObjectBackend):
         return Pin(id=pin_id, ref=ref)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
-        with contextlib.suppress(*_LANCE_ERRORS):
-            self._dataset(locator).tags.delete(pin.ref)  # ignore if already gone
+        ds = self._dataset(locator)
+        error: BaseException | None = None
+        try:
+            ds.tags.delete(pin.ref)
+        except _LANCE_ERRORS as exc:
+            error = exc
+        if pin.ref in self._dataset(locator).tags.list():
+            # Not "already gone": the store refused. Surface it.
+            raise BackendError(
+                f"tag {pin.ref} was not deleted: {error}", kind="lance"
+            ) from error
 
     def list_pins(self, locator: Locator) -> set[str]:
         prefix = ref_for_pin("")
@@ -231,9 +239,19 @@ class LanceBackend(ObjectBackend):
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         if ref == self._base_branch(locator) or ref == MAIN:
             return
-        # Refused (and correctly kept) when a tether tag references the branch.
-        with contextlib.suppress(*_LANCE_ERRORS):
+        # Lance refuses while a tag references a version on the branch; that is
+        # a failure to report, not a deletion to claim.
+        error: BaseException | None = None
+        try:
             self._dataset(locator).branches.delete(ref)
+        except _LANCE_ERRORS as exc:
+            error = exc
+        if ref in self._dataset(locator).branches.list():
+            raise BackendError(
+                f"branch {ref} was not deleted: Lance keeps a branch while a tag "
+                f"references a version on it; release its pins first ({error})",
+                kind="lance",
+            ) from error
 
     def list_working_refs(self, locator: Locator) -> list[str]:
         branches = self._dataset(locator).branches.list()

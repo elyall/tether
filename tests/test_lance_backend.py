@@ -84,9 +84,10 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     assert b.verify(loc, forked, pin2, deep=True).ok
     assert {pid, pid2} <= b.list_pins(loc)
 
-    # Lance keeps a tagged branch alive; delete_working_ref is a no-op for it,
-    # and re-forking under the same name picks a sibling name.
-    b.delete_working_ref(loc, wref)
+    # Lance keeps a tagged branch alive; delete_working_ref says so rather than
+    # claiming a deletion, and re-forking under the same name picks a sibling.
+    with pytest.raises(BackendError, match="keeps a branch while a tag"):
+        b.delete_working_ref(loc, wref)
     assert wref in lance.dataset(uri).branches.list()
     wref2 = b.fork(loc, pin, name)
     assert wref2 == f"{name}.2"
