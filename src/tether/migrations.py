@@ -639,10 +639,11 @@ def _plan_v4(repo: Repo, plan: Plan) -> None:
 def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     from tether.manifest import read_objects, write_config, write_object
 
-    # Moves first: a locator rewrite writes the manifest at its *new* path, so
-    # doing it before the move would leave the old file behind as a duplicate.
-    for path, want, key in _misplaced_manifests(repo):
-        want.parent.mkdir(parents=True, exist_ok=True)
+    # Every destination is checked before anything moves: a collision found
+    # half-way would leave earlier moves in a dirty tree that the rerun's
+    # "manifests have uncommitted changes" guard then refuses.
+    moves = _misplaced_manifests(repo)
+    for _path, want, key in moves:
         if want.exists():
             # Two keys collided on one file before; the one we are reading is
             # the survivor. Keep it under its own name and leave the other.
@@ -650,7 +651,21 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
                 f"{want} already exists; a key collided here before v4 -- "
                 "re-add the missing object"
             )
-            continue
+    collided = [k for k in report.failed if k.startswith("rename-manifest ")]
+    if collided:
+        # Stop before recording v4 (or touching a file): a dataset with a
+        # manifest still at the old path is not at v4, and the next run must
+        # find the same tree and the same problem.
+        raise TetherError(
+            "upgrade stopped: "
+            + "; ".join(report.failed[k] for k in collided)
+            + " -- resolve the collision (re-add the missing object under its "
+            "own key) and re-run `tether upgrade`"
+        )
+    # Moves first: a locator rewrite writes the manifest at its *new* path, so
+    # doing it before the move would leave the old file behind as a duplicate.
+    for path, want, key in moves:
+        want.parent.mkdir(parents=True, exist_ok=True)
         path.replace(want)
         report.rewritten_manifests.append(key)
     if report.rewritten_manifests:
@@ -661,16 +676,6 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         repo.objects[key] = updated
         if key not in report.rewritten_manifests:
             report.rewritten_manifests.append(key)
-    collided = [k for k in report.failed if k.startswith("rename-manifest ")]
-    if collided:
-        # Stop before recording v4: a dataset with a manifest still at the old
-        # path is not at v4, and the next run must see the same problem.
-        raise TetherError(
-            "upgrade stopped: "
-            + "; ".join(report.failed[k] for k in collided)
-            + " -- resolve the collision (re-add the missing object under its "
-            "own key) and re-run `tether upgrade`"
-        )
     repo.config.version = 4
     write_config(repo.root, repo.config)
 

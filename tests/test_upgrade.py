@@ -595,9 +595,27 @@ def test_upgrade_v4_stops_on_a_manifest_collision(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v3")
 
+    # A second, unrelated manifest that *would* move: it must not, since the
+    # upgrade stops before touching anything.
+    other = ObjectManifest(
+        key="other.v2",
+        kind="memory",
+        locator={"system": system, "branch": "main"},
+        policy=Policy(),
+    ).to_toml()
+    (vcs_root / ".tether" / "objects" / "other.toml").write_text(other)
+    vcs.commit([".tether/objects"], "v3 more")
+
     repo = Repo.find(vcs_root, allow_outdated=True)
     with pytest.raises(TetherError, match="upgrade stopped"):
         repo.apply_upgrade(repo.plan_upgrade())
     assert Repo.find(vcs_root, allow_outdated=True).config.version == 3
     with pytest.raises(ConfigError, match="tether upgrade"):
         Repo.find(vcs_root)
+    # Nothing moved, so the tree is clean and a rerun is not blocked by the
+    # uncommitted-manifests guard: it reports the same collision again.
+    assert (vcs_root / ".tether" / "objects" / "other.toml").exists()
+    assert not (vcs_root / ".tether" / "objects" / "other.v2.toml").exists()
+    assert not vcs.dirty([".tether/objects"])
+    with pytest.raises(TetherError, match="upgrade stopped"):
+        repo.apply_upgrade(repo.plan_upgrade())
