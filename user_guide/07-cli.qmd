@@ -217,13 +217,22 @@ plan: commit (2 write(s))
                       db/metrics: unchanged
 ```
 
-Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`, `trunk` (new);
-`fork`, `refuse` (restore); `delete-branch`, `keep-branch`, `delete-file`, `forget-vcs-workspace` (forget-workspace); `fast-forward`, `merge`, `refuse` (promote); `unpin`,
-`delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing` (gc);
-`add`, `update`, `remove` (import); `upsert` (publish); `repin`, `refork`
-(repair); `rename-pin`, `rename-branch`, `rewrite-history` (upgrade);
-`vcs-commit`. `trunk`, `defer-fork`, `reuse`, `refuse`, and `keep-branch` are
-informational -- they write nothing.
+Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`,
+`share`, `trunk` (new); `fork`, `refuse` (restore); `delete-branch`,
+`keep-branch`, `delete-file`, `forget-vcs-workspace` (forget-workspace);
+`fast-forward`, `merge`, `hold`, `refuse` (promote); `unpin`, `delete-branch`,
+`keep-branch`, `forget-working-ref`, `delete-listing` (gc); `add`, `update`,
+`remove` (import); `upsert` (publish); `repin`, `refork` (repair);
+`rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`,
+`refingerprint`, `rename-manifest`, `rewrite-locator` (upgrade);
+`vcs-commit`. `trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, and
+`keep-branch` are informational -- they write nothing.
+
+`share` is how objects that live in one native branch space -- two databases
+of a Neon project, two keys on one Icechunk store -- get *one* branch per
+bookmark: the first member forks (or defers) it, the others share it, and a
+member that pins a different state of the same branch is refused (a branch is
+at one point; commit them together on the trunk first).
 
 ## `gc` scope
 
@@ -348,6 +357,7 @@ plan: upgrade (5 write(s))
 | --- | --- | --- |
 | v2 | dataset id; every pin and working branch renamed into its namespace (the branches keep their pre-bookmark per-workspace names, which `gc --prune-bookmarks` judges as legacy) | stores and history |
 | v3 | local `file` states become content hashes (one read per file; the stat cache remembers); the `write` policy line is dropped -- whether writes fork or land upstream is the bookmark now | working tree only |
+| v4 | one manifest file per key: `.toml` is appended to the key's last segment (`foo.bar` -> `foo.bar.toml`; before, `foo` and `foo.bar` shared `foo.toml`); relative local paths in locators are resolved against the dataset root | working tree only |
 
 A migration that renames native refs (v2) has to rewrite history too: `gc`
 subtracts what history references from what the stores hold, and both sides

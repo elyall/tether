@@ -38,10 +38,12 @@ same name: Icechunk keeps a tombstone. tether keeps the pin id and moves the
 generation -- so nothing is lost while the store keeps the snapshot. The
 generation names are the visible trace; there are a thousand of them per id.
 
-**Pin-then-commit ordering.** Pins are created before the VCS commit; if the
-commit never lands, the pins leak until `gc` (which scans VCS history plus the
-current workspace). Re-run `tether verify` after merging manifests across
-branches.
+**Pin-then-commit ordering.** Pins are created before the VCS commit. If
+anything after them fails -- a manifest write, the VCS commit -- `commit`
+releases the pins it created and puts the manifests back; if the process dies
+outright, the journal entry it wrote first stays `INCOMPLETE` in `tether ops`
+and the pins leak until `gc` (which scans VCS history plus the current
+workspace). Re-run `tether verify` after merging manifests across branches.
 
 **Forks are lazy.** `new` records which branch each object *will* get; the
 first writable `open` creates it from the pin. Workspaces that only read leave
@@ -49,7 +51,11 @@ nothing behind, but that first `open` is a store write (no dry run; preview
 with `new --eager --dry-run`) and needs the pin to still exist. Objects with
 `--pin record` fork during `new` regardless: with no tag, the branch is the
 only thing keeping their snapshot or version from expiring. `--eager` or
-`[new] fork = "eager"` restores up-front branches.
+`[new] fork = "eager"` restores up-front branches. A writable `open` never
+resets a branch on its own: it reuses one already at the pin (or one a
+sibling object of the same branch space already writes through), resets one
+only onto the head `new` reviewed, and otherwise stops so `new` can decide
+with the head in view.
 
 **Data history costs storage.** Every pin holds bytes in its system until the
 commit that names it is dropped and `gc` releases it. `--pin record` skips the
@@ -79,11 +85,14 @@ volatile (address-only) key: only `next_xid` and the branch count as change.
 A snapshot may still wake a suspended compute; a plain `status` does not fingerprint (`--snapshot`, `commit`, and `verify` do).
 
 **Files on unversioned storage** are Observed: detectably but not recoverably
-drifted. Bucket or container versioning promotes single objects to
-Addressable; prefixes stay Observed (tether does not record per-object version
-ids). Object-store credentials come from the environment; `[backends.file]
-storage_options` in `tether.toml` passes non-secret options (region, endpoint,
-account name) to obstore.
+drifted. Bucket or container versioning promotes single remote objects to
+Addressable (`--file versioned`); local paths and prefixes stay Observed under
+that policy too (tether does not record per-object version ids), and a
+recorded object state that carries no version id -- the bucket was not
+versioned after all -- is refused by `open` rather than served from the
+object's current bytes. Object-store credentials come from the environment;
+`[backends.file] storage_options` in `tether.toml` passes non-secret options
+(region, endpoint, account name) to obstore.
 
 **Iceberg catalog variance.** S3 Tables disables maintenance when user refs
 exist; use `--pin record` there (forks then come from the snapshot id, valid
@@ -96,7 +105,8 @@ recreated table (new metadata id) verifies as drifted, not re-addressed.
 **Lance versions are branch-scoped.** State is `(branch, version)`; an
 untouched fork reports its parent's address so no-op commits stay no-ops.
 Lance refuses to delete a branch a tag references, so a pinned working branch
-outlives its bookmark until `gc` drops the tag (a re-fork picks `name.2`).
+outlives its bookmark until `gc` drops the tag (a re-fork picks `name.2`);
+`gc` reports that branch as a failed `delete-branch` rather than a deletion.
 `--at N` is version `N` of the locator's branch.
 
 **lakeFS staging.** Uncommitted lakeFS changes are not in any commit; a dirty
@@ -147,8 +157,11 @@ git the answer is cached per subtree id.
 **Fingerprints are metadata-only, except the first local one.** A remote
 object is one `HEAD`; a prefix is one paged `LIST`; the etag is the store's
 content hash. Local files are sha256-hashed so that timestamps do not count as
-change, with the hash cached by `(size, mtime_ns, inode)` under
-`.tether/cache/`: the first fingerprint of a tree reads every byte (~1.5-3 GB/s
+change, with the hash cached by `(size, mtime_ns, ctime_ns, inode)` under
+`.tether/cache/` (ctime, because an overwrite that restores the mtime cannot
+restore it; on filesystems with whole-second mtimes an entry hashed within the
+same second is re-read next time): the first fingerprint of a tree reads every
+byte (~1.5-3 GB/s
 per core, eight files at a time, so disk-bound on NVMe), every later one is an
 `os.scandir` walk (~4-20 us per file) plus the files whose stat changed.
 

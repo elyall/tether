@@ -63,11 +63,31 @@ Method by method:
 | `PROMOTE_HINT` (class attribute) | The sentence `promote` shows when it refuses: what the user should do with the system's own tools. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
 
+`pin` must be idempotent *and say which it did*: return `Pin(..., created=True)`
+when it made the ref, `created=False` when it found the ref already carrying
+the state. `commit` rolls back only the pins it created; a reused one belongs
+to the commit that made it. `unpin` and `delete_working_ref` must raise
+`BackendError` when the ref is still there afterwards -- "already gone" is
+success, a refused deletion is not.
+
 Optional members:
 
 - `effective_capabilities(locator, policy) -> Capability` when the tier varies
   per object (the `file` backend is Observed for a local directory and
-  Addressable for a versioned object).
+  Addressable for a versioned remote object).
+- `MATURITY` (class attribute, default `"stable"`): `"experimental"` when the
+  backend is tested against a fake of a network service rather than the
+  service itself. `tether backends` prints it; `add` mentions it.
+- `LOCAL_PATH_KEYS` (class attribute): locator keys that may hold a local
+  filesystem path. The engine resolves a relative one against the caller's
+  directory at `add`/`import`, so a committed locator means the same path
+  from every directory and clone.
+- `branch_scope(locator) -> str` and `ref_namespace(locator) -> str` when the
+  native resource that owns branches, or the one whose pins `list_pins`
+  returns, is wider than one object -- a Neon project, an Iceberg table. The
+  engine forks one branch per scope under a bookmark (members `share` it)
+  and collects `gc` references per namespace. Both default to the canonical
+  identity.
 - `check_quiescence(locator, working_ref)` for `NEEDS_QUIESCENCE` backends;
   raise `BackendError` if writers are active.
 - `listing(locator, state) -> str | None` and

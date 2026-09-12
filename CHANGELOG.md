@@ -6,6 +6,109 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The op log is a journal.** Store-writing commands (`commit`, `pull`,
+  `new`, the lazy fork, `gc`, `promote`, `restore`, `repair`) write their
+  entry -- plan and what `undo` needs -- and sync it *before* the first side
+  effect, then a completion mark with the result. An interrupted run leaves an
+  `INCOMPLETE` entry: `ops` flags it, `undo` skips it (and says why when
+  named), `repair --dry-run` lists it with what `gc` will collect
+  (`Repo.incomplete_ops()`).
+- **One writer per checkout.** Writing commands hold `.tether/lock` (`flock`,
+  re-entrant per `Repo`) so two `tether` processes cannot interleave journal
+  entries and `workspace.toml` writes.
+- **Branch scope.** `ObjectBackend.branch_scope(locator)` names the resource
+  that owns branches and `ref_namespace(locator)` the one whose pins
+  `list_pins` returns (both default to the canonical identity; Neon: the
+  project, Iceberg: the table). `new` forks one branch per scope under a
+  bookmark -- the first member forks, later members `share` it, a member that
+  pins a different state of the same branch is refused -- and `gc` collects
+  the pins every object references per namespace.
+- `Pin.created` (runtime-only): whether `pin()` made the ref or found it
+  already carrying the state. The conformance suite checks both answers.
+- `DiffEntry.why`: which of `state`, `pin`, `locator`, `policy` differ. A
+  locator- or policy-only change is `changed` (CLI: `[policy changed; same
+  state]`; `--json` carries `why`).
+- `tether backends` lists kinds with maturity, tier, and capabilities;
+  `tether --version`. Backends declare `MATURITY` (`stable`: full lifecycle
+  against the real system in CI; `experimental`: tested against a fake of a
+  network service -- neon, lakefs, ducklake, dolt); `add` notes an
+  experimental kind.
+- `ObjectBackend.LOCAL_PATH_KEYS`: locator keys that may hold a local path.
+  The git backend runs the shared conformance suite.
+
+### Changed
+
+- **Config v4** (`tether upgrade`; working tree only, no history rewrite).
+  Manifest paths append `.toml` to the key's last segment instead of
+  replacing its suffix, so `foo` and `foo.bar` no longer share
+  `objects/foo.toml` (the migration moves misplaced files; a collision that
+  already destroyed a manifest is reported). Keys are validated: no empty
+  segments, `.`/`..`, leading slash, or control characters. Relative local
+  paths in locators are resolved against the dataset root (the migration
+  rewrites them); `add` and `import` resolve a relative path against the
+  caller's directory and store it absolute.
+- **A pin is verified before it is read or forked.** `open --rev`, `new` from
+  a commit, and `promote --rev` check the pin against the manifest's state:
+  a deleted pin falls back to the recorded state where the backend can
+  address it; a moved pin raises `PinDriftError` (a `refuse` in a promote
+  plan). `repair` never overwrites a drifted pin.
+- **Destructive steps re-check the ref they act on.** Plans record the head
+  of every branch they delete or reset; apply reads it again immediately
+  before the step and stops with `StalePlanError` when it moved: `gc`
+  `delete-branch` (gc plans are also bound to the VCS head and manifest
+  hash), `new`'s reuse/reset (plus a re-run of the bookmark-holder guard and
+  a same-workspace check), `restore`'s reset, `promote`'s source, `repair`'s
+  refork (the branch must still be missing). A lazy fork resets an existing
+  branch only onto the head `new` reviewed (`workspace.toml`
+  `pending_resets`), reuses a branch already at the pin or one a scope
+  sibling writes through, and otherwise refuses.
+- **`commit` compensates as a unit.** A failure after the pins -- manifest
+  write, listing, VCS commit -- releases only the pins this commit created
+  (never a reused one), restores the manifests and listings it wrote, and
+  journals the attempt as failed and rolled back.
+- `set --pin record` on a pinned object takes effect at the next commit (the
+  pin is dropped; `gc` releases the tag once no commit names it); `--pin
+  native` creates one again. Before, the "unchanged" shortcut kept the pin.
+- `file`: `--file versioned` makes only a single *remote* object Addressable;
+  a recorded object state without a version id (unversioned bucket) is
+  refused by `open` and reported by `verify`. The content-hash cache keys on
+  `ctime_ns` too and re-reads entries hashed within the same second on
+  filesystems with whole-second mtimes.
+- Backends: `unpin` and `delete_working_ref` (git, lance, lakefs, icechunk,
+  neon) raise when the ref is still there afterwards instead of reporting
+  success; Lance says why a tagged branch stays. `delta`/`iceberg` read-only
+  `open` of an object registered `at` a version sits there, not at the head;
+  `iceberg` `open(Pin)` raises for a missing tag. `dolt.ancestor_of` returns
+  unknown when the log is truncated. `lakefs` `fork` resets a branch with
+  staged uncommitted objects. `memory.history` walks the head's parents.
+  `neon` follows branch-list pagination, lifts the protection before deleting
+  a pin, and no longer calls a pin drifted for the read-only endpoint tether
+  attaches to serve `open`.
+- `publish.yml` runs lint, ty, and the suite, checks the tag against the
+  package version, and smoke-tests the built wheel before `uv publish`.
+
+### Fixed
+
+- `commit` rolled back pins it had not created: `pin()` is idempotent, so a
+  pin an earlier commit (or a sibling key on the same system) made was
+  released when a later pin in the same commit failed.
+- `open --rev`, `new`, and `promote --rev` trusted a pin's native ref; a tag
+  moved by hand returned the wrong data under a commit's name.
+- Two keys on one native branch space (a Neon project, one memory system)
+  each forked the shared bookmark branch from their own pin: opening the
+  second reset the first's writes. `gc` grouped references per identity while
+  `list_pins` lists a whole project, so one object's sweep released its
+  neighbours' pins.
+- A saved `gc` plan deleted a branch that had gained writes since planning;
+  a `promote` landed a source that moved after review.
+- `Repo.diff` reported an object unchanged when only its locator or policy
+  differed.
+- Relative paths in locators were resolved against each command's working
+  directory, so the same manifest addressed different files from different
+  directories.
+
 ## [0.1.0a9] - 2026-09-11
 
 ### Added

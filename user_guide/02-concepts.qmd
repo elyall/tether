@@ -146,14 +146,39 @@ otherwise (`StalePlanError`). The Python API exposes the same pairs:
 `plan_commit`/`apply_commit`, `plan_new`/`apply_new`, `plan_gc`/`apply_gc`,
 and so on.
 
+The re-check extends to every ref a plan will delete or reset: the plan
+records the head it saw, and apply reads the head again immediately before
+the step. A branch that gained writes between plan and apply -- a saved gc
+plan applied the next day, a slow `promote` -- stops the whole apply with
+`StalePlanError` instead of losing them. A gc plan is also bound to the
+history it was planned against (a commit made since may reference a pin it
+would release), and a lazy fork on first writable `open` resets an existing
+branch only onto the head `new` reviewed and agreed to reset.
+
 ## The operation log
 
 The VCS records the manifests. It cannot see which native refs `commit`
 created, which branches `new` forked or reset and what their heads were
 before, what `gc` deleted, or where `promote` moved a base branch from. Every
-apply therefore appends an entry to `.tether/ops.jsonl` -- per workspace,
+apply therefore writes an entry to `.tether/ops.jsonl` -- per workspace,
 untracked, append-only, like jj's own `op log` -- holding the plan it applied,
 what it did, and what it replaced. `tether ops` lists it.
+
+The log is a journal, not a diary: a store-writing command appends its entry
+(plan and what `undo` would need) and syncs it *before* the first side
+effect, then appends a completion mark with the result. A process killed in
+between leaves an entry marked `INCOMPLETE` in `ops`; `undo` skips it (what
+it did is not known), `repair --dry-run` names it, and `gc` collects
+whatever it left -- pins no commit names, branches judged by
+`--prune-bookmarks`. One writer holds `.tether/lock` for the duration of a
+writing command, so two `tether` processes in one checkout cannot interleave
+journal entries and `workspace.toml` writes.
+
+`commit` compensates as a unit: if anything fails after the pins -- a
+manifest write, a listing, the VCS commit -- the pins this commit created
+are released (never a pin an earlier commit made and this one merely
+reused), the manifests and listings it wrote are put back, and the journal
+records the attempt as failed and rolled back.
 
 `tether undo [ID]` reverses an entry *where the store still allows it* and
 says exactly what it could not reverse:
@@ -254,6 +279,14 @@ is `behind` (take it with `pull`); a working branch that moved is `modified`
 and will be pinned on the next commit. `verify` answers the other question --
 do the pins we recorded still resolve to the states we recorded? -- cheaply by
 default, deeply with `--deep`, and across every commit with `--all-history`.
+
+A pin is never taken on trust. Before `open --rev`, `new` from a commit, or
+`promote --rev` reads or forks from one, the engine verifies it against the
+state the manifest recorded: a pin someone *deleted* falls back to the
+recorded state where the backend can address it (the store may still hold
+it, as it does between a deletion and `repair`); a pin someone *moved* is
+refused with `PinDriftError` -- reading it would hand back the wrong data
+under a commit's name, and `repair` never overwrites a drifted pin.
 
 ## Listings
 
