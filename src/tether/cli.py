@@ -689,7 +689,7 @@ def commit(
             if message is not None:
                 plan.context["message"] = message
             result: CommitResult = repo.apply_commit(plan, vcs=not no_vcs)
-        else:
+        elif dry_run or plan_out is not None:
             if message is None:
                 _fail(TetherError("a message is required: -m/--message"))
             plan = repo.plan_commit(
@@ -698,11 +698,22 @@ def commit(
                 force=force,
                 do_snapshot=not no_snapshot,  # commit always sees the real state
             )
-            if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
-                _show_plan(plan, as_json=json_out)
-                return
-            result = repo.apply_commit(plan, vcs=not no_vcs, verify=False)
+            _save_plan(plan, plan_out)
+            _show_plan(plan, as_json=json_out)
+            return
+        else:
+            if message is None:
+                _fail(TetherError("a message is required: -m/--message"))
+            # Plan and apply under one lock (Repo.commit): planning outside it
+            # and applying with the refreshed manifests is a window in which a
+            # concurrent `remove` turns into an error mid-commit.
+            result = repo.commit(
+                message,
+                vcs=not no_vcs,
+                strict=strict,
+                force=force,
+                do_snapshot=not no_snapshot,
+            )
     except TetherError as exc:
         _fail(exc)
     if json_out:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from tether.errors import (
     VcsError,
 )
 from tether.handles import MemoryHandle
-from tether.manifest import Locator, Pin, Policy, State, ref_for_pin
+from tether.manifest import Locator, ObjectManifest, Pin, Policy, State, ref_for_pin
 from tether.repo import Repo
 
 
@@ -658,6 +659,59 @@ def test_saved_gc_plan_is_bound_to_history(vcs_root: Path) -> None:
         repo.apply_gc(plan)
 
 
+def test_gc_plan_sees_a_commit_that_lands_during_its_history_walk(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit from another checkout that lands *while* plan_gc walks history
+    is missing from the references it collected. The digest is taken before
+    the walk, so that commit changes it and the apply refuses."""
+    import subprocess
+
+    from tether.errors import StalePlanError
+    from tether.manifest import compute_pin_id
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    backend = repo.backend_for("memory")
+    m = repo.objects["db"]
+    orphan_state = {"snapshot_id": store.write(system, "main", {"v": 9})}
+    orphan = backend.pin(
+        m.locator,
+        orphan_state,
+        compute_pin_id(
+            "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
+        ),
+    )
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    other = Repo.find(other_root)
+
+    real_walk = repo._iter_history_objects
+
+    def walk_with_a_commit_landing() -> Iterator[tuple[str, dict[str, ObjectManifest]]]:
+        entries = list(real_walk())  # what the walk sees...
+        # ...and, while it is still going, the other checkout commits a
+        # manifest naming the orphan.
+        _someone_else_commits(other, "db", orphan_state)
+        other.vcs.commit(other._vcs_paths(), "theirs names the orphan")
+        yield from entries
+
+    monkeypatch.setattr(repo, "_iter_history_objects", walk_with_a_commit_landing)
+    plan = repo.plan_gc()
+    monkeypatch.undo()
+    assert [a.target for a in plan.actions if a.op == "unpin"] == [orphan.ref]
+    with pytest.raises(StalePlanError, match="another workspace"):
+        repo.apply_gc(plan)
+    assert orphan.ref in store.system(system).tags
+
+
 def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
     vcs_root: Path, tmp_path: Path
 ) -> None:
@@ -1034,6 +1088,25 @@ def test_commit_compensates_manifests_and_journals_the_attempt(
     newest = repo.ops()[0]
     assert newest.command == "commit" and not newest.incomplete
     assert newest.result["rolled_back"] and "disk full" in newest.result["failed"]
+
+
+def test_a_planned_object_removed_before_apply_is_a_stale_plan(
+    vcs_root: Path,
+) -> None:
+    """Even without verification, a key that was registered at plan time and
+    is gone at apply is a stale plan -- not a KeyError from the loop -- and
+    pins the commit made before reaching it are rolled back."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    _mem_object(repo, "a")
+    _mem_object(repo, "b")
+    plan = repo.plan_commit("both")
+    repo.remove("b")
+    with pytest.raises(StalePlanError, match="'b' is no longer registered"):
+        repo.apply_commit(plan, verify=False)
+    assert repo.objects["a"].pin is None  # rolled back
+    assert repo.ops()[0].result.get("rolled_back")
 
 
 def test_commit_keeps_its_pins_when_the_vcs_commit_landed_before_the_error(

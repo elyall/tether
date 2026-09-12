@@ -1900,7 +1900,13 @@ class Repo:
             written_listings: list[str] = []
             try:
                 for a in object_actions:
-                    m = self.objects[a.key]
+                    m = self.objects.get(a.key)
+                    if m is None:
+                        # Registered when the plan was made, gone now (a
+                        # `remove` in between): a stale plan, not a crash.
+                        raise StalePlanError(
+                            f"{a.key!r} is no longer registered; re-run the plan"
+                        )
                     backend = self.backend_for(m.kind)
                     state = dict(a.params["state"])
                     if a.op == "pin":
@@ -3187,6 +3193,13 @@ class Repo:
             # keep a pin alive must be collected over the whole namespace.
             return f"{backend.kind}|{backend.ref_namespace(locator)}"
 
+        # The digest is taken *before* the walk. A commit that lands after it
+        # -- during the walk or later -- changes the digest the apply compares
+        # against and stales the plan; one that landed before it is in the
+        # walk. Taken after, a commit in between would be missing from the
+        # references yet present in the digest, and the plan would pass.
+        history_digest = self.vcs.history_digest()
+        vcs_head = self._vcs_head_or_none()
         history_manifests: list[ObjectManifest] = []
         all_manifests: list[ObjectManifest] = []
         seen: set[str] = set()
@@ -3214,11 +3227,11 @@ class Repo:
                 "keep_bookmarks": sorted(keep_bookmarks or ()),
                 "force_prune": force_prune,
                 "manifest_hash": self.current_manifest_hash(),
-                "vcs_head": self._vcs_head_or_none(),
+                "vcs_head": vcs_head,
                 # Every visible commit, not just this checkout's: a bookmark
                 # committed in another workspace may reference a pin this plan
                 # would release, and this checkout's head would not move.
-                "history_digest": self.vcs.history_digest(),
+                "history_digest": history_digest,
             },
         )
 
