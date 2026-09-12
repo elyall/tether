@@ -1075,6 +1075,46 @@ def test_commit_keeps_its_pins_when_the_vcs_commit_landed_before_the_error(
     assert not fresh.is_stale()
 
 
+def test_new_killed_during_its_forks_leaves_vcs_and_workspace_in_agreement(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The VCS moves to the bookmark before the forks run. A kill in the
+    fan-out must not leave `workspace.toml` on the old bookmark: it is written
+    -- bookmark set, every fork pending -- before the first store write, so
+    what remains is a lazy `new` that the next open or `new` completes."""
+    repo = Repo.init(vcs_root)
+    system_a = _mem_object(repo, "a")
+    system_b = _mem_object(repo, "b")
+    store = default_store()
+    repo.commit("baseline")
+    backend = repo.backend_for("memory")
+    real_fork = backend.fork
+
+    def dies_on_b(locator: Locator, source: Pin | State, name: str) -> str:
+        if locator["system"] == system_b:
+            raise SystemExit(137)
+        return real_fork(locator, source, name)
+
+    monkeypatch.setattr(backend, "fork", dies_on_b)
+    with pytest.raises(SystemExit):
+        repo.new(bookmark="work", eager=True)
+    monkeypatch.setattr(backend, "fork", real_fork)
+
+    fresh = Repo.find(vcs_root)
+    assert fresh.workspace.bookmark == "work"  # agrees with the VCS
+    assert fresh.vcs.bookmarks()["work"] and not fresh.is_stale()
+    branch = fresh.workspace.pending_forks["b"]
+    assert fresh.workspace.pending_forks == {"a": branch, "b": branch}
+    # `a`'s branch was created before the kill; the open finds it at the pin.
+    assert branch in store.system(system_a).branches
+    ha = fresh.open("a", read_only=False)
+    hb = fresh.open("b", read_only=False)
+    assert isinstance(ha, MemoryHandle) and ha.ref == branch
+    assert isinstance(hb, MemoryHandle) and hb.ref == branch
+    assert fresh.workspace.working_refs == {"a": branch, "b": branch}
+    assert not fresh.workspace.pending_forks
+
+
 def test_an_interrupted_operation_leaves_a_started_journal_entry(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1743,11 +1783,15 @@ def test_partial_fork_records_what_succeeded(
     with pytest.raises(MultiObjectError, match="could not fork working refs for bad"):
         repo.new(bookmark="work", eager=True)
 
-    # The branch that was created is known to the workspace, with its bookkeeping.
+    # The branch that was created is known to the workspace, with its
+    # bookkeeping; the one that failed stays *pending* -- the next `new` or
+    # writable open creates it.
     ws = Repo.find(vcs_root).workspace
     assert ws.working_refs["ok"].startswith("tether.ws.")
     assert "ok" in ws.fork_points and "ok" in ws.base_states
-    assert "bad" not in ws.working_refs and "bad" not in ws.pending_forks
+    assert "bad" not in ws.working_refs and ws.pending_forks == {
+        "bad": ws.working_refs["ok"]
+    }
     store = default_store()
     assert (
         ws.working_refs["ok"]

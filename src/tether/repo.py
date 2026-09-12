@@ -2553,6 +2553,46 @@ class Repo:
                     working_refs[a.key] = a.target
                     reused[a.key] = dict(a.params["then_state"])
 
+            # The VCS has moved; before the first store write, make the
+            # workspace agree with it. Every planned fork is recorded as
+            # *pending* (with the reset `new` agreed to, where the branch
+            # exists), so a process killed during the fan-out leaves exactly a
+            # lazy `new`: same bookmark on both sides, branches created so far
+            # found at the pin by the next open, the rest created on demand.
+            leftovers = {
+                k: v
+                for k, v in self.workspace.working_refs.items()
+                if k not in self.objects
+            }
+            interim_pending = dict(pending)
+            interim_resets = dict(pending_resets)
+            for key, a in forks.items():
+                interim_pending[key] = a.target
+                if a.params.get("existing") and a.params.get("head") is not None:
+                    interim_resets[key] = dict(a.params["head"])
+            for a in plan.actions:
+                if a.op == "share" and str(a.params["with"]) in interim_pending:
+                    first = str(a.params["with"])
+                    interim_pending[a.key] = interim_pending[first]
+                    if first in interim_resets:
+                        interim_resets[a.key] = interim_resets[first]
+            self.workspace.working_refs = {**leftovers, **working_refs}
+            self.workspace.pending_forks = interim_pending
+            self.workspace.pending_resets = interim_resets
+            self.workspace.fork_points = {
+                **{
+                    k: v
+                    for k, v in self.workspace.fork_points.items()
+                    if k in leftovers
+                },
+                **reused,
+            }
+            self.workspace.base_states = {
+                k: v for k, v in self.workspace.base_states.items() if k in leftovers
+            }
+            self._mark_base_states(set(working_refs) | set(interim_pending))
+            write_workspace(self.root, self.workspace)
+
             def fork_one(key: str) -> str:
                 m = self.objects[key]
                 ref = self._fork_from_manifest(m, forks[key].target)
@@ -2565,6 +2605,14 @@ class Repo:
             # branches are reset onto the pin, not duplicated).
             forked, errors = self._fanout_collect(fork_one, list(forks))
             working_refs.update(forked)
+            # A fork that failed stays pending, as the interim state had it: the
+            # next `new` or writable open creates it (a branch that did get
+            # created is found at the pin and reused).
+            for key, a in forks.items():
+                if key not in forked:
+                    pending[key] = a.target
+                    if a.params.get("existing") and a.params.get("head") is not None:
+                        pending_resets[key] = dict(a.params["head"])
             # Objects sharing a branch follow the member that planned it.
             for a in plan.actions:
                 if a.op != "share":
@@ -2581,11 +2629,6 @@ class Repo:
                     reused[a.key] = dict(a.params["state"])
 
             # Keep refs of removed objects around until `gc` deletes their branches.
-            leftovers = {
-                k: v
-                for k, v in self.workspace.working_refs.items()
-                if k not in self.objects
-            }
             self.workspace.working_refs = {**leftovers, **working_refs}
             self.workspace.pending_forks = pending
             self.workspace.pending_resets = pending_resets
