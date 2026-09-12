@@ -1171,10 +1171,11 @@ class Repo:
         Raises:
             ConfigError: If `key` exists, is unsafe, or `kind` cannot be built.
         """
-        pre = {"objects": {key: None}, "workspace": self.workspace.to_toml()}
-        manifest = self._add(key, kind, locator, policy=policy)
-        self._log_op("add", result={"key": key}, pre=pre)
-        return manifest
+        with self._writer_lock():
+            pre = {"objects": {key: None}, "workspace": self.workspace.to_toml()}
+            manifest = self._add(key, kind, locator, policy=policy)
+            self._log_op("add", result={"key": key}, pre=pre)
+            return manifest
 
     def _add(
         self,
@@ -1217,14 +1218,15 @@ class Repo:
         Raises:
             ConfigError: If `key` is not registered.
         """
-        if key not in self.objects:
-            raise ConfigError(f"no such object: {key}")
-        pre = {
-            "objects": self._manifest_texts([key]),
-            "workspace": self.workspace.to_toml(),
-        }
-        self._remove(key)
-        self._log_op("remove", result={"key": key}, pre=pre)
+        with self._writer_lock():
+            if key not in self.objects:
+                raise ConfigError(f"no such object: {key}")
+            pre = {
+                "objects": self._manifest_texts([key]),
+                "workspace": self.workspace.to_toml(),
+            }
+            self._remove(key)
+            self._log_op("remove", result={"key": key}, pre=pre)
 
     def _remove(self, key: str) -> None:
         if key not in self.objects:
@@ -1260,50 +1262,51 @@ class Repo:
         Raises:
             ConfigError: Unknown key, an invalid value, or nothing to set.
         """
-        if file is None and pin is None:
-            raise ConfigError("nothing to set: pass --file or --pin")
-        report = SetReport()
-        updates: dict[str, ObjectManifest] = {}
-        for key in keys:
-            m = self.objects.get(key)
-            if m is None:
-                raise ConfigError(f"no such object: {key}")
-            wanted = Policy.from_dict(
-                {
-                    "file": file if file is not None else m.policy.file,
-                    "pin": pin if pin is not None else m.policy.pin,
+        with self._writer_lock():
+            if file is None and pin is None:
+                raise ConfigError("nothing to set: pass --file or --pin")
+            report = SetReport()
+            updates: dict[str, ObjectManifest] = {}
+            for key in keys:
+                m = self.objects.get(key)
+                if m is None:
+                    raise ConfigError(f"no such object: {key}")
+                wanted = Policy.from_dict(
+                    {
+                        "file": file if file is not None else m.policy.file,
+                        "pin": pin if pin is not None else m.policy.pin,
+                    }
+                )
+                diff = {
+                    f: (getattr(m.policy, f), getattr(wanted, f))
+                    for f in ("file", "pin")
+                    if getattr(m.policy, f) != getattr(wanted, f)
                 }
-            )
-            diff = {
-                f: (getattr(m.policy, f), getattr(wanted, f))
-                for f in ("file", "pin")
-                if getattr(m.policy, f) != getattr(wanted, f)
+                if not diff:
+                    report.unchanged.append(key)
+                    continue
+                report.changed[key] = diff
+                updates[key] = dataclasses.replace(m, policy=wanted)
+            if not updates:
+                return report
+            pre = {
+                "objects": self._manifest_texts(updates),
+                "workspace": self.workspace.to_toml(),
             }
-            if not diff:
-                report.unchanged.append(key)
-                continue
-            report.changed[key] = diff
-            updates[key] = dataclasses.replace(m, policy=wanted)
-        if not updates:
-            return report
-        pre = {
-            "objects": self._manifest_texts(updates),
-            "workspace": self.workspace.to_toml(),
-        }
-        for key, updated in updates.items():
-            write_object(self.root, updated)
-            self.objects[key] = updated
-        self._log_op(
-            "set",
-            result={
-                "changed": {
-                    k: {f: list(v) for f, v in d.items()}
-                    for k, d in report.changed.items()
+            for key, updated in updates.items():
+                write_object(self.root, updated)
+                self.objects[key] = updated
+            self._log_op(
+                "set",
+                result={
+                    "changed": {
+                        k: {f: list(v) for f, v in d.items()}
+                        for k, d in report.changed.items()
+                    },
                 },
-            },
-            pre=pre,
-        )
-        return report
+                pre=pre,
+            )
+            return report
 
     # -- pull ------------------------------------------------------------ #
     def pull(
@@ -3266,6 +3269,18 @@ class Repo:
             report = GcReport(dry_run=False, plan=plan)
             errors: dict[str, Exception] = {}
             forgot = False
+            # Preflight every branch the plan deletes *before* the first action:
+            # a stale head discovered half-way would leave earlier unpins done
+            # and the plan half-applied. Stale means nothing happens.
+            for a in plan.actions:
+                if a.op == "delete-branch":
+                    self._require_head(
+                        self.backend_for(a.kind),
+                        dict(a.params["locator"]),
+                        a.target,
+                        a.params.get("head"),
+                        what=f"gc {a.key}",
+                    )
             pre = {"workspace": self.workspace.to_toml()}
             op = self._begin_op("gc", plan=plan, pre=pre) if plan.writes else None
             for a in plan.actions:
@@ -3286,6 +3301,8 @@ class Repo:
                     elif a.op == "delete-branch":
                         backend = self.backend_for(a.kind)
                         locator = dict(a.params["locator"])
+                        # Checked in the preflight; check again at the moment
+                        # of deletion (other actions took time).
                         self._require_head(
                             backend,
                             locator,
@@ -3302,8 +3319,21 @@ class Repo:
                     elif a.op == "delete-listing":
                         (listings_dir(self.root) / a.target).unlink(missing_ok=True)
                         report.deleted_listings.append(a.target)
-                except StalePlanError:
-                    raise  # the plan is stale as a whole: stop, do not aggregate
+                except StalePlanError as exc:
+                    # Stale after the preflight: stop here, but say in the
+                    # journal what was already done before stopping.
+                    if forgot:
+                        write_workspace(self.root, self.workspace)
+                    if op is not None:
+                        self._end_op(
+                            op,
+                            result={
+                                **_report_dict(report),
+                                "failed": {k: str(v) for k, v in errors.items()},
+                                "stopped": str(exc),
+                            },
+                        )
+                    raise
                 except Exception as exc:
                     errors[f"{a.op} {a.target}"] = exc
             if forgot:
@@ -3999,46 +4029,52 @@ class Repo:
 
     def apply_forget_workspace(self, plan: Plan) -> ForgetWorkspaceReport:
         """Execute a plan from `plan_forget_workspace`; failures are reported."""
-        if plan.command != "forget-workspace":
-            raise ConfigError(f"expected a forget-workspace plan, got {plan.command!r}")
-        report = ForgetWorkspaceReport(
-            workspace=str(plan.context["workspace"]), plan=plan
-        )
-        # Log first: forgetting the current workspace removes its own log.
-        self._log_op(
-            "forget-workspace",
-            plan=plan,
-            result={"workspace": report.workspace},
-            pre={"workspace": self.workspace.to_toml()},
-        )
-        for a in plan.actions:
-            try:
-                if a.op == "delete-branch":
-                    self.backend_for(a.kind).delete_working_ref(
-                        dict(a.params["locator"]), a.target
-                    )
-                    report.deleted_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "keep-branch":
-                    report.kept_working_refs.setdefault(a.key, []).append(a.target)
-                elif a.op == "delete-file":
-                    Path(a.target).unlink(missing_ok=True)
-                    report.removed_files.append(a.target)
-                elif a.op == "forget-vcs-workspace":
-                    report.vcs = self.vcs.forget_workspace(Path(a.target))
-            except (TetherError, OSError) as exc:
-                report.failed[f"{a.op} {a.target}"] = str(exc)
-        if plan.context.get("current"):
-            # This workspace no longer exists as such; drop its in-memory state.
-            self.workspace = read_workspace(self.root)
-        return report
+        with self._writer_lock():
+            if plan.command != "forget-workspace":
+                raise ConfigError(
+                    f"expected a forget-workspace plan, got {plan.command!r}"
+                )
+            report = ForgetWorkspaceReport(
+                workspace=str(plan.context["workspace"]), plan=plan
+            )
+            # Log first: forgetting the current workspace removes its own log.
+            self._log_op(
+                "forget-workspace",
+                plan=plan,
+                result={"workspace": report.workspace},
+                pre={"workspace": self.workspace.to_toml()},
+            )
+            for a in plan.actions:
+                try:
+                    if a.op == "delete-branch":
+                        self.backend_for(a.kind).delete_working_ref(
+                            dict(a.params["locator"]), a.target
+                        )
+                        report.deleted_working_refs.setdefault(a.key, []).append(
+                            a.target
+                        )
+                    elif a.op == "keep-branch":
+                        report.kept_working_refs.setdefault(a.key, []).append(a.target)
+                    elif a.op == "delete-file":
+                        Path(a.target).unlink(missing_ok=True)
+                        report.removed_files.append(a.target)
+                    elif a.op == "forget-vcs-workspace":
+                        report.vcs = self.vcs.forget_workspace(Path(a.target))
+                except (TetherError, OSError) as exc:
+                    report.failed[f"{a.op} {a.target}"] = str(exc)
+            if plan.context.get("current"):
+                # This workspace no longer exists as such; drop its in-memory state.
+                self.workspace = read_workspace(self.root)
+            return report
 
     def forget_workspace(
         self, workspace_id: str | None = None, *, force_prune: bool = False
     ) -> ForgetWorkspaceReport:
         """Forget a workspace (see `plan_forget_workspace`)."""
-        return self.apply_forget_workspace(
-            self.plan_forget_workspace(workspace_id, force_prune=force_prune)
-        )
+        with self._writer_lock():
+            return self.apply_forget_workspace(
+                self.plan_forget_workspace(workspace_id, force_prune=force_prune)
+            )
 
     # -- abandon --------------------------------------------------------- #
     def abandon(self, revs: Sequence[str], *, gc: bool = False) -> AbandonReport:
@@ -4062,46 +4098,49 @@ class Repo:
             VcsError: The revision cannot be abandoned (git: not on the current
                 branch, dirty tree, or a conflict outside the dataset).
         """
-        pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
-        # A bookmark on a commit being abandoned must survive: jj deletes it,
-        # git leaves it on the dropped commit. Move it to the nearest kept
-        # ancestor, the way `jj abandon` treats the working copy.
-        before = self.vcs.bookmarks()
-        targets = {self.vcs.resolve(r) for r in revs}
-        parents = {
-            c.commit_id: c.parents for c in self.vcs.commit_info(sorted(targets))
-        }
-        moved: dict[str, str] = {}
-        ids, rewritten = self.vcs.abandon(list(revs), self._objects_reldir())
-        for name, commit in before.items():
-            if commit not in targets:
-                continue
-            dest = commit
-            seen: set[str] = set()
-            while dest in targets and dest not in seen:
-                seen.add(dest)
-                dest = (parents.get(dest) or [""])[0]
-            dest = rewritten.get(dest, dest)
-            if dest:
-                self.vcs.bookmark_set(name, dest)
-                moved[name] = dest
-        self._manifest_cache.clear()
-        self.objects = read_objects(self.root)
-        gc_plan = self.plan_gc()
-        report = AbandonReport(abandoned=ids, gc_plan=gc_plan)
-        self._log_op(
-            "abandon",
-            result={
-                "abandoned": ids,
-                "rewritten_commits": rewritten,
-                "bookmarks_moved": moved,
-                "unreferenced": [a.target for a in gc_plan.actions if a.op == "unpin"],
-            },
-            pre=pre,
-        )
-        if gc and not gc_plan.is_empty:
-            report.gc_report = self.apply_gc(gc_plan)
-        return report
+        with self._writer_lock():
+            pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
+            # A bookmark on a commit being abandoned must survive: jj deletes it,
+            # git leaves it on the dropped commit. Move it to the nearest kept
+            # ancestor, the way `jj abandon` treats the working copy.
+            before = self.vcs.bookmarks()
+            targets = {self.vcs.resolve(r) for r in revs}
+            parents = {
+                c.commit_id: c.parents for c in self.vcs.commit_info(sorted(targets))
+            }
+            moved: dict[str, str] = {}
+            ids, rewritten = self.vcs.abandon(list(revs), self._objects_reldir())
+            for name, commit in before.items():
+                if commit not in targets:
+                    continue
+                dest = commit
+                seen: set[str] = set()
+                while dest in targets and dest not in seen:
+                    seen.add(dest)
+                    dest = (parents.get(dest) or [""])[0]
+                dest = rewritten.get(dest, dest)
+                if dest:
+                    self.vcs.bookmark_set(name, dest)
+                    moved[name] = dest
+            self._manifest_cache.clear()
+            self.objects = read_objects(self.root)
+            gc_plan = self.plan_gc()
+            report = AbandonReport(abandoned=ids, gc_plan=gc_plan)
+            self._log_op(
+                "abandon",
+                result={
+                    "abandoned": ids,
+                    "rewritten_commits": rewritten,
+                    "bookmarks_moved": moved,
+                    "unreferenced": [
+                        a.target for a in gc_plan.actions if a.op == "unpin"
+                    ],
+                },
+                pre=pre,
+            )
+            if gc and not gc_plan.is_empty:
+                report.gc_report = self.apply_gc(gc_plan)
+            return report
 
     # -- upgrade --------------------------------------------------------- #
     def plan_upgrade(self, *, ignore_immutable: bool = False) -> Plan:
@@ -4150,48 +4189,49 @@ class Repo:
             TetherError: The dataset's manifests have uncommitted changes, or a
                 store rename failed (nothing else was changed).
         """
-        if plan.command != "upgrade":
-            raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
-        if int(plan.context.get("from", -1)) != self.config.version:
-            raise StalePlanError(
-                f"plan was made for version {plan.context.get('from')}, the dataset "
-                f"is at {self.config.version}; re-run the plan"
+        with self._writer_lock():
+            if plan.command != "upgrade":
+                raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
+            if int(plan.context.get("from", -1)) != self.config.version:
+                raise StalePlanError(
+                    f"plan was made for version {plan.context.get('from')}, the "
+                    f"dataset is at {self.config.version}; re-run the plan"
+                )
+            report = UpgradeReport(
+                from_version=self.config.version, to_version=CONFIG_VERSION, plan=plan
             )
-        report = UpgradeReport(
-            from_version=self.config.version, to_version=CONFIG_VERSION, plan=plan
-        )
-        steps = pending(self.config.version)
-        if not steps:
+            steps = pending(self.config.version)
+            if not steps:
+                return report
+            # Manifests must be committed. tether.toml and .tether/.gitignore may be
+            # dirty for tether's own reasons (a stopped upgrade wrote the dataset
+            # id; opening the dataset taught it about the op log).
+            rel = self._dataset_rel()
+            if self.vcs.dirty([(rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()]):
+                raise TetherError(
+                    "the dataset's manifests have uncommitted changes; commit or "
+                    "restore them before upgrading"
+                )
+            for m in steps:
+                try:
+                    m.apply(self, plan, report)
+                except TetherError:
+                    # Record what did happen (store renames), then surface the stop.
+                    if report.renamed_pins or report.renamed_branches:
+                        self._log_op(
+                            "upgrade",
+                            plan=plan,
+                            result={**_report_dict(report), "stopped": True},
+                        )
+                    raise
+            write_config(self.root, self.config)
+            if self.vcs.dirty(self._vcs_paths()):
+                report.vcs_commit = self.vcs.commit(
+                    self._vcs_paths(),
+                    f"tether upgrade: v{report.from_version} -> v{report.to_version}",
+                )
+            self._log_op("upgrade", plan=plan, result=_report_dict(report))
             return report
-        # Manifests must be committed. tether.toml and .tether/.gitignore may be
-        # dirty for tether's own reasons (a stopped upgrade wrote the dataset
-        # id; opening the dataset taught it about the op log).
-        rel = self._dataset_rel()
-        if self.vcs.dirty([(rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()]):
-            raise TetherError(
-                "the dataset's manifests have uncommitted changes; commit or restore "
-                "them before upgrading"
-            )
-        for m in steps:
-            try:
-                m.apply(self, plan, report)
-            except TetherError:
-                # Record what did happen (store renames), then surface the stop.
-                if report.renamed_pins or report.renamed_branches:
-                    self._log_op(
-                        "upgrade",
-                        plan=plan,
-                        result={**_report_dict(report), "stopped": True},
-                    )
-                raise
-        write_config(self.root, self.config)
-        if self.vcs.dirty(self._vcs_paths()):
-            report.vcs_commit = self.vcs.commit(
-                self._vcs_paths(),
-                f"tether upgrade: v{report.from_version} -> v{report.to_version}",
-            )
-        self._log_op("upgrade", plan=plan, result=_report_dict(report))
-        return report
 
     def upgrade(self, *, ignore_immutable: bool = False) -> UpgradeReport:
         """Bring the dataset to this tether's version.
@@ -4275,22 +4315,28 @@ class Repo:
             }.get(target.command)
             if handler is None:
                 raise TetherError(f"cannot undo {target.command!r}")
+            # Journal the undo before it touches anything: an undo that dies
+            # half-way (a branch re-pointed, a manifest not yet restored) must
+            # be visible like any other interrupted operation.
+            entry = self._begin_op(
+                "undo",
+                pre={"workspace": self.workspace.to_toml(), "target": target.id},
+                undoes=target.id,
+            )
             handler(target, report, discard)
+            result = {
+                "summary": f"{target.command} {target.summary()}",
+                "restored": list(report.restored),
+                "irreversible": list(report.irreversible),
+                "skipped": list(report.skipped),
+            }
             if not report.restored and report.irreversible:
+                self._end_op(entry, result={**result, "failed": "nothing restored"})
                 raise TetherError(
                     f"cannot undo {target.id} ({target.command}):\n"
                     + "\n".join(f"  {line}" for line in report.irreversible)
                 )
-            entry = self._log_op(
-                "undo",
-                result={
-                    "summary": f"{target.command} {target.summary()}",
-                    "restored": list(report.restored),
-                    "irreversible": list(report.irreversible),
-                    "skipped": list(report.skipped),
-                },
-                undoes=target.id,
-            )
+            self._end_op(entry, result=result)
             report.undo_id = entry.id
             mark_undone(self.root, target.id, entry.id)
             return report
@@ -4823,61 +4869,65 @@ class Repo:
         Raises:
             StalePlanError: The working tree's manifests changed since planning.
         """
-        if plan.command != "import":
-            raise ConfigError(f"expected an import plan, got {plan.command!r}")
-        if verify and plan.context.get("manifest_hash") != self.current_manifest_hash():
-            raise StalePlanError(
-                "manifests changed since the plan was made; re-run the plan"
-            )
-        report = ImportReport(plan=plan)
-        for note in plan.notes:
-            key, _, why = note.partition(": ")
-            if why == "unchanged":
-                report.unchanged.append(key)
-        pre = {
-            "objects": self._manifest_texts(a.key for a in plan.actions),
-            "workspace": self.workspace.to_toml(),
-        }
-        for a in plan.actions:
-            if a.op == "add":
-                self._add(
-                    a.key,
-                    a.kind,
-                    dict(a.params["locator"]),
-                    policy=Policy.from_dict(a.params["policy"]),
+        with self._writer_lock():
+            if plan.command != "import":
+                raise ConfigError(f"expected an import plan, got {plan.command!r}")
+            if (
+                verify
+                and plan.context.get("manifest_hash") != self.current_manifest_hash()
+            ):
+                raise StalePlanError(
+                    "manifests changed since the plan was made; re-run the plan"
                 )
-                report.added.append(a.key)
-            elif a.op == "update":
-                current = self.objects[a.key]
-                updated = dataclasses.replace(
-                    current,
-                    locator=dict(a.params["locator"]),
-                    policy=Policy.from_dict(a.params["policy"]),
-                )
-                backend = self.backend_for(updated.kind)
-                if backend.identity(current.locator) != backend.identity(
-                    updated.locator
-                ):
-                    # Another system: the committed state and pin describe the
-                    # old one. The next commit reads the new one afresh.
-                    updated = dataclasses.replace(
-                        updated, state=None, pin=None, recoverable=True
+            report = ImportReport(plan=plan)
+            for note in plan.notes:
+                key, _, why = note.partition(": ")
+                if why == "unchanged":
+                    report.unchanged.append(key)
+            pre = {
+                "objects": self._manifest_texts(a.key for a in plan.actions),
+                "workspace": self.workspace.to_toml(),
+            }
+            for a in plan.actions:
+                if a.op == "add":
+                    self._add(
+                        a.key,
+                        a.kind,
+                        dict(a.params["locator"]),
+                        policy=Policy.from_dict(a.params["policy"]),
                     )
-                write_object(self.root, updated)
-                self.objects[a.key] = updated
-                if dict(current.locator) != dict(updated.locator):
-                    # The working branch lives in the *old* system; keeping it
-                    # would send writes there until the next `new`. Drop the
-                    # workspace's hold (the branch itself is left for `gc`).
-                    self._forget_working_state(a.key)
-                report.updated.append(a.key)
-            elif a.op == "remove":
-                self._remove(a.key)
-                report.removed.append(a.key)
-        write_workspace(self.root, self.workspace)
-        if plan.actions:
-            self._log_op("import", plan=plan, result=_report_dict(report), pre=pre)
-        return report
+                    report.added.append(a.key)
+                elif a.op == "update":
+                    current = self.objects[a.key]
+                    updated = dataclasses.replace(
+                        current,
+                        locator=dict(a.params["locator"]),
+                        policy=Policy.from_dict(a.params["policy"]),
+                    )
+                    backend = self.backend_for(updated.kind)
+                    if backend.identity(current.locator) != backend.identity(
+                        updated.locator
+                    ):
+                        # Another system: the committed state and pin describe the
+                        # old one. The next commit reads the new one afresh.
+                        updated = dataclasses.replace(
+                            updated, state=None, pin=None, recoverable=True
+                        )
+                    write_object(self.root, updated)
+                    self.objects[a.key] = updated
+                    if dict(current.locator) != dict(updated.locator):
+                        # The working branch lives in the *old* system; keeping it
+                        # would send writes there until the next `new`. Drop the
+                        # workspace's hold (the branch itself is left for `gc`).
+                        self._forget_working_state(a.key)
+                    report.updated.append(a.key)
+                elif a.op == "remove":
+                    self._remove(a.key)
+                    report.removed.append(a.key)
+            write_workspace(self.root, self.workspace)
+            if plan.actions:
+                self._log_op("import", plan=plan, result=_report_dict(report), pre=pre)
+            return report
 
     def import_objects(
         self, rows: Iterable[Mapping[str, Any]], *, sync: bool = False

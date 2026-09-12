@@ -479,6 +479,56 @@ def test_saved_gc_plan_will_not_delete_a_branch_that_moved(vcs_root: Path) -> No
     assert [a.op for a in fresh.actions if a.target == branch] == ["keep-branch"]
 
 
+def test_stale_gc_plan_does_nothing_at_all(vcs_root: Path) -> None:
+    """The head check runs over every branch the plan deletes before the first
+    action: a plan with an unpin *and* a delete-branch whose branch moved must
+    not release the pin and then stop."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["db"]
+    repo.new("main")
+    repo.vcs.bookmark_delete("work")
+    # An orphan pin too, so the plan carries an unpin ahead of the deletion.
+    backend = repo.backend_for("memory")
+    m = repo.objects["db"]
+    from tether.manifest import compute_pin_id
+
+    orphan_state = {"snapshot_id": store.write(system, "main", {"v": 9})}
+    orphan = backend.pin(
+        m.locator,
+        orphan_state,
+        compute_pin_id(
+            "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
+        ),
+    )
+    plan = repo.plan_gc(prune_bookmarks=True)
+    ops = [a.op for a in plan.actions if a.op in ("unpin", "delete-branch")]
+    assert ops == ["unpin", "delete-branch"], ops
+
+    store.write(system, branch, {"late": 1})
+    with pytest.raises(StalePlanError):
+        repo.apply_gc(plan)
+    assert orphan.ref in store.system(system).tags  # the unpin did not run
+    assert not repo.incomplete_ops()  # and no journal entry was left open
+
+
+def test_undo_is_journaled_before_it_acts(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    repo.commit("baseline")
+    report = repo.undo()
+    entries = repo.ops()
+    assert entries[0].command == "undo" and not entries[0].incomplete
+    assert (
+        entries[0].undoes == report.op.id and entries[0].pre["target"] == report.op.id
+    )
+
+
 def test_saved_gc_plan_is_bound_to_history(vcs_root: Path) -> None:
     """A commit made after the plan may reference a pin the plan releases."""
     from tether.errors import StalePlanError
@@ -839,6 +889,9 @@ def test_one_writer_per_checkout(vcs_root: Path) -> None:
         other = Repo.find(vcs_root)
         with pytest.raises(TetherError, match="another tether command is writing"):
             other.commit("blocked")
+        # Manifest-only writers wait for the lock too.
+        with pytest.raises(TetherError, match="another tether command is writing"):
+            other.add("late", "memory", {"system": "x", "branch": "main"})
     # Released: the other Repo can write now.
     other.commit("unblocked")
     # And a foreign holder of the file lock blocks us the same way.
@@ -1796,7 +1849,11 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
     with pytest.raises(TetherError, match="only fast-forwards") as exc:
         repo.undo()
     assert "db: base branch moved" in str(exc.value)
-    assert repo.ops()[0].command == "promote" and repo.ops()[0].undone_by is None
+    # The attempt is journaled (it began before it could know), marked failed;
+    # the promote itself is not marked undone.
+    attempt, promoted = repo.ops()[:2]
+    assert attempt.command == "undo" and attempt.result["failed"] == "nothing restored"
+    assert promoted.command == "promote" and promoted.undone_by is None
 
     # Nothing left that can be undone -> loud. (promote moved `main` onto the
     # work commit; under git, returning to `main` therefore lands past the
