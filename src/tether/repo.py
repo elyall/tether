@@ -88,7 +88,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.migrations import UpgradeReport, pending
-from tether.oplog import OpEntry, append_op, mark_done, read_ops
+from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
 from tether.plan import Action, Plan
 from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
@@ -1082,6 +1082,11 @@ class Repo:
         mark_done(self.root, entry.id, entry.result, dict(pre or {}), undone=undone)
         return entry
 
+    def _progress(self, op: OpEntry | None, action: str, **detail: Any) -> None:
+        """Journal one completed action of a running operation."""
+        if op is not None:
+            mark_progress(self.root, op.id, action, **detail)
+
     def incomplete_ops(self) -> list[OpEntry]:
         """Journal entries that began and never completed (an interrupted run)."""
         return [e for e in read_ops(self.root) if e.incomplete]
@@ -1897,6 +1902,7 @@ class Repo:
                         # the commit (or the sibling key) that made it.
                         if pin.created:
                             created_pins.append((a.key, pin))
+                            self._progress(op, "pin", key=a.key, ref=pin.ref)
                         outcomes[a.key] = (state, pin, True)
                         result.pinned[a.key] = pin
                     else:
@@ -1932,6 +1938,8 @@ class Repo:
                                 written_listings.append(name)
                             write_listing(self.root, name, text)
 
+                if outcomes:
+                    self._progress(op, "manifests", keys=sorted(outcomes))
                 # Commit when something was pinned, and also when the manifests are
                 # already dirty in the working tree (an undone commit, an `add`, an
                 # `import`): the dataset commit is what makes them history.
@@ -1941,6 +1949,7 @@ class Repo:
                     result.vcs_commit = self.vcs.commit(
                         self._vcs_paths(), message, advance=self.workspace.bookmark
                     )
+                    self._progress(op, "vcs-commit", commit=result.vcs_commit)
             except Exception as exc:
                 landed = self._vcs_commit_landed(pre["vcs"]) if vcs else None
                 if landed is not None:
@@ -2533,7 +2542,9 @@ class Repo:
 
             def fork_one(key: str) -> str:
                 m = self.objects[key]
-                return self._fork_from_manifest(m, forks[key].target)
+                ref = self._fork_from_manifest(m, forks[key].target)
+                self._progress(op, "fork", key=key, ref=ref)
+                return ref
 
             # Fork concurrently; a failure for one object must not hide the branches
             # created for the others, so record everything that succeeded before
@@ -3451,6 +3462,7 @@ class Repo:
                             dict(a.params["locator"]), Pin(id=pid, ref=a.target)
                         )
                         report.unpinned.setdefault(a.kind, []).append(pid)
+                        self._progress(op, "unpin", target=a.target)
                     elif a.op == "forget-working-ref":
                         self.workspace.working_refs.pop(a.key, None)
                         forgot = True
@@ -3483,6 +3495,7 @@ class Repo:
                         report.deleted_working_refs.setdefault(a.key, []).append(
                             a.target
                         )
+                        self._progress(op, "delete-branch", key=a.key, target=a.target)
                     elif a.op == "keep-branch":
                         report.kept_working_refs.setdefault(a.key, []).append(a.target)
                     elif a.op == "delete-listing":
@@ -3957,9 +3970,13 @@ class Repo:
                 locator = dict(a.params["locator"])
                 source = _source_object(a.params["source"])
                 if a.op == "fast-forward":
-                    return "ff", backend.promote(locator, source)
+                    new_state = backend.promote(locator, source)
+                    self._progress(op, "fast-forward", key=key, state=new_state)
+                    return "ff", new_state
                 ref = source.ref if isinstance(source, Pin) else str(source)
-                return "merge", backend.merge(locator, ref, message)
+                new_state = backend.merge(locator, ref, message)
+                self._progress(op, "merge", key=key, state=new_state)
+                return "merge", new_state
 
             results, errors = self._fanout_collect(run_one, list(by_key))
             for key, exc in list(errors.items()):
@@ -4259,6 +4276,7 @@ class Repo:
                         what=f"restore {a.key}",
                     )
                 ref = self._fork_from_manifest(m, a.target)
+                self._progress(op, "fork", key=a.key, ref=ref)
                 done[a.key] = ref
                 self.workspace.working_refs[a.key] = ref
                 self.workspace.pending_forks.pop(a.key, None)
@@ -4994,10 +5012,24 @@ class Repo:
         """
         plan = Plan(command="repair", context={"all_history": all_history})
         for e in self.incomplete_ops():
+            did = ", ".join(
+                f"{r.get('action')} {r.get('key') or r.get('target') or ''}".strip()
+                for r in e.progress
+            )
+            planned = len((e.plan or {}).get("actions") or [])
             plan.notes.append(
-                f"operation {e.id} ({e.command}, {e.at}) never finished; pins it "
-                "created and no commit names are released by `gc`, branches it "
-                "made are judged by `gc --prune-bookmarks`"
+                f"operation {e.id} ({e.command}, {e.at}) never finished"
+                + (
+                    f"; done before it stopped: {did}"
+                    if did
+                    else "; no action had completed"
+                )
+                + (f" (of {planned} planned)" if planned else "")
+                + "; re-running the command finishes what is left (creating an "
+                "absent ref from a pinned state is idempotent; a reset needs the "
+                "head reviewed again), pins it created and no commit names are "
+                "released by `gc`, branches it made are judged by "
+                "`gc --prune-bookmarks`"
             )
         targets: dict[str, ObjectManifest] = {}
         for key, m in self.objects.items():
@@ -5081,6 +5113,7 @@ class Repo:
                             str(a.params["pin_id"]),
                         )
                         report.repinned[a.key] = str(a.params["pin_id"])
+                        self._progress(op, "repin", key=a.key, target=a.target)
                     elif a.op == "refork":
                         m = self.objects[a.key]
                         # Planned because the branch was missing; if it is back
@@ -5092,6 +5125,7 @@ class Repo:
                                 "re-run the plan"
                             )
                         ref = self._fork_from_manifest(m, a.target)
+                        self._progress(op, "refork", key=a.key, ref=ref)
                         self.workspace.working_refs[a.key] = ref
                         if m.state is not None:
                             self.workspace.fork_points[a.key] = dict(m.state)

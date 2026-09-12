@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ __all__ = [
     "OpEntry",
     "append_op",
     "mark_done",
+    "mark_progress",
     "mark_undone",
     "new_op_id",
     "ops_path",
@@ -86,6 +88,10 @@ class OpEntry:
     undoes: str | None = None
     undone_by: str | None = None
     status: str = "done"
+    progress: list[dict[str, Any]] = field(default_factory=list)
+    """Per-action progress records appended while the operation ran (each a
+    dict with at least `action`): what an interrupted operation *did* get
+    done. Read from the log; not part of the entry's own record."""
 
     @classmethod
     def now(
@@ -123,6 +129,7 @@ class OpEntry:
             "undoes": self.undoes,
             "undone_by": self.undone_by,
             "status": self.status,
+            "progress": list(self.progress),
         }
 
     @classmethod
@@ -238,6 +245,7 @@ def read_ops(root: Path) -> list[OpEntry]:
     entries: list[OpEntry] = []
     marks: dict[str, str] = {}
     done: dict[str, dict[str, Any]] = {}
+    progress: dict[str, list[dict[str, Any]]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -254,7 +262,11 @@ def read_ops(root: Path) -> list[OpEntry]:
                 marks[str(obj["undone"])] = str(obj.get("by", ""))
         elif "undone" in obj:
             marks[str(obj["undone"])] = str(obj.get("by", ""))
+        elif "progress" in obj:
+            record = {k: v for k, v in obj.items() if k != "progress"}
+            progress.setdefault(str(obj["progress"]), []).append(record)
     for e in entries:
+        e.progress = progress.get(e.id, [])
         if e.id in marks:
             e.undone_by = marks[e.id] or None
         if e.id in done:
@@ -266,15 +278,30 @@ def read_ops(root: Path) -> list[OpEntry]:
     return entries
 
 
+_APPEND_LOCK = threading.Lock()
+
+
 def _append_line(root: Path, obj: dict[str, Any]) -> None:
     """Append one JSON line and sync it: the log is a journal, and a started
-    entry must survive whatever interrupts the operation after it."""
+    entry must survive whatever interrupts the operation after it. Progress
+    records are appended from fan-out threads, hence the lock."""
     path = ops_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
+    with _APPEND_LOCK, path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(obj, default=str) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
+
+
+def mark_progress(root: Path, op_id: str, action: str, **detail: Any) -> None:
+    """Record that one action of a running operation completed.
+
+    A multi-action operation (a `new` forking five branches, a `gc` releasing
+    twenty pins) that dies half-way leaves a started entry; these records say
+    which of its actions had already taken effect, so `repair` can list them
+    and a re-run knows what is left.
+    """
+    _append_line(root, {"progress": op_id, "action": action, **detail})
 
 
 def append_op(root: Path, entry: OpEntry) -> None:

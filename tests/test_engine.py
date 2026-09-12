@@ -1078,8 +1078,10 @@ def test_an_interrupted_operation_leaves_a_started_journal_entry(
     backend = repo.backend_for("memory")
     real_fork = backend.fork
 
-    def dies(locator: Locator, source: object, name: str) -> str:
-        raise SystemExit(137)  # what a kill looks like from inside
+    def dies(locator: Locator, source: Pin | State, name: str) -> str:
+        if locator["system"] == repo.objects["b"].locator["system"]:
+            raise SystemExit(137)  # what a kill looks like from inside
+        return real_fork(locator, source, name)
 
     monkeypatch.setattr(backend, "fork", dies)
     with pytest.raises(SystemExit):
@@ -1089,13 +1091,17 @@ def test_an_interrupted_operation_leaves_a_started_journal_entry(
     fresh = Repo.find(vcs_root)
     (incomplete,) = fresh.incomplete_ops()
     assert incomplete.command == "new" and incomplete.plan is not None
+    # The journal says which action had taken effect before the death.
+    assert [(r["action"], r["key"]) for r in incomplete.progress] == [("fork", "a")]
+    notes = fresh.plan_repair().notes
+    assert any("done before it stopped: fork a" in n for n in notes)
+    assert any("re-running the command finishes" in n for n in notes)
     assert fresh.ops()[0].id == incomplete.id and not fresh.ops()[0].undoable
     with pytest.raises(TetherError, match="never finished"):
         fresh.undo(incomplete.id)
     # A bare `undo` skips the incomplete entry: the newest *undoable* one is
     # the baseline commit.
     assert fresh.undo().op.command == "commit"
-    notes = fresh.plan_repair().notes
     assert any(incomplete.id in n and "never finished" in n for n in notes)
 
 
