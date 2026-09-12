@@ -1522,6 +1522,7 @@ def promote(
                 "merged": report.merged,
                 "skipped": report.skipped,
                 "refused": report.refused,
+                "held": report.held,
                 "conflicts": report.conflicts,
                 "trunk_moved": report.trunk_moved,
             },
@@ -1540,6 +1541,13 @@ def promote(
         typer.secho(f"  refused        {key}: {why}", fg=typer.colors.YELLOW)
         for unit in report.conflicts.get(key, []):
             typer.echo(f"                   conflict: {unit}")
+    for key, why in report.held.items():
+        typer.echo(f"  held           {key}: {why}")
+    if report.held:
+        typer.echo(
+            "nothing moved: a bookmark lands whole or not at all; name keys to land "
+            "a subset, or finish the refused systems on the trunk and promote again"
+        )
     if report.merged:
         typer.echo("run `tether commit` to pin the merge result(s), then promote again")
     if report.trunk_moved:

@@ -306,7 +306,14 @@ tether commit -m "Merge plate1 relabel into main"    # only after a merge
 tether promote                                       # ...then this moves main
 ```
 
-Refusals are the honest part. Icechunk and Iceberg can fast-forward but not
+Refusals are the honest part -- and they hold everything else back. A
+bookmark lands whole or not at all: when one system is refused, `promote`
+reports the others as `held` (with what each would have done) and writes
+nothing, because a `main` with the new state in one system and the old in
+another is the half-done state you branched to avoid. Name keys to land a
+subset on purpose (`tether promote zarr/imaging`); the trunk bookmark never
+moves for a subset, so `main` keeps pointing at a commit that describes
+upstream. Icechunk and Iceberg can fast-forward but not
 merge; if upstream moved under you, re-apply the writes on a fresh bookmark
 (or, for Icechunk, `reset_branch` when discarding `main`'s newer snapshots is
 what you mean). Lance cannot move a branch head at all yet. Neon cannot

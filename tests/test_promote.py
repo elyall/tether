@@ -192,6 +192,63 @@ def test_promote_refuses_when_backend_cannot(
     assert a.op == "refuse" and "cannot move a branch" in a.detail
 
 
+def test_promote_lands_a_bookmark_whole_or_not_at_all(vcs_root: Path) -> None:
+    """One system that cannot move its branch holds the others back: nothing
+    moves, the report says what would have, the trunk stays. Naming keys lands
+    a subset on purpose; an unchanged non-promotable system does not block."""
+    from tether.backends.base import register_backend
+    from tether.backends.memory import MemoryBackend
+
+    class StuckBackend(MemoryBackend):
+        kind = "stuck"
+        capabilities = MemoryBackend.capabilities & ~(
+            Capability.PROMOTE | Capability.MERGE
+        )
+        PROMOTE_HINT = "copy the rows by hand"
+
+    register_backend("stuck", lambda config: StuckBackend(store=default_store()))
+
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    movable = _mem(repo, "db")
+    stuck = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(stuck)
+    store.write(stuck, "main", {"rows": 1})
+    repo.add("tbl", "stuck", {"system": stuck, "branch": "main"})
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    db_ref = repo.workspace.working_refs["db"]
+    tbl_ref = repo.workspace.working_refs["tbl"]
+
+    # Only the movable one changed: the stuck system is not in the way.
+    store.write(movable, db_ref, {"a": 2})
+    c1 = repo.commit("db only").vcs_commit
+    report = repo.promote()
+    assert set(report.fast_forwarded) == {"db"}
+    assert (
+        store.system(movable).branches["main"] == store.system(movable).branches[db_ref]
+    )
+    assert not report.refused and not report.held and report.trunk_moved == c1
+
+    # Both changed: the stuck one is refused, so the movable one is held.
+    store.write(movable, db_ref, {"a": 3})
+    store.write(stuck, tbl_ref, {"rows": 2})
+    repo.commit("both")
+    main_db_before = store.system(movable).branches["main"]
+    plan = repo.plan_promote()
+    assert {a.op for a in plan.actions} == {"refuse", "hold"} and plan.is_empty
+    report = repo.apply_promote(plan, verify=False)
+    assert "tbl" in report.refused and "copy the rows by hand" in report.refused["tbl"]
+    assert "db" in report.held and "would fast-forward" in report.held["db"]
+    assert not report.fast_forwarded and report.trunk_moved is None
+    assert store.system(movable).branches["main"] == main_db_before  # untouched
+
+    # Naming the key is the user's choice to land a subset.
+    report = repo.promote(keys=["db"])
+    assert "db" in report.fast_forwarded and not report.held
+    assert report.trunk_moved is None  # tbl still has not landed
+
+
 def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     system = _mem(repo)

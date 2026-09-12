@@ -306,6 +306,10 @@ class PromoteReport:
     """Keys whose base already matched the target, or that had nothing to promote."""
     refused: dict[str, str] = field(default_factory=dict)
     """Key -> why tether would not move the base (with the system's own recipe)."""
+    held: dict[str, str] = field(default_factory=dict)
+    """Key -> what would have happened: a fast-forward or merge not performed
+    because another object was refused and no keys were named. A bookmark
+    lands whole or not at all."""
     conflicts: dict[str, list[str]] = field(default_factory=dict)
     """Key -> conflicting units reported by a merge that was rolled back."""
     trunk_moved: str | None = None
@@ -2968,6 +2972,7 @@ class Repo:
                 "rev": rev,
                 "strategy": strategy,
                 "message": message,
+                "subset": bool(keys),
                 "manifest_hash": manifest_hash(objects),
                 "workspace_id": self.workspace.workspace_id,
             },
@@ -3105,6 +3110,33 @@ class Repo:
                         params=params,
                     )
                 )
+        # The bookmark lands whole or not at all. Moving some systems' `main`
+        # while others are refused would leave readers of `main` a mix of new
+        # and old states -- the half-done state promotion exists to avoid --
+        # and the trunk bookmark could not follow. Naming keys is the way to
+        # land a subset on purpose.
+        refused = [a.key for a in plan.actions if a.op == "refuse"]
+        if refused and not keys:
+            names = ", ".join(refused)
+            plan.actions = [
+                a
+                if a.op == "refuse"
+                else Action(
+                    "hold",
+                    a.key,
+                    a.kind,
+                    target=a.target,
+                    detail=f"would {a.op}: {a.detail}; held because {names} "
+                    "refused, and a bookmark lands whole or not at all",
+                    params=a.params,
+                )
+                for a in plan.actions
+            ]
+            plan.notes.append(
+                f"nothing moved: {names} refused; land the rest on purpose with "
+                f"`tether promote KEY...`, or write those systems' base branches "
+                "by hand on the trunk (see the refusals) and promote again"
+            )
         return plan
 
     def apply_promote(self, plan: Plan, *, verify: bool = True) -> PromoteReport:
@@ -3126,6 +3158,8 @@ class Repo:
         for a in plan.actions:
             if a.op == "refuse":
                 report.refused[a.key] = a.detail
+            elif a.op == "hold":
+                report.held[a.key] = a.detail
         for note in plan.notes:
             key, _, why = note.partition(": ")
             if "already at the target" in why or "nothing to promote" in why:
@@ -3191,13 +3225,15 @@ class Repo:
         # cleanly, its commit now describes the upstream branches, so the
         # trunk bookmark moves to it -- `jj bookmark set main -r feature`.
         # A merge leaves states the commit does not describe; commit first,
-        # then promote again (a fast-forward) to move the trunk.
+        # then promote again (a fast-forward) to move the trunk. A subset
+        # (`promote KEY...`) never moves it: the rest has not landed.
         bookmark = self.workspace.bookmark
         if (
             results
             and bookmark
             and not self.on_trunk()
             and plan.context.get("rev") is None
+            and not plan.context.get("subset")
             and not report.refused
             and not report.merged
             and not errors
