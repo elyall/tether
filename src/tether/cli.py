@@ -860,6 +860,7 @@ def diff(
                     "b": e.b_pin,
                     "detail": e.detail.to_dict() if e.detail else None,
                     "detail_error": e.detail_error,
+                    "why": list(e.why),
                 }
                 for e in entries
             ],
@@ -874,6 +875,8 @@ def diff(
             line += f"  [{e.detail.summary}]"
         elif e.detail_error:
             line += f"  [diff failed: {e.detail_error}]"
+        elif e.why and "state" not in e.why:
+            line += f"  [{' and '.join(e.why)} changed; same state]"
         typer.echo(line)
         if e.detail is None:
             continue

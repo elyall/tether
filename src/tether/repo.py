@@ -443,6 +443,10 @@ class DiffEntry:
     """Native content diff (only with `content=True` and a `DIFF` backend)."""
     detail_error: str | None = None
     """Backend failure while computing `detail`, if any."""
+    why: tuple[str, ...] = ()
+    """For `changed`: which of `state`, `pin`, `locator`, `policy` differ. A
+    locator or policy change alone is a change too -- the object is addressed
+    or governed differently even though its state is the same."""
 
 
 def _source_object(source: Mapping[str, Any]) -> str | Pin | State:
@@ -1631,11 +1635,16 @@ class Repo:
                 plan.notes.append(f"{key}: no fingerprint; skipped")
                 continue
             needs_pin = Capability.PIN in eff
-            if self._same(m.kind, m.state, state) and (
-                m.pin is not None or not needs_pin
-            ):
+            if self._same(m.kind, m.state, state) and (m.pin is not None) == needs_pin:
                 plan.notes.append(f"{key}: unchanged")
                 continue
+            if self._same(m.kind, m.state, state):
+                # Same state, different policy: `pin = "record"` now drops the
+                # native ref (gc releases it), `native` again creates one.
+                plan.notes.append(
+                    f"{key}: policy changed; "
+                    + ("pin released" if not needs_pin else "pin created")
+                )
             if fetched is not None:
                 plan.notes.append(f"{key}: fetched {short_state(state)}")
             if tier_of(eff) is Tier.OBSERVED:
@@ -4870,15 +4879,27 @@ class Repo:
             mb = b.get(key)
             pa = ma.pin.id if ma and ma.pin else None
             pb = mb.pin.id if mb and mb.pin else None
+            why: tuple[str, ...] = ()
             if ma and not mb:
                 change = "removed"
             elif mb and not ma:
                 change = "added"
-            elif pa != pb or (ma and mb and ma.state != mb.state):
-                change = "changed"
             else:
-                change = "unchanged"
-            entries.append(DiffEntry(key=key, change=change, a_pin=pa, b_pin=pb))
+                assert ma is not None and mb is not None
+                why = tuple(
+                    name
+                    for name, differs in (
+                        ("state", ma.state != mb.state),
+                        ("pin", pa != pb),
+                        ("locator", dict(ma.locator) != dict(mb.locator)),
+                        ("policy", ma.policy != mb.policy),
+                    )
+                    if differs
+                )
+                change = "changed" if why else "unchanged"
+            entries.append(
+                DiffEntry(key=key, change=change, a_pin=pa, b_pin=pb, why=why)
+            )
 
         if content:
             self._attach_content_diffs(entries, a, b, resolved_a, resolved_b)
@@ -4895,8 +4916,8 @@ class Repo:
         by_key = {e.key: e for e in entries}
         keys: list[str] = []
         for e in entries:
-            if e.change != "changed":
-                continue
+            if e.change != "changed" or "state" not in e.why:
+                continue  # same state: nothing inside the object to describe
             ma, mb = a[e.key], b[e.key]
             if ma.state is None or mb.state is None or ma.kind != mb.kind:
                 continue

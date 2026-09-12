@@ -750,6 +750,40 @@ def test_relative_local_paths_are_pinned_down_at_add(
     assert "raw" in repo.commit("from the root").unrecoverable  # recorded from here
 
 
+def test_pin_policy_change_takes_effect_at_the_next_commit(vcs_root: Path) -> None:
+    """`set --pin record` on a pinned object: the next commit records the same
+    state without a pin (gc then releases the tag); `set --pin native` brings a
+    pin back; and `diff` reports a policy-only change as a change."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    c1 = repo.commit("pinned").vcs_commit
+    pin = repo.objects["db"].pin
+    assert c1 is not None and pin is not None
+
+    repo.set_policy(["db"], pin="record")
+    plan = repo.plan_commit("record instead")
+    assert [a.op for a in plan.actions if a.key == "db"] == ["record"]
+    assert any("pin released" in n for n in plan.notes)
+    c2 = repo.commit("record instead").vcs_commit
+    assert c2 is not None and repo.objects["db"].pin is None
+    (entry,) = [e for e in repo.diff(c1, c2) if e.key == "db"]
+    assert entry.change == "changed" and set(entry.why) == {"pin", "policy"}
+    # The tag is now unreferenced by the working tree, but c1 still names it.
+    assert not [a for a in repo.plan_gc().actions if a.op == "unpin"]
+    assert pin.ref in store.system(system).tags
+
+    repo.set_policy(["db"], pin="native")
+    plan = repo.plan_commit("native again")
+    assert [a.op for a in plan.actions if a.key == "db"] == ["pin"]
+    repo.commit("native again")
+    assert repo.objects["db"].pin == pin  # same state, same content-addressed id
+
+    # A locator-only change (a field the identity ignores) is a change too.
+    (entry,) = [e for e in repo.diff(c1) if e.key == "db"]
+    assert entry.change == "unchanged"
+
+
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
     """`diff REV` is REV -> working tree, not REV -> nothing."""
     repo = Repo.init(vcs_root)
