@@ -393,10 +393,14 @@ when the bookmark's branch was created (or, with `--rev`, to the target's
 ancestry): unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` ->
 `merge`; otherwise `refuse` with the backend's recipe. `--strategy ff` turns
 merges into refusals, `--strategy merge` turns fast-forwards into refusals.
-A bookmark lands whole or not at all: if any object is refused and no keys
-were named, the others are `held` (the output says what each would have
-done) and nothing is written -- `main` never shows a mix of landed and
-unlanded systems. `tether promote KEY...` lands a subset on purpose; the
+A bookmark is planned whole or not at all: if any object is refused and no
+keys were named, the others are `held` (the output says what each would have
+done) and nothing is written -- a refusal never leaves `main` with a mix of
+landed and unlanded systems. That guarantee is the plan's: once the apply is
+under way each system's fast-forward stands on its own, so a backend that
+fails mid-apply leaves the systems before it landed and the trunk bookmark
+where it was (`promote` again finishes the rest; there is no cross-system
+undo). `tether promote KEY...` lands a subset on purpose; the
 trunk bookmark never moves for a subset. When everything fast-forwarded and
 nothing was refused, the trunk bookmark is moved to this bookmark's commit
 (`main -> <commit>` in the output). After a merge the branch is reset onto

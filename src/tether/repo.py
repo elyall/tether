@@ -315,8 +315,9 @@ class PromoteReport:
     """Key -> why tether would not move the base (with the system's own recipe)."""
     held: dict[str, str] = field(default_factory=dict)
     """Key -> what would have happened: a fast-forward or merge not performed
-    because another object was refused and no keys were named. A bookmark
-    lands whole or not at all."""
+    because another object was refused and no keys were named. A bookmark is
+    planned whole or not at all; the plan is the atomic unit -- once applying,
+    each system's fast-forward stands on its own (see the caveats)."""
     conflicts: dict[str, list[str]] = field(default_factory=dict)
     """Key -> conflicting units reported by a merge that was rolled back."""
     trunk_moved: str | None = None
@@ -1703,13 +1704,17 @@ class Repo:
                 )
             else:
                 why = "pin=record" if m.policy.pin == "record" else "Addressable"
+                recoverable = backend.state_addressable(m.locator, state)
+                if not recoverable:
+                    why += ", but this state carries no address to reopen it by"
                 plan.actions.append(
                     Action(
                         "record",
                         key,
                         m.kind,
-                        detail=f"{why}: state {short_state(state)}, no native ref",
-                        params={"state": state, "recoverable": True},
+                        detail=f"{why}: state {short_state(state)}, no native ref"
+                        + ("" if recoverable else "; recorded, not recoverable"),
+                        params={"state": state, "recoverable": recoverable},
                     )
                 )
         if plan.actions:
@@ -3661,7 +3666,7 @@ class Repo:
                     a.kind,
                     target=a.target,
                     detail=f"would {a.op}: {a.detail}; held because {names} "
-                    "refused, and a bookmark lands whole or not at all",
+                    "refused, and a bookmark is planned whole or not at all",
                     params=a.params,
                 )
                 for a in plan.actions

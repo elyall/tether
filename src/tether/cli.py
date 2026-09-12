@@ -1625,8 +1625,9 @@ def promote(
         typer.echo(f"  held           {key}: {why}")
     if report.held:
         typer.echo(
-            "nothing moved: a bookmark lands whole or not at all; name keys to land "
-            "a subset, or finish the refused systems on the trunk and promote again"
+            "nothing moved: a bookmark is planned whole or not at all; name keys to "
+            "land a subset, or finish the refused systems on the trunk and promote "
+            "again"
         )
     if report.merged:
         typer.echo("run `tether commit` to pin the merge result(s), then promote again")

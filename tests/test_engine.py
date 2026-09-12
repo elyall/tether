@@ -1003,6 +1003,10 @@ def test_relative_local_paths_are_pinned_down_at_add(
     repo.add("remote", "file", {"uri": "s3://bucket/prefix/"})
     assert repo.objects["remote"].locator["uri"] == "s3://bucket/prefix/"
     repo.remove("remote")
+    # The CLI's positional locator is `uri` for every kind, git included.
+    repo.add("code", "git", {"uri": "../data"})
+    assert repo.objects["code"].locator["uri"] == str(data.resolve())
+    repo.remove("code")
     monkeypatch.chdir(vcs_root)
     assert "raw" in repo.commit("from the root").unrecoverable  # recorded from here
 

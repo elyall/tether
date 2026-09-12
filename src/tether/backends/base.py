@@ -277,6 +277,16 @@ class ObjectBackend(Protocol):
     (`add`, `import`), against the caller's working directory, so a committed
     locator means the same path from every directory and every clone."""
 
+    def state_addressable(self, locator: Locator, state: State) -> bool:
+        """Whether *this* recorded state can be opened again later.
+
+        The capability says the backend can address states in general; a
+        particular fingerprint may still lack the coordinate (an object in a
+        bucket without versioning has no `version_id`). `commit` records such
+        a state as not recoverable instead of promising a read it cannot do.
+        """
+        return True
+
     def branch_scope(self, locator: Locator) -> str:
         """The native resource that owns branches, as a stable string.
 

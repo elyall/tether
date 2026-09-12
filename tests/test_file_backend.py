@@ -390,3 +390,31 @@ def test_hash_cache_is_shared_safely_across_concurrent_fingerprints(
     assert b._hashes.hashed == 32  # every file read once, then served from cache
     cache = json.loads((tmp_path / "cache" / "file-hashes.json").read_text())
     assert len(cache) == 32
+
+
+def test_versionless_object_state_is_recorded_as_not_recoverable(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--file versioned` on a bucket that turns out not to version: the
+    fingerprint carries no version id, so the commit records the state without
+    promising a read it cannot do (recoverable = false), and `open` refuses."""
+    from tether.manifest import Policy
+    from tether.repo import Repo
+
+    repo = Repo.init(vcs_root)
+    repo.add(
+        "obj", "file", {"uri": "s3://bucket/one.bin"}, policy=Policy(file="versioned")
+    )
+    backend = repo.backend_for("file")
+    monkeypatch.setattr(
+        backend,
+        "fingerprint",
+        lambda locator, working_ref: {"type": "object", "size": 1, "etag": "e"},
+    )
+    plan = repo.plan_commit("versionless")
+    (record,) = [a for a in plan.actions if a.key == "obj"]
+    assert record.op == "record" and record.params["recoverable"] is False
+    assert "no address to reopen" in record.detail
+    res = repo.apply_commit(plan, verify=False)
+    assert "obj" in res.unrecoverable
+    assert repo.objects["obj"].recoverable is False

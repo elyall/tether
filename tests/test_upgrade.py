@@ -535,3 +535,36 @@ def test_upgrade_v4_resolves_relative_locators_against_the_root(
     assert not report.failed and report.rewritten_manifests == ["raw"]
     repo = Repo.find(vcs_root)
     assert repo.objects["raw"].locator["uri"] == str(data.resolve())
+
+
+def test_upgrade_v4_handles_a_dotted_key_with_a_relative_locator(
+    vcs_root: Path,
+) -> None:
+    """Both v4 rewrites on one manifest: the move must happen before the
+    locator rewrite, or the rewrite lands at the new path while the old file
+    stays behind as a duplicate."""
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/cache\n"
+    )
+    (vcs_root / "tether.toml").write_text(V3_CONFIG)
+    data = vcs_root / "data"
+    data.mkdir()
+    (data / "a.bin").write_bytes(b"a")
+    text = ObjectManifest(
+        key="raw.v2", kind="file", locator={"uri": "data"}, policy=Policy()
+    ).to_toml()
+    old_path = vcs_root / ".tether" / "objects" / "raw.toml"  # pre-v4 mapping
+    old_path.write_text(text)
+    vcs = detect_vcs(vcs_root)
+    vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v3")
+
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    report = repo.apply_upgrade(repo.plan_upgrade())
+    assert not report.failed, report.failed
+    assert report.rewritten_manifests == ["raw.v2"]
+    assert not old_path.exists()
+    files = sorted(p.name for p in (vcs_root / ".tether" / "objects").glob("*.toml"))
+    assert files == ["raw.v2.toml"]
+    repo = Repo.find(vcs_root)
+    assert repo.objects["raw.v2"].locator["uri"] == str(data.resolve())

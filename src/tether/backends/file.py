@@ -311,6 +311,10 @@ class FileBackend(ObjectBackend):
             return base
         return base | Capability.ADDRESSABLE
 
+    def state_addressable(self, locator: Locator, state: State) -> bool:
+        # A remote object is re-openable only through its version id.
+        return not (state.get("type") == "object" and not state.get("version_id"))
+
     def _remember(self, digest: str, rows: ListingRows) -> None:
         self._listings[digest] = rows
         self._listings.move_to_end(digest)

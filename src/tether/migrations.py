@@ -639,11 +639,8 @@ def _plan_v4(repo: Repo, plan: Plan) -> None:
 def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     from tether.manifest import read_objects, write_config, write_object
 
-    for key, _old, new in _relative_locators(repo):
-        updated = dataclasses.replace(repo.objects[key], locator=new)
-        write_object(repo.root, updated)
-        repo.objects[key] = updated
-        report.rewritten_manifests.append(key)
+    # Moves first: a locator rewrite writes the manifest at its *new* path, so
+    # doing it before the move would leave the old file behind as a duplicate.
     for path, want, key in _misplaced_manifests(repo):
         want.parent.mkdir(parents=True, exist_ok=True)
         if want.exists():
@@ -658,6 +655,12 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         report.rewritten_manifests.append(key)
     if report.rewritten_manifests:
         repo.objects = read_objects(repo.root)
+    for key, _old, new in _relative_locators(repo):
+        updated = dataclasses.replace(repo.objects[key], locator=new)
+        write_object(repo.root, updated)
+        repo.objects[key] = updated
+        if key not in report.rewritten_manifests:
+            report.rewritten_manifests.append(key)
     repo.config.version = 4
     write_config(repo.root, repo.config)
 

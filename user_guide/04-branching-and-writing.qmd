@@ -307,10 +307,12 @@ tether promote                                       # ...then this moves main
 ```
 
 Refusals are the honest part -- and they hold everything else back. A
-bookmark lands whole or not at all: when one system is refused, `promote`
+bookmark is planned whole or not at all: when one system is refused, `promote`
 reports the others as `held` (with what each would have done) and writes
 nothing, because a `main` with the new state in one system and the old in
-another is the half-done state you branched to avoid. Name keys to land a
+another is the half-done state you branched to avoid. (The plan is the atomic
+unit; a backend that fails while the plan is being applied still leaves the
+systems before it landed -- see the caveats.) Name keys to land a
 subset on purpose (`tether promote zarr/imaging`); the trunk bookmark never
 moves for a subset, so `main` keeps pointing at a commit that describes
 upstream. Icechunk and Iceberg can fast-forward but not

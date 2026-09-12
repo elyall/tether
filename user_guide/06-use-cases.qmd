@@ -143,9 +143,9 @@ The bookmark moved; `main` did not. Two endings. Land it:
 Nothing moved. Lance refuses -- it has branches but no way to move one onto
 another -- and says what to do instead: write the result onto the base
 branch. Icechunk *could* have fast-forwarded (nothing else touched its `main`
-since the fork), and `promote` says so, but holds it: a bookmark lands whole
-or not at all, because a `main` with the new labels and the old features is
-the half-done state this whole exercise exists to avoid. The two objects the
+since the fork), and `promote` says so, but holds it: a bookmark is planned
+whole or not at all, because a `main` with the new labels and the old features
+is the half-done state this whole exercise exists to avoid. The two objects the
 job never opened are skipped. That refusal is the honest answer, not a bug.
 
 Landing it by hand is then two steps. Name the system that can move, which
