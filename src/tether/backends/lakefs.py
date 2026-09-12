@@ -170,6 +170,7 @@ class LakeFSBackend(ObjectBackend):
         repo = self._repo(locator)
         ref = ref_for_pin(pin_id)
         commit_id = str(state["commit_id"])
+        before = self._tag_commit(repo, ref)  # None when absent
         try:
             repo.tag(ref).create(source_ref=commit_id, exist_ok=True)
         except self._errors() as exc:
@@ -182,7 +183,7 @@ class LakeFSBackend(ObjectBackend):
                 f"tag {ref} already points at {existing}, not {commit_id}",
                 kind="lakefs",
             )
-        return Pin(id=pin_id, ref=ref)
+        return Pin(id=pin_id, ref=ref, created=before is None)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         with contextlib.suppress(*self._errors()):

@@ -342,6 +342,7 @@ class DoltBackend(ObjectBackend):
         ref = ref_for_pin(pin_id)
         commit = str(state["commit"])
         existing = client.tag_hash(ref)
+        created = existing is None
         if existing is None:
             client.create_tag(ref, commit)
             existing = client.tag_hash(ref)
@@ -349,7 +350,7 @@ class DoltBackend(ObjectBackend):
             raise BackendError(
                 f"tag {ref} already points at {existing}, not {commit}", kind="dolt"
             )
-        return Pin(id=pin_id, ref=ref)
+        return Pin(id=pin_id, ref=ref, created=created)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         client = self._client(locator)

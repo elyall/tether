@@ -160,7 +160,7 @@ class IcebergBackend(ObjectBackend):
                     f"tag {ref} already points at {existing.snapshot_id}",
                     kind="iceberg",
                 )
-            return Pin(id=pin_id, ref=ref)
+            return Pin(id=pin_id, ref=ref, created=False)
         with table.manage_snapshots() as ms:
             ms.create_tag(snapshot_id=sid, tag_name=ref)
         return Pin(id=pin_id, ref=ref)

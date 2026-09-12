@@ -156,7 +156,7 @@ class GitBackend(ObjectBackend):
                 raise BackendError(
                     f"pin {ref} was not pushed to {remote}: {exc}", kind="git"
                 ) from exc
-        return Pin(id=pin_id, ref=ref)
+        return Pin(id=pin_id, ref=ref, created=not existing)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         remote = locator.get("remote")

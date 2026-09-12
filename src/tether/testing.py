@@ -112,11 +112,15 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
     pid = compute_pin_id(b.kind, b.identity(loc), content, CONFORMANCE_DATASET)
     pin = b.pin(loc, state, pid)
     assert pin.ref.startswith(ref_for_pin("")), "pin ref must carry the prefix"
+    assert pin.created, "a fresh pin must report created=True"
     assert pid in b.list_pins(loc), "list_pins must include a fresh pin"
     assert b.verify(loc, state, pin, deep=False).ok, "fresh pin must verify"
     assert b.verify(loc, state, pin, deep=True).ok, "deep verify must pass"
-    # Idempotent: re-pinning identical state returns the same ref.
-    assert b.pin(loc, state, pid).ref == pin.ref, "pin must be idempotent"
+    # Idempotent: re-pinning identical state returns the same ref, and says
+    # it found the ref rather than made it (the engine must not roll it back).
+    again = b.pin(loc, state, pid)
+    assert again.ref == pin.ref, "pin must be idempotent"
+    assert not again.created, "a re-pin must report created=False"
     # The pin protects state against later drift of the working ref.
     h.mutate(loc, None)
     assert b.verify(loc, state, pin, deep=False).ok, "pin must protect state"

@@ -244,7 +244,7 @@ class NeonBackend(ObjectBackend):
                     "endpoints": [],
                 },
             )
-        return Pin(id=pin_id, ref=ref)
+        return Pin(id=pin_id, ref=ref, created=existing is None)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         project_id = self._project(locator)

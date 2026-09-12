@@ -1646,7 +1646,11 @@ class Repo:
                 state = dict(a.params["state"])
                 if a.op == "pin":
                     pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
-                    created_pins.append((a.key, pin))
+                    # Roll back only what this commit created: a pin the
+                    # backend found already carrying the state belongs to
+                    # the commit (or the sibling key) that made it.
+                    if pin.created:
+                        created_pins.append((a.key, pin))
                     outcomes[a.key] = (state, pin, True)
                     result.pinned[a.key] = pin
                 else:

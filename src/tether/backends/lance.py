@@ -157,6 +157,7 @@ class LanceBackend(ObjectBackend):
                     f"({_tag_target(existing) if existing else 'unknown'} != {target})",
                     kind="lance",
                 ) from None
+            return Pin(id=pin_id, ref=ref, created=False)
         return Pin(id=pin_id, ref=ref)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:

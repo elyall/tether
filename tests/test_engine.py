@@ -366,6 +366,42 @@ def test_content_diff_and_listings(vcs_root: Path) -> None:
     assert not orphan.exists()
 
 
+def test_commit_rollback_spares_pins_it_did_not_create(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pin()` is idempotent, so a commit can be handed a pin an earlier commit
+    made. When a later pin in the same commit fails, rollback must release only
+    the pins this commit created -- not the reused one history still names."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    a = _mem_object(repo, "a")
+    store.write(a, "main", {"v": 1})
+    first = repo.commit("pin a")
+    pin_a = first.pinned["a"]
+    assert pin_a is not None and pin_a.ref in store.system(a).tags
+
+    # Two more objects: `b` on the *same* system and state as `a` (its pin id
+    # is the same, so pin() reuses a's tag); `c` on a system whose pin fails.
+    repo.add("b", "memory", {"system": a, "branch": "main"})
+    c = _mem_object(repo, "c")
+    store.write(c, "main", {"v": 1})
+    backend = repo.backend_for("memory")
+    real_pin = backend.pin
+
+    def failing(locator: Locator, state: State, pin_id: str) -> Pin:
+        if locator["system"] == c:
+            raise BackendError("store unreachable", kind="memory")
+        return real_pin(locator, state, pin_id)
+
+    monkeypatch.setattr(backend, "pin", failing)
+    with pytest.raises(BackendError, match="store unreachable"):
+        repo.commit("pin b and c")
+    # The reused tag survives; nothing was created for c.
+    assert pin_a.ref in store.system(a).tags
+    assert not store.system(c).tags
+    assert all(r.ok for r in Repo.find(vcs_root).verify().values() if r)
+
+
 def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> None:
     """`diff REV` is REV -> working tree, not REV -> nothing."""
     repo = Repo.init(vcs_root)

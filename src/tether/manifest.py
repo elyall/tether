@@ -262,6 +262,10 @@ class Pin:
 
     id: str
     ref: str
+    created: bool = field(default=True, compare=False, repr=False)
+    """Whether this `pin()` call created the ref (`False`: it already carried
+    the state). Runtime only -- not serialised. The engine rolls back only the
+    pins it created; a reused pin belongs to the commit that made it."""
 
     def to_dict(self) -> dict[str, str]:
         return {"id": self.id, "ref": self.ref}

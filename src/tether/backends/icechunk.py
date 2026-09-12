@@ -215,7 +215,7 @@ class IcechunkBackend(ObjectBackend):
             except ic.IcechunkError:
                 continue  # this name is a tombstone; try the next generation
             if existing == sid:
-                return Pin(id=pin_id, ref=ref)  # idempotent commit
+                return Pin(id=pin_id, ref=ref, created=False)  # idempotent commit
             # The name is taken by another snapshot: our state and the id's
             # earlier life disagree. Do not step over it silently.
             raise BackendError(

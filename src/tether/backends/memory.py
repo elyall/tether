@@ -174,6 +174,8 @@ class MemoryBackend(ObjectBackend):
             raise BackendError(
                 f"pin {ref} already points elsewhere", key=name, kind="memory"
             )
+        if existing == sid:
+            return Pin(id=pin_id, ref=ref, created=False)
         sys.tags[ref] = sid
         return Pin(id=pin_id, ref=ref)
 
