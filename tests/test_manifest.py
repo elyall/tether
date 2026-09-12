@@ -118,6 +118,23 @@ def test_key_path_mapping() -> None:
     rel = key_to_relpath("zarr/imaging")
     assert rel == Path("objects/zarr/imaging.toml")
     assert relpath_to_key(Path("zarr/imaging.toml")) == "zarr/imaging"
+    # A dot in the last segment is part of the key, not a suffix to replace:
+    # `foo` and `foo.bar` are two files.
+    assert key_to_relpath("foo.bar") == Path("objects/foo.bar.toml")
+    assert key_to_relpath("foo") == Path("objects/foo.toml")
+    assert relpath_to_key(Path("foo.bar.toml")) == "foo.bar"
+    assert relpath_to_key(Path("a/b.v2.toml")) == "a/b.v2"
+
+
+def test_unsafe_keys_are_refused() -> None:
+    import pytest
+
+    from tether.errors import ConfigError
+
+    for bad in ("", "/abs", "a//b", "a/", "./x", "../x", "a/../b", "tab\tkey", "nl\n"):
+        with pytest.raises(ConfigError, match="unsafe object key"):
+            key_to_relpath(bad)
+    assert key_to_relpath("with space") == Path("objects/with space.toml")
 
 
 def test_manifest_hash_order_independent() -> None:

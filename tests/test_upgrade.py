@@ -120,7 +120,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     plan = repo.plan_upgrade()
     ops = sorted((a.op, a.target) for a in plan.actions)
     ds = plan.context["dataset_id"]
-    assert plan.context["from"] == 1 and plan.context["to"] == 3
+    assert plan.context["from"] == 1 and plan.context["to"] == 4
     assert [a.op for a in plan.actions].count("rename-pin") == 2
     assert [a.op for a in plan.actions].count("rename-branch") == 2
     # jj's working-copy commit carries the manifests too (rewritten in place).
@@ -141,7 +141,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     report = repo.apply_upgrade(plan)
     assert not report.failed, report.failed
-    assert report.from_version == 1 and report.to_version == 3
+    assert report.from_version == 1 and report.to_version == 4
     assert report.vcs_commit
     assert len(report.rewritten_commits) == 2  # the working copy is not "rewritten"
     assert set(report.renamed_pins) == {f"tether.{pin1}", f"tether.{pin2}"}
@@ -167,7 +167,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     # The dataset opens normally now, at version 2 with the planned id.
     repo = Repo.find(vcs_root)
-    assert repo.config.version == 3 and repo.config.dataset_id == ds
+    assert repo.config.version == 4 and repo.config.dataset_id == ds
     assert read_config(vcs_root).dataset_id == ds
     assert repo.objects["db"].pin is not None
     assert repo.objects["db"].pin.ref == new2
@@ -200,7 +200,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     # Logged, not undoable, and a second upgrade has nothing to do.
     assert repo.ops()[0].command == "upgrade" and not repo.ops()[0].undoable
     again = repo.plan_upgrade()
-    assert again.is_empty and any("already at version 3" in n for n in again.notes)
+    assert again.is_empty and any("already at version 4" in n for n in again.notes)
     with pytest.raises(StalePlanError):
         repo.apply_upgrade(plan)  # made for version 1
 
@@ -259,7 +259,7 @@ def test_upgrade_stops_before_rewriting_history_when_a_rename_fails(
     assert plan2.context["dataset_id"] == plan.context["dataset_id"]  # same namespace
     assert any(f"pin tether.{pin1} is not in the store" in n for n in plan2.notes)
     report = repo.apply_upgrade(plan2)
-    assert not report.failed and report.to_version == 3
+    assert not report.failed and report.to_version == 4
     assert f"tether.{pin2}" not in sys_.tags
     assert set(report.renamed_pins) == {f"tether.{pin2}"}  # pin1 was done last time
     repo = Repo.find(vcs_root)
@@ -365,7 +365,7 @@ def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
         Repo.find(vcs_root)
     repo = Repo.find(vcs_root, allow_outdated=True)
     plan = repo.plan_upgrade()
-    assert plan.context["from"] == 2 and plan.context["to"] == 3
+    assert plan.context["from"] == 2 and plan.context["to"] == 4
     ops = [(a.op, a.key) for a in plan.actions]
     assert ("refingerprint", "raw/single") in ops and (
         "refingerprint",
@@ -377,7 +377,7 @@ def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
     )
 
     report = repo.apply_upgrade(plan)
-    assert not report.failed and report.to_version == 3
+    assert not report.failed and report.to_version == 4
     assert sorted(report.refingerprinted) == ["raw/dir", "raw/single"]
     assert report.vcs_commit
 
@@ -440,7 +440,7 @@ def test_upgrade_v3_drops_the_write_policy(vcs_root: Path) -> None:
     assert repo.workspace.bookmark is None
     assert any("trunk bookmark" in n for n in plan.notes)
     report = repo.apply_upgrade(plan)
-    assert report.rewritten_manifests == ["db/prod"] and report.to_version == 3
+    assert report.rewritten_manifests == ["db/prod"] and report.to_version == 4
     repo = Repo.find(vcs_root)
     assert "write" not in (vcs_root / ".tether/objects/db/prod.toml").read_text()
     assert repo.objects["db/prod"].policy == Policy()
@@ -449,3 +449,56 @@ def test_upgrade_v3_drops_the_write_policy(vcs_root: Path) -> None:
     assert repo.workspace.bookmark == "main" and "main" in repo.vcs.bookmarks()
     assert repo.on_trunk()  # ...so commit works without a `tether new` first
     assert [a.op for a in repo.plan_commit("first pin").actions if a.key] == ["pin"]
+
+
+V3_CONFIG = (
+    V2_CONFIG.replace("version = 2", "version = 3") + '\n[vcs]\ntrunk = "main"\n'
+)
+
+
+def test_upgrade_v4_moves_dotted_keys_to_their_own_manifest_file(
+    vcs_root: Path,
+) -> None:
+    """Before v4, `key_to_relpath` replaced the key's last suffix with `.toml`,
+    so `features.v2` lived at `objects/features.toml`. v4 appends `.toml`; the
+    migration moves the working-tree file. History is read by the embedded
+    key, so old commits need no rewrite."""
+    (vcs_root / ".tether" / "objects").mkdir(parents=True)
+    (vcs_root / ".tether" / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/cache\n"
+    )
+    (vcs_root / "tether.toml").write_text(V3_CONFIG)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    text = ObjectManifest(
+        key="features.v2",
+        kind="memory",
+        locator={"system": system, "branch": "main"},
+        policy=Policy(),
+    ).to_toml()
+    old_path = vcs_root / ".tether" / "objects" / "features.toml"  # pre-v4 mapping
+    old_path.write_text(text)
+    vcs = detect_vcs(vcs_root)
+    vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "v3")
+    old_commit = vcs.current_rev()
+
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan = repo.plan_upgrade()
+    moves = [(a.op, a.key, a.target) for a in plan.actions if a.op == "rename-manifest"]
+    assert moves == [
+        ("rename-manifest", "features.v2", ".tether/objects/features.v2.toml")
+    ]
+    report = repo.apply_upgrade(plan)
+    assert not report.failed and report.rewritten_manifests == ["features.v2"]
+    assert not old_path.exists()
+    assert (vcs_root / ".tether" / "objects" / "features.v2.toml").exists()
+
+    repo = Repo.find(vcs_root)
+    assert repo.config.version == 4 and set(repo.objects) == {"features.v2"}
+    # History at the old path still reads as the same key.
+    assert set(repo._objects_at(old_commit)) == {"features.v2"}
+    # And `features` is now a different object with its own file.
+    default_store().system(system)
+    repo.add("features", "memory", {"system": system, "branch": "main"})
+    assert (vcs_root / ".tether" / "objects" / "features.toml").exists()
+    assert set(Repo.find(vcs_root).objects) == {"features", "features.v2"}

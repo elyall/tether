@@ -36,7 +36,7 @@ WORKSPACE_FILENAME = "workspace.toml"
 GITIGNORE_FILENAME = ".gitignore"
 
 REF_PREFIX = "tether."
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
 older datasets forward one migration at a time (see `tether.migrations`)."""
 
@@ -565,17 +565,40 @@ def manifest_hash(objects: dict[str, ObjectManifest]) -> str:
     return _blake(*parts, size=32)
 
 
-def key_to_relpath(key: str) -> Path:
-    """Map an object key to its manifest path under ``objects/``."""
-    if key.startswith("/") or ".." in key.split("/"):
+def validate_key(key: str) -> list[str]:
+    """Split an object key into path segments, refusing anything that would not
+    map to one manifest file under ``objects/`` or would escape it.
+
+    Raises:
+        ConfigError: Empty key, empty segment (``a//b``, trailing ``/``),
+            leading ``/``, a ``.`` or ``..`` segment, or a control character.
+    """
+    if not key or key.startswith("/") or key.endswith("/"):
         raise ConfigError(f"unsafe object key: {key!r}")
-    return Path(OBJECTS_DIR, *key.split("/")).with_suffix(".toml")
+    parts = key.split("/")
+    if any(p in ("", ".", "..") for p in parts) or any(
+        (ch.isspace() and ch != " ") or ord(ch) < 32 for ch in key
+    ):
+        raise ConfigError(f"unsafe object key: {key!r}")
+    return parts
+
+
+def key_to_relpath(key: str) -> Path:
+    """Map an object key to its manifest path under ``objects/``.
+
+    ``.toml`` is appended to the last segment (``foo.bar`` -> ``foo.bar.toml``)
+    so keys that differ cannot share a file (``foo`` and ``foo.bar`` used to).
+    """
+    parts = validate_key(key)
+    return Path(OBJECTS_DIR, *parts[:-1], parts[-1] + ".toml")
 
 
 def relpath_to_key(relpath: Path) -> str:
     """Inverse of :func:`key_to_relpath` (relative to ``objects/``)."""
-    rel = relpath.with_suffix("")
-    return "/".join(rel.parts)
+    parts = list(relpath.parts)
+    if parts and parts[-1].endswith(".toml"):
+        parts[-1] = parts[-1][: -len(".toml")]
+    return "/".join(parts)
 
 
 # --------------------------------------------------------------------------- #

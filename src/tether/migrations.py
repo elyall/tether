@@ -20,6 +20,7 @@ import dataclasses
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tether.backends.base import Capability, content_state, effective_capabilities
@@ -541,6 +542,80 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     write_config(repo.root, repo.config)
 
 
+# --------------------------------------------------------------------------- #
+# v4: one manifest file per key
+# --------------------------------------------------------------------------- #
+def _misplaced_manifests(repo: Repo) -> list[tuple[Path, Path, str]]:
+    """Working-tree manifests not at the path their key now maps to.
+
+    Before v4 the manifest path replaced the key's last suffix with `.toml`, so
+    `foo.bar` lived at `objects/foo.toml` -- the same file as key `foo`. Now
+    `.toml` is appended. Manifests are read by the key they embed, so history
+    is fine as it is; only the working tree moves.
+    """
+    from tether.manifest import ObjectManifest, object_path, objects_dir
+
+    root = objects_dir(repo.root)
+    out: list[tuple[Path, Path, str]] = []
+    if not root.is_dir():
+        return out
+    for path in sorted(root.rglob("*.toml")):
+        key = ObjectManifest.from_toml(path.read_text(encoding="utf-8")).key
+        want = object_path(repo.root, key)
+        if path.resolve() != want.resolve():
+            out.append((path, want, key))
+    return out
+
+
+def _plan_v4(repo: Repo, plan: Plan) -> None:
+    moves = _misplaced_manifests(repo)
+    for path, want, key in moves:
+        plan.actions.append(
+            Action(
+                "rename-manifest",
+                key,
+                target=want.relative_to(repo.root).as_posix(),
+                detail=f"move {path.relative_to(repo.root).as_posix()} so a key "
+                "with a dot in its last segment no longer shares a file with the "
+                "key before the dot",
+                params={"migration": 4},
+            )
+        )
+    if not moves:
+        plan.notes.append("v4: every manifest already sits at its key's path")
+    plan.actions.append(
+        Action(
+            "vcs-commit",
+            target="tether upgrade: v3 -> v4 (one manifest file per key)",
+            detail="manifests of keys whose last segment contains a dot move to "
+            "`<key>.toml`; history is read by the key each manifest embeds and "
+            "stays as it is",
+            params={"migration": 4},
+        )
+    )
+
+
+def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
+    from tether.manifest import read_objects, write_config
+
+    for path, want, key in _misplaced_manifests(repo):
+        want.parent.mkdir(parents=True, exist_ok=True)
+        if want.exists():
+            # Two keys collided on one file before; the one we are reading is
+            # the survivor. Keep it under its own name and leave the other.
+            report.failed[f"rename-manifest {key}"] = (
+                f"{want} already exists; a key collided here before v4 -- "
+                "re-add the missing object"
+            )
+            continue
+        path.replace(want)
+        report.rewritten_manifests.append(key)
+    if report.rewritten_manifests:
+        repo.objects = read_objects(repo.root)
+    repo.config.version = 4
+    write_config(repo.root, repo.config)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version=2,
@@ -553,6 +628,12 @@ MIGRATIONS: list[Migration] = [
         title="Content-hash local file states; drop the write policy",
         plan=_plan_v3,
         apply=_apply_v3,
+    ),
+    Migration(
+        version=4,
+        title="One manifest file per key",
+        plan=_plan_v4,
+        apply=_apply_v4,
     ),
 ]
 """Every migration, oldest first. Append here when the format changes."""
