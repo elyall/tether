@@ -99,12 +99,32 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-class _HashCache:
-    """Path -> (size, mtime_ns, inode, sha256), persisted as JSON when given a file.
+_COARSE_MTIME_WINDOW_NS = 2_000_000_000
+"""On a filesystem with whole-second mtimes, a write that lands within a second
+of the read can leave size and mtime unchanged (git's "racily clean" case);
+an entry hashed that close to the file's mtime is not trusted next time."""
 
-    A hit requires all three stat fields to match; a miss hashes the file and
-    records it. Without a path (a backend built outside a dataset) the cache
-    lives for the process only.
+
+def _racy(st: os.stat_result, hashed_at_ns: int) -> bool:
+    """Whether a cache entry made at `hashed_at_ns` could hide a later write.
+
+    Only filesystems that round mtimes to seconds are exposed; with
+    nanosecond mtimes the read and a later write cannot share a timestamp.
+    """
+    coarse = st.st_mtime_ns % 1_000_000_000 == 0
+    return coarse and hashed_at_ns - st.st_mtime_ns < _COARSE_MTIME_WINDOW_NS
+
+
+class _HashCache:
+    """Path -> (size, mtime_ns, ctime_ns, inode, sha256), persisted as JSON.
+
+    A hit requires every stat field to match; a miss hashes the file and
+    records it. ``ctime`` is in the key because a process that overwrites a
+    file and restores its mtime (a sync tool, `touch -r`) cannot restore the
+    inode change time; and on filesystems with whole-second mtimes an entry
+    hashed within the same second as the file's mtime is re-read next time
+    (see :func:`_racy`). Without a path (a backend built outside a dataset)
+    the cache lives for the process only.
 
     One cache serves every `file` object of a dataset, and the engine
     fingerprints objects concurrently, so the table and its file are guarded
@@ -132,15 +152,27 @@ class _HashCache:
         hit = self._load().get(str(path))
         if (
             hit
+            and len(hit) == 6
             and hit[0] == st.st_size
             and hit[1] == st.st_mtime_ns
-            and hit[2] == st.st_ino
+            and hit[2] == st.st_ctime_ns
+            and hit[3] == st.st_ino
+            and not _racy(st, int(hit[5]))
         ):
-            return str(hit[3])
+            return str(hit[4])
         return None
 
     def record(self, path: Path, st: os.stat_result, digest: str) -> None:
-        self._load()[str(path)] = [st.st_size, st.st_mtime_ns, st.st_ino, digest]
+        import time
+
+        self._load()[str(path)] = [
+            st.st_size,
+            st.st_mtime_ns,
+            st.st_ctime_ns,
+            st.st_ino,
+            digest,
+            time.time_ns(),
+        ]
         self._dirty = True
 
     def hashes(self, files: list[tuple[Path, os.stat_result]]) -> dict[Path, str]:
@@ -258,10 +290,25 @@ class FileBackend(ObjectBackend):
 
     # -- capability refinement ------------------------------------------ #
     def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
+        """`file = "versioned"` makes a *single remote object* Addressable.
+
+        A version id is what makes a recorded state re-openable, and only an
+        object store hands one out, per object. A local path or a prefix under
+        that policy is still Observed: the policy then only says how drift is
+        treated (accepted, not an error), not that history can be read back.
+        Whether the bucket actually versions is known once a fingerprint
+        carries `version_id`; `open` and `verify` refuse a state without one.
+        """
         base = Capability.FINGERPRINT | Capability.CHEAP_FINGERPRINT | Capability.DIFF
-        if getattr(policy, "file", "immutable") == "versioned":
-            return base | Capability.ADDRESSABLE
-        return base
+        if getattr(policy, "file", "immutable") != "versioned":
+            return base
+        try:
+            scheme, _root, key = _parse(self._uri(locator))
+        except BackendError:
+            return base
+        if scheme == "local" or not key or key.endswith("/"):
+            return base
+        return base | Capability.ADDRESSABLE
 
     def _remember(self, digest: str, rows: ListingRows) -> None:
         self._listings[digest] = rows
@@ -397,6 +444,23 @@ class FileBackend(ObjectBackend):
         deep: bool,
     ) -> VerifyReport:
         version_id = state.get("version_id")
+        if state.get("type") == "object" and not version_id and pin is None:
+            # Recorded as re-openable (`file = "versioned"`) but the store gave
+            # no version id: the bucket is not versioned, so this state names
+            # nothing that can be read back once the object changes.
+            try:
+                current = self.fingerprint(locator, None)
+            except BackendError as exc:
+                return VerifyReport(VerifyStatus.MISSING, str(exc))
+            if current == state:
+                return VerifyReport(
+                    VerifyStatus.OK, "no version id: the bucket is not versioned"
+                )
+            return VerifyReport(
+                VerifyStatus.MISSING,
+                "object changed and no version id was recorded (bucket not "
+                "versioned); the state cannot be read back",
+            )
         if version_id:
             if not deep:
                 return VerifyReport(
@@ -521,6 +585,15 @@ class FileBackend(ObjectBackend):
         version_id = None
         if isinstance(target, dict):
             version_id = target.get("version_id")
+            if not version_id and target.get("type") == "object":
+                # Asked for a recorded state, but the store recorded no version
+                # id for it: there is no historical coordinate to open. Say so
+                # rather than hand back whatever the object holds now.
+                raise BackendError(
+                    f"{uri}: the recorded state has no version id (the bucket is "
+                    "not versioned), so it cannot be opened at that state",
+                    kind="file",
+                )
         return FileHandle(
             key=uri,
             read_only=True,  # tether never writes through file handles

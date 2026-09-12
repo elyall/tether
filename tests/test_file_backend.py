@@ -317,6 +317,53 @@ def test_hash_cache_rereads_only_changed_files(tmp_path: Path) -> None:
     assert b3.fingerprint(loc, None) == s2 and b3._hashes.hashed == 5
 
 
+def test_hash_cache_sees_through_a_restored_mtime(tmp_path: Path) -> None:
+    """Overwrite four bytes and put the mtime back: size and mtime match the
+    cached entry, but ctime cannot be restored, so the bytes are re-read."""
+    b = FileBackend()
+    b.configure_cache(tmp_path / "cache")
+    d = tmp_path / "data"
+    d.mkdir()
+    f = d / "a.bin"
+    f.write_bytes(b"0000" + b"x" * 60)
+    s1 = b.fingerprint({"uri": str(d)}, None)
+    st = f.stat()
+    f.write_bytes(b"1111" + b"x" * 60)  # same size
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))  # mtime as before
+    s2 = b.fingerprint({"uri": str(d)}, None)
+    assert s2["digest"] != s1["digest"]
+
+
+def test_versioned_policy_addresses_only_remote_objects(tmp_path: Path) -> None:
+    """`file = "versioned"` cannot make a local path or a prefix re-openable:
+    only an object store hands out version ids. Such objects stay Observed,
+    and a recorded object state without a version id is refused by `open`."""
+    from tether.backends.base import effective_capabilities
+    from tether.manifest import Policy
+
+    b = FileBackend()
+    versioned = Policy(file="versioned")
+    local = tmp_path / "f.bin"
+    local.write_bytes(b"x")
+    for loc in ({"uri": str(local)}, {"uri": "s3://bucket/prefix/"}):
+        assert Capability.ADDRESSABLE not in effective_capabilities(b, loc, versioned)
+    assert Capability.ADDRESSABLE in effective_capabilities(
+        b, {"uri": "s3://bucket/one.bin"}, versioned
+    )
+    with pytest.raises(BackendError, match="no version id"):
+        b.open(
+            {"uri": "s3://bucket/one.bin"},
+            {"type": "object", "size": 1, "etag": "e"},
+            read_only=True,
+        )
+    h = b.open(
+        {"uri": "s3://bucket/one.bin"},
+        {"type": "object", "size": 1, "etag": "e", "version_id": "v1"},
+        read_only=True,
+    )
+    assert isinstance(h, FileHandle) and h.version_id == "v1"
+
+
 def test_hash_cache_is_shared_safely_across_concurrent_fingerprints(
     tmp_path: Path,
 ) -> None:
