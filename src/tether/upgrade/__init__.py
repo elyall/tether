@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tether import manifest as _m
-from tether.errors import ConfigError, StalePlanError, TetherError
+from tether.errors import TetherError
 from tether.manifest import CONFIG_VERSION, ensure_ignored, write_config
 from tether.plan import Plan
 from tether.repo import _report_dict
@@ -95,6 +95,12 @@ def plan_upgrade(repo: Repo, *, ignore_immutable: bool = False) -> Plan:
             "steps": [f"v{m.version}: {m.title}" for m in steps],
         },
     )
+    plan.require(
+        "config_version",
+        repo.config.version,
+        detail=f"plan was made for version {repo.config.version}, the dataset is "
+        "at {observed}; re-run the plan",
+    )
     if not steps:
         plan.notes.append(f"already at version {repo.config.version}")
         return plan
@@ -122,13 +128,7 @@ def apply_upgrade(repo: Repo, plan: Plan) -> UpgradeReport:
             store rename failed (nothing else was changed).
     """
     with repo._writer_lock():
-        if plan.command != "upgrade":
-            raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
-        if int(plan.context.get("from", -1)) != repo.config.version:
-            raise StalePlanError(
-                f"plan was made for version {plan.context.get('from')}, the "
-                f"dataset is at {repo.config.version}; re-run the plan"
-            )
+        repo._verify_plan(plan, "upgrade")
         report = UpgradeReport(
             from_version=repo.config.version, to_version=CONFIG_VERSION, plan=plan
         )

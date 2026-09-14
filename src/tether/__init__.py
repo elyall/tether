@@ -56,7 +56,7 @@ from tether.manifest import (
     working_ref_workspace,
 )
 from tether.oplog import OpEntry
-from tether.plan import Action, Plan
+from tether.plan import Action, Plan, Precondition
 from tether.repo import (
     TETHER_REV_ENV,
     AbandonReport,
@@ -99,6 +99,7 @@ __all__ = [
     "PinDriftError",
     "Plan",
     "Policy",
+    "Precondition",
     "PromoteReport",
     "PublishReport",
     "PullReport",

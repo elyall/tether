@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -92,7 +92,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
-from tether.plan import Action, Plan
+from tether.plan import Action, Plan, Precondition
 from tether.vcs import VcsAdapter, detect_vcs
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1821,6 +1821,11 @@ class Repo:
                 "pull": fetched is not None,
             },
         )
+        plan.require(
+            "manifest_hash",
+            plan.context["manifest_hash"],
+            detail="manifests changed since the plan was made; re-run the plan",
+        )
         for key in keys:
             m = self.objects[key]
             backend = self.backend_for(m.kind)
@@ -1917,17 +1922,14 @@ class Repo:
                 best-effort).
         """
         with self._writer_lock(), self._repo_lock():
-            if plan.command != "commit":
-                raise ConfigError(f"expected a commit plan, got {plan.command!r}")
+            self._verify_plan(plan, "commit", verify=verify)
             message = str(plan.context.get("message", ""))
             if vcs:
                 self._check_on_bookmark()
             object_actions = [a for a in plan.actions if a.op in ("pin", "record")]
             if verify:
-                if plan.context.get("manifest_hash") != self.current_manifest_hash():
-                    raise StalePlanError(
-                        "manifests changed since the plan was made; re-run the plan"
-                    )
+                # Per object, against one snapshot: a race during apply, not a
+                # plan precondition (see `_verify_plan`).
                 current = self.snapshot()
                 for a in object_actions:
                     if not self._same(
@@ -2134,6 +2136,103 @@ class Repo:
             # branch that moved since changes nothing about what lands.
             return self.apply_commit(plan, vcs=vcs, verify=False)
 
+    def _verify_plan(self, plan: Plan, command: str, *, verify: bool = True) -> None:
+        """The drift contract, in one place: refuse to apply a plan whose
+        preconditions no longer hold.
+
+        Every `apply_*` calls this before its first action. `plan_*` records
+        what it saw as :class:`~tether.plan.Precondition`s (manifest hash,
+        workspace id, branch heads, history digest, ...); this re-reads each
+        and raises :class:`~tether.errors.StalePlanError` with the plan's own
+        message on the first mismatch. A saved plan applied later, or a slow
+        apply, therefore acts on the world it was reviewed against or not at
+        all.
+
+        Not here, by design: checks that are races *during* apply and are
+        handled per action -- gc's post-preflight branch move (reported as
+        `kept`), commit's per-object re-fingerprint against the snapshot,
+        promote's pin re-verify right before the fast-forward.
+
+        Raises:
+            ConfigError: The plan is for another command.
+            StalePlanError: A precondition failed.
+        """
+        if plan.command != command:
+            raise ConfigError(f"expected a {command} plan, got {plan.command!r}")
+        if not verify:
+            return
+        for pre in plan.preconditions:
+            self._check_precondition(pre)
+
+    def _check_precondition(self, pre: Precondition) -> None:
+        """Run one precondition against the current state (see `_verify_plan`)."""
+        kind, params = pre.kind, pre.params
+
+        def fail(observed: object = None) -> NoReturn:
+            detail = pre.detail or f"{kind} changed since the plan was made"
+            raise StalePlanError(
+                detail.format(observed=observed) + "; re-run the plan"
+                if "re-run" not in detail
+                else detail.format(observed=observed)
+            )
+
+        if kind == "manifest_hash":
+            rev = params.get("rev")
+            observed = (
+                manifest_hash(self._objects_at(self.vcs.resolve(str(rev))))
+                if rev
+                else self.current_manifest_hash()
+            )
+            if observed != pre.expected:
+                fail(observed)
+        elif kind == "workspace_id":
+            if pre.expected not in (None, self.workspace.workspace_id):
+                fail(self.workspace.workspace_id)
+        elif kind == "vcs_head":
+            with contextlib.suppress(VcsError):
+                if self._vcs_head_or_none() != pre.expected:
+                    fail(self._vcs_head_or_none())
+        elif kind == "history_digest":
+            observed = self.vcs.history_digest()
+            if observed != pre.expected:
+                fail(observed)
+        elif kind == "config_version":
+            if self.config.version != pre.expected:
+                fail(self.config.version)
+        elif kind == "ref_absent":
+            backend = self.backend_for(str(params["backend"]))
+            if params["ref"] in backend.list_working_refs(dict(params["locator"])):
+                fail(params["ref"])
+        elif kind == "ref_head":
+            self._require_head(
+                self.backend_for(str(params["backend"])),
+                dict(params["locator"]),
+                str(params["ref"]),
+                dict(pre.expected) if pre.expected is not None else None,
+                what=str(params.get("what") or pre.key or "plan"),
+            )
+        elif kind == "base_state":
+            backend = self.backend_for(str(params["backend"]))
+            locator = dict(params["locator"])
+            base_locator = {k: v for k, v in locator.items() if k != "at"}
+            observed = backend.fingerprint(base_locator, None)
+            if not self._same(str(params["backend"]), observed, pre.expected):
+                fail(short_state(observed))
+        elif kind == "pin_state":
+            backend = self.backend_for(str(params["backend"]))
+            pin = Pin.from_dict(dict(params["pin"]))
+            checked = backend.verify(
+                dict(params["locator"]), dict(pre.expected), pin, deep=False
+            )
+            if checked.status is not VerifyStatus.OK:
+                fail(f"{checked.status.value}: {checked.message}")
+        elif kind == "no_new_holders":
+            holders = self.bookmark_holders(str(params["bookmark"]))
+            if holders:
+                fail(", ".join(holders))
+        else:  # pragma: no cover - PRECONDITION_KINDS guards the constructor
+            raise ConfigError(f"unknown plan precondition {kind!r}")
+
     def _require_head(
         self,
         backend: ObjectBackend,
@@ -2275,12 +2374,12 @@ class Repo:
         )
         if keep:
             plan.notes.append("keep: refresh the baseline only; working refs unchanged")
-            return plan
+            return self._with_new_preconditions(plan)
         if bookmark is None:
             plan.notes.append(
                 "no bookmark: read-only working copy (`tether new -b NAME` to write)"
             )
-            return plan
+            return self._with_new_preconditions(plan)
         trunk = bookmark == self.config.trunk
         if not trunk and not shared:
             holders = self.bookmark_holders(bookmark)
@@ -2296,7 +2395,7 @@ class Repo:
                         params={"bookmark": bookmark, "holders": holders},
                     )
                 )
-                return plan
+                return self._with_new_preconditions(plan)
         if trunk:
             plan.notes.append(
                 f"on trunk {bookmark!r}: writes land on each object's upstream branch"
@@ -2501,6 +2600,66 @@ class Repo:
                         params=params,
                     )
                 )
+        return self._with_new_preconditions(plan)
+
+    def _with_new_preconditions(self, plan: Plan) -> Plan:
+        """What `apply_new` must find unchanged: the manifests at the target,
+        this workspace, no new holder of the bookmark, and every branch the
+        plan keeps, resets, or creates afresh."""
+        ctx = plan.context
+        plan.require(
+            "manifest_hash",
+            ctx.get("manifest_hash"),
+            rev=ctx.get("rev"),
+            detail="manifests at the target differ from the plan; re-run the plan",
+        )
+        plan.require(
+            "workspace_id",
+            ctx.get("workspace_id"),
+            detail="this plan was made in another workspace; re-run the plan here",
+        )
+        bookmark = ctx.get("bookmark")
+        if bookmark and bookmark != self.config.trunk and not ctx.get("shared"):
+            plan.require(
+                "no_new_holders",
+                bookmark=bookmark,
+                detail=f"bookmark {bookmark!r} is now held by live workspace(s) "
+                "{observed}; re-run the plan (or pass --shared)",
+            )
+        for a in plan.actions:
+            if a.key not in self.objects:
+                continue
+            locator = dict(self.objects[a.key].locator)
+            if a.op == "reuse":
+                plan.require(
+                    "ref_head",
+                    a.params.get("then_state"),
+                    key=a.key,
+                    backend=a.kind,
+                    locator=locator,
+                    ref=a.target,
+                    what=f"new {a.key}",
+                )
+            elif a.op == "fork" and a.params.get("existing"):
+                plan.require(
+                    "ref_head",
+                    a.params.get("head"),
+                    key=a.key,
+                    backend=a.kind,
+                    locator=locator,
+                    ref=str(a.params["existing"]),
+                    what=f"new {a.key}",
+                )
+            elif a.op == "fork":
+                plan.require(
+                    "ref_absent",
+                    key=a.key,
+                    backend=a.kind,
+                    locator=locator,
+                    ref=a.target,
+                    detail=f"new {a.key}: {a.target} exists since the plan was made; "
+                    "re-run the plan",
+                )
         return plan
 
     def apply_new(self, plan: Plan, *, verify: bool = True) -> None:
@@ -2511,8 +2670,7 @@ class Repo:
             MultiObjectError: A pin is missing or a fork failed.
         """
         with self._writer_lock():
-            if plan.command != "new":
-                raise ConfigError(f"expected a new plan, got {plan.command!r}")
+            self._verify_plan(plan, "new", verify=verify)
             refused = [a for a in plan.actions if a.op == "refuse"]
             if refused:
                 if all(a.key for a in refused):
@@ -2524,68 +2682,6 @@ class Repo:
             rev = plan.context.get("rev")
             bookmark = plan.context.get("bookmark")
             create = bool(plan.context.get("create"))
-            if verify:
-                # Check the target *before* touching the VCS working copy, so a
-                # stale plan leaves the checkout where it was.
-                target = (
-                    self._objects_at(self.vcs.resolve(str(rev)))
-                    if rev
-                    else self.objects
-                )
-                if plan.context.get("manifest_hash") != manifest_hash(target):
-                    raise StalePlanError(
-                        "manifests at the target differ from the plan; re-run the plan"
-                    )
-            if plan.context.get("workspace_id") not in (
-                None,
-                self.workspace.workspace_id,
-            ):
-                raise StalePlanError(
-                    "this plan was made in another workspace; re-run the plan here"
-                )
-            if (
-                verify
-                and bookmark
-                and bookmark != self.config.trunk
-                and not plan.context.get("shared")
-                and (holders := self.bookmark_holders(str(bookmark)))
-            ):
-                # A holder that appeared since the plan was made.
-                raise StalePlanError(
-                    f"bookmark {bookmark!r} is now held by live workspace(s) "
-                    f"{', '.join(holders)}; re-run the plan (or pass --shared)"
-                )
-            if verify:
-                # Branches the plan keeps or resets must still hold what it saw.
-                for a in plan.actions:
-                    if a.op == "reuse":
-                        self._require_head(
-                            self.backend_for(a.kind),
-                            self.objects[a.key].locator,
-                            a.target,
-                            a.params.get("then_state"),
-                            what=f"new {a.key}",
-                        )
-                    elif a.op == "fork" and a.params.get("existing"):
-                        self._require_head(
-                            self.backend_for(a.kind),
-                            self.objects[a.key].locator,
-                            str(a.params["existing"]),
-                            a.params.get("head"),
-                            what=f"new {a.key}",
-                        )
-                    elif a.op == "fork":
-                        # Planned as a fresh branch: if one appeared since
-                        # (another checkout joined the bookmark), a fork would
-                        # reset it.
-                        m = self.objects[a.key]
-                        if a.target in self.backend_for(a.kind).list_working_refs(
-                            m.locator
-                        ):
-                            raise StalePlanError(
-                                f"new {a.key}: {a.target} exists since the plan "
-                                "was made; re-run the plan"
-                            )
             pre = {"workspace": self.workspace.to_toml(), "vcs": self.vcs.position()}
             # The heads `new` will reset are known from the plan; journal them now
             # so an interrupted run still says what it was about to replace.
@@ -3310,6 +3406,28 @@ class Repo:
                 "history_digest": history_digest,
             },
         )
+        # Unpins are justified by what history references; a commit made since
+        # the plan (here or in another checkout) may reference one of them.
+        if vcs_head is not None:
+            plan.require(
+                "vcs_head",
+                vcs_head,
+                detail="history moved since the gc plan was made (a new commit may "
+                "reference a pin it would release); re-run the plan",
+            )
+        if history_digest is not None:
+            plan.require(
+                "history_digest",
+                history_digest,
+                detail="history changed since the gc plan was made -- a commit in "
+                "this or another workspace may reference a pin it would release; "
+                "re-run the plan",
+            )
+        plan.require(
+            "manifest_hash",
+            plan.context["manifest_hash"],
+            detail="manifests changed since the gc plan was made; re-run the plan",
+        )
 
         # Unpin native refs not referenced by any manifest.
         checked_systems: set[str] = set()
@@ -3560,29 +3678,7 @@ class Repo:
         been attempted.
         """
         with self._writer_lock(), self._repo_lock():
-            if plan.command != "gc":
-                raise ConfigError(f"expected a gc plan, got {plan.command!r}")
-            # Unpins are justified by what history references; a commit made since
-            # the plan (here or in another checkout) may reference one of them.
-            head_then = plan.context.get("vcs_head")
-            if head_then is not None:
-                with contextlib.suppress(VcsError):
-                    if self._vcs_head_or_none() != head_then:
-                        raise StalePlanError(
-                            "history moved since the gc plan was made (a new commit "
-                            "may reference a pin it would release); re-run the plan"
-                        )
-            digest_then = plan.context.get("history_digest")
-            if digest_then is not None and self.vcs.history_digest() != digest_then:
-                raise StalePlanError(
-                    "history changed since the gc plan was made -- a commit in this "
-                    "or another workspace may reference a pin it would release; "
-                    "re-run the plan"
-                )
-            if plan.context.get("manifest_hash") != self.current_manifest_hash():
-                raise StalePlanError(
-                    "manifests changed since the gc plan was made; re-run the plan"
-                )
+            self._verify_plan(plan, "gc")
             report = GcReport(dry_run=False, plan=plan)
             errors: dict[str, Exception] = {}
             forgot = False
@@ -3968,6 +4064,47 @@ class Repo:
             self._refuse_partial_scopes(plan, set(selected), ("fast-forward", "merge"))
         self._share_scope_writes(plan, ("fast-forward", "merge"))
         self._refuse_trunk_regression(plan, keys, rev)
+        # Everything the check needs travels in the precondition: the object
+        # may have been removed since a `--rev` plan named it, and its base
+        # branch must still be where the plan saw it; what lands must be what
+        # was reviewed.
+        for a in plan.actions:
+            if a.op not in ("fast-forward", "merge"):
+                continue
+            locator = dict(a.params["locator"])
+            plan.require(
+                "base_state",
+                a.params["base_state"],
+                key=a.key,
+                backend=a.kind,
+                locator=locator,
+                detail=f"{a.key!r}: base branch moved since the plan was made "
+                f"({short_state(a.params['base_state'])} -> {{observed}}); "
+                "re-run the plan",
+            )
+            source = a.params.get("source") or {}
+            target_state = a.params.get("target_state")
+            if "ref" in source:
+                plan.require(
+                    "ref_head",
+                    target_state,
+                    key=a.key,
+                    backend=a.kind,
+                    locator=locator,
+                    ref=str(source["ref"]),
+                    what=f"promote {a.key}",
+                )
+            elif "pin" in source and target_state is not None:
+                plan.require(
+                    "pin_state",
+                    target_state,
+                    key=a.key,
+                    backend=a.kind,
+                    locator=locator,
+                    pin=dict(source["pin"]),
+                    detail=f"promote {a.key}: pin {source['pin'].get('ref')} no "
+                    "longer names the reviewed state ({observed}); re-run the plan",
+                )
         return plan
 
     def _refuse_trunk_regression(
@@ -4113,8 +4250,7 @@ class Repo:
             MultiObjectError: A backend failed for reasons other than conflicts.
         """
         with self._writer_lock():
-            if plan.command != "promote":
-                raise ConfigError(f"expected a promote plan, got {plan.command!r}")
+            self._verify_plan(plan, "promote", verify=False)  # command only
             report = PromoteReport(plan=plan)
             writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
             for a in plan.actions:
@@ -4126,46 +4262,7 @@ class Repo:
                 key, _, why = note.partition(": ")
                 if "already at the target" in why or "nothing to promote" in why:
                     report.skipped.append(key)
-            if verify:
-                for a in writes:
-                    # Everything the check needs travels in the action: the
-                    # object may have been removed since a `--rev` plan named
-                    # it, and its base branch must still be where the plan saw
-                    # it.
-                    locator = dict(a.params["locator"])
-                    backend = self.backend_for(a.kind)
-                    base_locator = {k: v for k, v in locator.items() if k != "at"}
-                    current = backend.fingerprint(base_locator, None)
-                    if not self._same(a.kind, current, a.params["base_state"]):
-                        raise StalePlanError(
-                            f"{a.key!r}: base branch moved since the plan was made "
-                            f"({short_state(a.params['base_state'])} -> "
-                            f"{short_state(current)}); re-run the plan"
-                        )
-                    # ... and the source: what lands must be what was reviewed.
-                    source = a.params.get("source") or {}
-                    target_state = a.params.get("target_state")
-                    if "ref" in source:
-                        self._require_head(
-                            backend,
-                            locator,
-                            str(source["ref"]),
-                            target_state,
-                            what=f"promote {a.key}",
-                        )
-                    elif "pin" in source and target_state is not None:
-                        # A pin is a name someone can move; land only what it
-                        # named when the plan was reviewed.
-                        pin = Pin.from_dict(dict(source["pin"]))
-                        checked = backend.verify(
-                            locator, dict(target_state), pin, deep=False
-                        )
-                        if checked.status is not VerifyStatus.OK:
-                            raise StalePlanError(
-                                f"promote {a.key}: pin {pin.ref} no longer names the "
-                                f"reviewed state ({checked.status.value}: "
-                                f"{checked.message}); re-run the plan"
-                            )
+            self._verify_plan(plan, "promote", verify=verify)
 
             message = str(plan.context.get("message") or "tether promote")
             by_key = {a.key: a for a in writes}
@@ -4323,6 +4420,11 @@ class Repo:
                 "workspace_id": self.workspace.workspace_id,
             },
         )
+        plan.require(
+            "manifest_hash",
+            plan.context["manifest_hash"],
+            detail="manifests changed since the plan was made; re-run the plan",
+        )
         for key in keys:
             now = self.objects.get(key)
             if now is None:
@@ -4469,21 +4571,14 @@ class Repo:
             StalePlanError: The manifests changed since the plan was made.
         """
         with self._writer_lock():
-            if plan.command != "restore":
-                raise ConfigError(f"expected a restore plan, got {plan.command!r}")
+            self._verify_plan(plan, "restore", verify=False)  # command only
             refused = [a for a in plan.actions if a.op == "refuse"]
             if refused:
                 raise TetherError(
                     "cannot restore:\n"
                     + "\n".join(f"  {a.key}: {a.detail}" for a in refused)
                 )
-            if (
-                verify
-                and plan.context.get("manifest_hash") != self.current_manifest_hash()
-            ):
-                raise StalePlanError(
-                    "manifests changed since the plan was made; re-run the plan"
-                )
+            self._verify_plan(plan, "restore", verify=verify)
             forks = [a for a in plan.actions if a.op == "fork"]
             pre = {
                 "workspace": self.workspace.to_toml(),
@@ -4628,10 +4723,7 @@ class Repo:
     def apply_forget_workspace(self, plan: Plan) -> ForgetWorkspaceReport:
         """Execute a plan from `plan_forget_workspace`; failures are reported."""
         with self._writer_lock():
-            if plan.command != "forget-workspace":
-                raise ConfigError(
-                    f"expected a forget-workspace plan, got {plan.command!r}"
-                )
+            self._verify_plan(plan, "forget-workspace")
             report = ForgetWorkspaceReport(
                 workspace=str(plan.context["workspace"]), plan=plan
             )
@@ -5176,6 +5268,16 @@ class Repo:
                     params={"locator": m.locator},
                 )
             )
+            # Planned because the branch was missing; if it is back (another
+            # checkout re-created it), do not reset it.
+            plan.require(
+                "ref_absent",
+                key=key,
+                backend=m.kind,
+                locator=dict(m.locator),
+                ref=ref,
+                detail=f"{ref} exists again since the plan was made; re-run the plan",
+            )
         if plan.is_empty:
             plan.notes.append("nothing to repair")
         return plan
@@ -5183,8 +5285,7 @@ class Repo:
     def apply_repair(self, plan: Plan) -> RepairReport:
         """Execute a plan from `plan_repair`; failures are reported, not raised."""
         with self._writer_lock():
-            if plan.command != "repair":
-                raise ConfigError(f"expected a repair plan, got {plan.command!r}")
+            self._verify_plan(plan, "repair")
             report = RepairReport(plan=plan)
             pre = {"workspace": self.workspace.to_toml()}
             op = self._begin_op("repair", plan=plan, pre=pre) if plan.writes else None
@@ -5201,14 +5302,6 @@ class Repo:
                         self._progress(op, "repin", key=a.key, target=a.target)
                     elif a.op == "refork":
                         m = self.objects[a.key]
-                        # Planned because the branch was missing; if it is back
-                        # (another checkout re-created it), do not reset it.
-                        backend = self.backend_for(m.kind)
-                        if a.target in backend.list_working_refs(m.locator):
-                            raise StalePlanError(
-                                f"{a.target} exists again since the plan was made; "
-                                "re-run the plan"
-                            )
                         ref = self._fork_from_manifest(m, a.target)
                         self._progress(op, "refork", key=a.key, ref=ref)
                         self.workspace.working_refs[a.key] = ref

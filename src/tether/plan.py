@@ -15,9 +15,77 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from tether.errors import ConfigError
+from tether.errors import ConfigError, StalePlanError
 
-PLAN_FORMAT = 1
+PLAN_FORMAT = 2
+"""Bumped when a saved plan's shape changes. Format 1 (before 0.1.0b1) had
+no `preconditions`; such a plan is refused with "re-run the plan"."""
+
+PRECONDITION_KINDS = frozenset(
+    {
+        "manifest_hash",
+        "workspace_id",
+        "vcs_head",
+        "history_digest",
+        "config_version",
+        "ref_absent",
+        "ref_head",
+        "base_state",
+        "pin_state",
+        "no_new_holders",
+    }
+)
+"""What a plan may require of the world before it is applied. Each is one
+check `Repo._verify_plan` knows how to run; a `plan_*` appends them, and
+every `apply_*` runs them all before its first action."""
+
+
+@dataclass(frozen=True)
+class Precondition:
+    """One thing that must still hold when a plan is applied.
+
+    The drift contract in data: a plan records what it saw (a manifest hash,
+    a branch head, a history digest) and apply refuses with
+    :class:`~tether.errors.StalePlanError` if the world says otherwise. Kept
+    out of `context` so the checks are typed, listed, and run in one place
+    rather than re-implemented per command.
+
+    Attributes:
+        kind: One of :data:`PRECONDITION_KINDS`.
+        expected: The value seen at plan time (a hash, a state, a commit id).
+        key: The object key, for per-object checks.
+        params: What the check needs to look again (`locator`, `backend`,
+            `ref`, `rev`, `pin`, `bookmark`).
+        detail: The refusal message; may use `{observed}`.
+    """
+
+    kind: str
+    expected: Any = None
+    key: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "expected": self.expected,
+            "key": self.key,
+            "params": dict(self.params),
+            "detail": self.detail,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Precondition:
+        kind = str(data["kind"])
+        if kind not in PRECONDITION_KINDS:
+            raise ConfigError(f"unknown plan precondition {kind!r}")
+        return cls(
+            kind=kind,
+            expected=data.get("expected"),
+            key=data.get("key"),
+            params=dict(data.get("params") or {}),
+            detail=str(data.get("detail", "")),
+        )
 
 
 @dataclass
@@ -75,6 +143,8 @@ class Plan:
     apply re-validates these before writing."""
     notes: list[str] = field(default_factory=list)
     """Non-actions worth showing (objects skipped and why)."""
+    preconditions: list[Precondition] = field(default_factory=list)
+    """What must still hold at apply time; see :class:`Precondition`."""
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
@@ -93,6 +163,22 @@ class Plan:
     def is_empty(self) -> bool:
         return not self.writes
 
+    def require(
+        self,
+        kind: str,
+        expected: Any = None,
+        *,
+        key: str | None = None,
+        detail: str = "",
+        **params: Any,
+    ) -> None:
+        """Append a precondition (see :class:`Precondition`)."""
+        if kind not in PRECONDITION_KINDS:
+            raise ValueError(f"unknown precondition kind {kind!r}")
+        self.preconditions.append(
+            Precondition(kind, expected, key=key, params=params, detail=detail)
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "format": PLAN_FORMAT,
@@ -100,6 +186,7 @@ class Plan:
             "created_at": self.created_at,
             "context": self.context,
             "notes": list(self.notes),
+            "preconditions": [p.to_dict() for p in self.preconditions],
             "actions": [a.to_dict() for a in self.actions],
         }
 
@@ -108,13 +195,22 @@ class Plan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Plan:
-        if int(data.get("format", PLAN_FORMAT)) != PLAN_FORMAT:
-            raise ConfigError(f"unsupported plan format {data.get('format')!r}")
+        fmt = int(data.get("format", PLAN_FORMAT))
+        if fmt == 1:
+            raise StalePlanError(
+                "plan format 1 predates 0.1.0b1 and carries no preconditions; "
+                "re-run the plan"
+            )
+        if fmt != PLAN_FORMAT:
+            raise ConfigError(f"unsupported plan format {fmt!r}")
         return cls(
             command=str(data["command"]),
             actions=[Action.from_dict(a) for a in data.get("actions", [])],
             context=dict(data.get("context") or {}),
             notes=[str(n) for n in data.get("notes", [])],
+            preconditions=[
+                Precondition.from_dict(p) for p in data.get("preconditions", [])
+            ],
             created_at=str(data.get("created_at", "")),
         )
 

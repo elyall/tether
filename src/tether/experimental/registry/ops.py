@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tether.backends.base import absolutize_locator
-from tether.errors import ConfigError, StalePlanError
+from tether.errors import ConfigError
 from tether.experimental.registry.export import ExportBundle, build_bundle
 from tether.experimental.registry.registry import ImportSpec, specs_from_rows
 from tether.manifest import Policy, write_object, write_workspace
@@ -101,6 +101,11 @@ def plan_import(
         },
         notes=list(notes),
     )
+    plan.require(
+        "manifest_hash",
+        plan.context["manifest_hash"],
+        detail="manifests changed since the plan was made; re-run the plan",
+    )
     wanted = {s.key: s for s in specs}
     for key in sorted(wanted):
         spec = wanted[key]
@@ -168,12 +173,7 @@ def apply_import(repo: Repo, plan: Plan, *, verify: bool = True) -> ImportReport
         StalePlanError: The working tree's manifests changed since planning.
     """
     with repo._writer_lock():
-        if plan.command != "import":
-            raise ConfigError(f"expected an import plan, got {plan.command!r}")
-        if verify and plan.context.get("manifest_hash") != repo.current_manifest_hash():
-            raise StalePlanError(
-                "manifests changed since the plan was made; re-run the plan"
-            )
+        repo._verify_plan(plan, "import", verify=verify)
         report = ImportReport(plan=plan)
         for note in plan.notes:
             key, _, why = note.partition(": ")

@@ -146,26 +146,31 @@ otherwise (`StalePlanError`). The Python API exposes the same pairs:
 `plan_commit`/`apply_commit`, `plan_new`/`apply_new`, `plan_gc`/`apply_gc`,
 and so on.
 
-The re-check extends to every ref a plan will delete or reset: the plan
-records the head it saw, and apply reads the head again immediately before
-the step. A branch that gained writes between plan and apply -- a saved gc
-plan applied the next day, a slow `promote` -- stops the whole apply with
-`StalePlanError` instead of losing them, and the check runs over the whole
-plan before the first action, so a stale plan does nothing at all. A gc plan
-is also bound to a digest of *every* visible commit -- a bookmark committed in
-another workspace may reference a pin it would release, without this
-checkout's head moving. `promote --rev` verifies that a pin source still names
-the reviewed state, `new` refuses when it cannot list a system's branches
-(not knowing is not the same as absent), and a lazy fork on first writable
-`open` resets an existing branch only onto the head `new` reviewed and agreed
-to reset. A branch that moves *after* gc's preflight -- a race, not a stale
-plan -- is kept and reported while the rest of the plan finishes. `promote`
-lands the *state* the plan reviewed -- fast-forward and merge alike -- not
-the source branch's head at apply time, so a fork write that slips in between
-plan and apply is not promoted by accident. The convenience forms (`tether
-new`, `tether promote`, `tether commit`, the Python `Repo.new()`, ...) plan
-and apply under one lock and re-verify at apply; `commit` needs no
-re-verification, since a pin names the state the plan captured.
+**Preconditions are the drift contract.** What a plan saw is recorded on
+the plan itself as typed `preconditions` (`Plan.preconditions`, visible in a
+saved plan's JSON): the manifest hash, this workspace's id, the head of every
+branch the plan will keep, reset, or create afresh (`ref_head`,
+`ref_absent`), a gc plan's VCS head and a digest of *every* visible commit
+(a bookmark committed in another workspace may reference a pin it would
+release, without this checkout's head moving), a promote's base-branch state
+and the state its source names (`base_state`, `ref_head`, `pin_state`), an
+upgrade's dataset version. Every `apply_*` runs them all -- one
+`_verify_plan` -- before its first action, and the first mismatch stops the
+whole apply with `StalePlanError` carrying the plan's own message, so a stale
+plan does nothing at all. A saved plan from before 0.1.0b1 (plan format 1)
+carries no preconditions and is refused with "re-run the plan".
+
+What is *not* a precondition is a race during apply, handled per action: a
+branch that moves after gc's preflight is kept and reported while the rest of
+the plan finishes; `commit` re-fingerprints each object against one snapshot;
+`promote` lands the *state* the plan reviewed -- fast-forward and merge
+alike -- not the source branch's head at apply time, so a fork write that
+slips in between is not promoted by accident. `new` refuses when it cannot
+list a system's branches (not knowing is not the same as absent), and a lazy
+fork on first writable `open` resets an existing branch only onto the head
+`new` reviewed and agreed to reset. The convenience forms (`tether new`,
+`tether promote`, `tether commit`, the Python `Repo.new()`, ...) plan and
+apply under one lock and verify at apply all the same.
 
 ## The operation log
 

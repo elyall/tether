@@ -89,6 +89,14 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
 
 ### Changed
 
+- **Plan preconditions.** What a plan saw is recorded as typed
+  `Plan.preconditions` (`manifest_hash`, `workspace_id`, `vcs_head`,
+  `history_digest`, `config_version`, `ref_absent`, `ref_head`, `base_state`,
+  `pin_state`, `no_new_holders`) instead of being re-implemented inline per
+  command; one `Repo._verify_plan()` runs them before any `apply_*` acts.
+  Saved plans are format 2; a format-1 plan (before 0.1.0b1) is refused with
+  "re-run the plan". Same semantics for every command, one place to audit
+  the drift contract.
 - Hygiene: `forget-workspace` lost its dead `delete-branch`/`keep-branch`
   actions and the `--force-prune` compatibility flag (branches belong to
   bookmarks; `gc --prune-bookmarks` judges them); `Handle.key` is documented

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 import uuid
@@ -1921,7 +1922,11 @@ def test_stale_new_plan_does_not_move_the_working_copy(vcs_root: Path) -> None:
     assert c1 and c2
     plan = repo.plan_new(c1)
     # The manifests at c1 change (someone rewrote history); the plan is stale.
-    plan.context["manifest_hash"] = "not-what-is-there"
+    # `context` is informational; the precondition is what apply checks.
+    (pre,) = [p for p in plan.preconditions if p.kind == "manifest_hash"]
+    plan.preconditions[plan.preconditions.index(pre)] = dataclasses.replace(
+        pre, expected="not-what-is-there"
+    )
     here = repo.vcs.current_rev()
     with pytest.raises(StalePlanError):
         repo.apply_new(plan)
