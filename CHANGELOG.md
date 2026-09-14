@@ -67,6 +67,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`undo` reverses what an operation created, and reports the rest.**
+  `undo new`/`fork`/`restore` delete the branches the op created and restore
+  `workspace.toml` and the VCS position; a branch the op *reset* is no longer
+  re-pointed to a recorded head (the store may not allow it and the head to
+  choose is yours) -- it is reported with its old head and the tool that
+  moves it (`restore KEY --from REV`, `new --discard`). `undo gc` restores
+  forgotten working refs and listings but no longer recreates deleted
+  branches (`repair` does, from the manifests). `undo --to` and
+  `Repo.undo_to` are gone: several slips are several `undo`s, newest first.
 - **`tether.experimental`.** The backends tested only against fakes (Neon,
   lakeFS, Dolt, DuckLake, Iceberg) moved to `tether.experimental.backends`,
   and the registry layer (`export`, `publish`, `import`) to

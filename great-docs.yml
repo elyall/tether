@@ -78,7 +78,6 @@ reference:
         - SetReport
         - PromoteReport
         - UndoReport
-        - UndoToReport
         - RepairReport
         - UpgradeReport
         - DiffEntry
@@ -130,13 +129,13 @@ reference:
       desc: Capability-parametrized checks for backend authors.
       contents:
         - testing
-    - title: Registries
+    - title: Registries (experimental)
       desc: >-
         Export tables (`ExportBundle`, `TABLES`), Postgres publishing, and the
-        canonical import columns / sources for `import`.
+        canonical import columns / sources for `import`. Lives under
+        `tether.experimental.registry`; import the public names from `tether`.
       contents:
-        - export
-        - registry
+        - experimental.registry
         - ImportReport
     - title: VCS adapters
       desc: How tether reads and writes history through jj or git.

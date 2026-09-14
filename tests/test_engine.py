@@ -2313,9 +2313,13 @@ def test_undo_new_deletes_created_branches_and_restores_the_workspace(
     )
 
 
-def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
+def test_undo_new_reports_reset_branches_and_restores_the_working_copy(
     vcs_root: Path,
 ) -> None:
+    """`undo new` deletes the branches the op created; a branch it *reset* is
+    not re-pointed (the store may not allow it, and the head to choose is the
+    user's call) -- the report names the old head and points at `restore` /
+    `new --discard`. The workspace and VCS position still come back."""
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     store = default_store()
@@ -2331,14 +2335,17 @@ def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
     repo.vcs.bookmark_set("work", c1)
     pos_before_new = repo.vcs.position()
     repo.new("work", eager=True)
-    assert store.resolve(system, wref) != s_work
+    after_reset = store.resolve(system, wref)
+    assert after_reset != s_work
     entry = repo.ops()[0]
     assert entry.command == "new" and entry.result["reset"] == ["db"]
     assert entry.pre["heads"]["db"] == {"snapshot_id": s_work}
 
     report = repo.undo()
-    assert report.complete, report
-    assert store.resolve(system, wref) == s_work  # head re-pointed
+    assert not report.complete  # the reset is reported, not reversed
+    assert store.resolve(system, wref) == after_reset  # untouched
+    (line,) = report.irreversible
+    assert "was reset" in line and s_work[:8] in line and "tether restore db" in line
     # Working copy back where it was before `new`: git returns to the
     # branch/commit; jj cannot revive the abandoned empty change, so it opens
     # a fresh one on the same parent.
@@ -2352,7 +2359,11 @@ def test_undo_new_restores_reset_branch_heads_and_the_working_copy(
     assert repo.is_stale() == (repo.vcs.kind == "git")
 
 
-def test_undo_gc_recreates_branches_but_not_pins(vcs_root: Path) -> None:
+def test_undo_gc_recreates_neither_branches_nor_pins(vcs_root: Path) -> None:
+    """What gc deleted from the stores stays deleted: `repair` recreates a
+    bookmark's branches from its manifests, and pins while the state is still
+    reachable. `undo gc` restores what it can (forgotten working refs,
+    listings) and says the rest plainly."""
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     store = default_store()
@@ -2372,12 +2383,12 @@ def test_undo_gc_recreates_branches_but_not_pins(vcs_root: Path) -> None:
     )
     report = repo.undo()
     assert not report.complete
-    assert stray in store.system(system).branches  # branch back from its head
-    assert any("recreated" in line for line in report.restored)
-    assert any(
-        "pin(s) deleted" in line and "repair" in line for line in report.irreversible
-    )
-    assert orphan not in backend.list_pins(locator)  # honestly gone
+    text = "\n".join(report.irreversible)
+    assert "branch(es) deleted" in text and stray in text and "repair" in text
+    assert "pin(s) deleted" in text
+    assert not any("recreated" in line for line in report.restored)
+    assert stray not in store.system(system).branches  # honestly gone
+    assert orphan not in backend.list_pins(locator)
     assert repo.ops()[0].command == "undo" and repo.ops()[1].undone_by
 
 
@@ -2537,57 +2548,6 @@ def test_abandon_frees_the_pins_only_those_commits_referenced(vcs_root: Path) ->
     assert p1.id in backend.list_pins(locator)
 
 
-def test_undo_to_walks_back_through_several_operations(vcs_root: Path) -> None:
-    repo = Repo.init(vcs_root)
-    system = _mem_object(repo)
-    store = default_store()
-    repo.commit("baseline")
-    anchor = repo.ops()[0]  # the state right after this commit is the goal
-    manifest = repo.objects["db"]
-
-    repo.new(bookmark="work", eager=True)
-    wref = repo.workspace.working_refs["db"]
-    store.write(system, wref, {"v": 2})
-    repo.commit("work")
-    repo.add("other", "memory", {"system": system, "branch": "main"})
-
-    walk = repo.undo_to(anchor.id)
-    assert walk.complete and [r.op.command for r in walk.reports] == [
-        "add",
-        "commit",
-        "new",
-    ]
-    assert "other" not in repo.objects
-    assert wref not in store.system(system).branches  # new's branch deleted
-    # The "work" commit is uncommitted, not reverted: the VCS is back at the
-    # anchor and the manifest change sits in the working tree with its pin.
-    parent = "@-" if repo.vcs.kind == "jj" else "HEAD"
-    assert repo.vcs.resolve(parent) == anchor.result["vcs_commit"]
-    assert repo.objects["db"].pin != manifest.pin and repo.vcs.dirty(repo._vcs_paths())
-    assert "db" not in repo.workspace.working_refs
-    assert [e.command for e in repo.ops()[:3]] == ["undo", "undo", "undo"]
-    by_id = {e.id: e for e in repo.ops()}
-    assert all(by_id[r.op.id].undone_by == r.undo_id for r in walk.reports)
-    assert by_id[anchor.id].undone_by is None  # the target itself stays
-
-    # A non-undoable op (promote) stops the walk; what came before it in the
-    # walk stays undone and the report says where it stopped.
-    repo.new(bookmark="work", eager=True)  # the undo deleted the bookmark too
-    wref = repo.workspace.working_refs["db"]
-    store.write(system, wref, {"v": 3})
-    repo.commit("more work")
-    repo.promote(["db"])
-    repo.add("third", "memory", {"system": system, "branch": "main"})
-    walk = repo.undo_to(anchor.id)
-    assert not walk.complete
-    assert [r.op.command for r in walk.reports] == ["add"]
-    assert walk.stopped_at is not None and walk.stopped_at.command == "promote"
-    assert "only fast-forwards" in str(walk.reason)
-    assert "third" not in repo.objects
-    with pytest.raises(TetherError, match="no operation"):
-        repo.undo_to("nope00000000")
-
-
 def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None:
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
@@ -2625,8 +2585,9 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     repo.commit("back to v1 and on")
     assert repo.objects["db"].state == {"snapshot_id": store.resolve(system, wref)}
 
-    # Writes on the branch block a restore without --discard; undo puts the
-    # branch back where it was before the restore.
+    # Writes on the branch block a restore without --discard. Undo of a
+    # restore that *reset* the branch does not re-point it: it says what the
+    # head was and leaves the move to `restore`.
     s_scratch = store.write(system, wref, {"v": "scratch"})
     plan = repo.plan_restore(["db"], c1)
     assert [a.op for a in plan.actions] == ["refuse"]
@@ -2635,8 +2596,10 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     repo.restore(["db"], c1, discard=True)
     assert store.resolve(system, wref) == s1
     report = repo.undo()
-    assert report.op.command == "restore" and report.complete
-    assert store.resolve(system, wref) == s_scratch  # recorded head restored
+    assert report.op.command == "restore" and not report.complete
+    assert store.resolve(system, wref) == s1  # left where restore put it
+    (line,) = report.irreversible
+    assert "was reset" in line and s_scratch[:8] in line and "tether restore db" in line
 
     # Not registered at that commit, or on the trunk: refused in the plan.
     with pytest.raises(ConfigError):

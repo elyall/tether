@@ -420,27 +420,6 @@ class UndoReport:
 
 
 @dataclass
-class UndoToReport:
-    """What `Repo.undo_to` reversed on the way back to an operation.
-
-    Attributes:
-        target: The operation whose *after* state was the goal.
-        reports: One `UndoReport` per operation reversed, newest first.
-        stopped_at: The operation the walk could not get past, if any.
-        reason: Why it stopped there.
-    """
-
-    target: OpEntry
-    reports: list[UndoReport] = field(default_factory=list)
-    stopped_at: OpEntry | None = None
-    reason: str | None = None
-
-    @property
-    def complete(self) -> bool:
-        return self.stopped_at is None and all(r.complete for r in self.reports)
-
-
-@dataclass
 class DiffEntry:
     """One object's row in `Repo.diff`."""
 
@@ -4903,15 +4882,17 @@ class Repo:
           working copy's parent; the pins it made stay, still referenced by
           the working-tree manifests. Committed with `vcs=False`: the
           manifests are restored from before.
-        - `new` / `fork`: branches the op created are deleted; branches it
-          reset are re-pointed to their recorded heads where the backend can
-          fork from a state; `workspace.toml` is restored; the VCS working
-          copy returns to where it was if it has not moved since. A branch
-          that gained writes since the op is refused unless `discard`.
-        - `gc`: deleted branches are recreated from their recorded heads
-          where the backend can; deleted listings come back from the VCS;
-          the workspace is restored. Deleted pins are *irreversible* --
-          `repair` recreates them once a manifest references them again.
+        - `new` / `fork` / `restore`: branches the op *created* are deleted;
+          `workspace.toml` is restored; the VCS working copy returns to where
+          it was if it has not moved since. A branch the op *reset* is not
+          re-pointed -- the report names its old head and `restore` /
+          `new --discard` put it where you want. A created branch that gained
+          writes since the op is refused unless `discard`.
+        - `gc`: forgotten working refs and deleted listings come back (the
+          latter from the VCS); the workspace is restored. Deleted branches
+          and pins are *irreversible* -- `repair` recreates a bookmark's
+          branches from its manifests, and pins once a manifest references
+          them again.
         - `import` / `add` / `remove`: manifests and workspace restored.
         - `promote`: refused; the base heads before the move are printed
           for a manual reset (backends only fast-forward).
@@ -5003,47 +4984,6 @@ class Repo:
             report.undo_id = entry.id
             return report
 
-    def undo_to(self, op_id: str, *, discard: bool = False) -> UndoToReport:
-        """Undo every operation newer than `op_id`, newest first.
-
-        The closest thing to `jj op restore`: jj's log stores whole views, so
-        a restore is one exact jump; tether's stores per-operation deltas, so
-        getting back to the state after `op_id` means reversing each later
-        operation in turn. Entries that are undos, or already undone, are
-        skipped. The walk stops -- with everything reversed so far kept -- at
-        the first operation that is not undoable (`promote`, `gc` pins,
-        `upgrade`, `abandon`) or refuses (a branch with new writes and no
-        `discard`); a *partial* undo (some parts irreversible) is recorded and
-        the walk continues, since older operations are unaffected by it.
-
-        Raises:
-            TetherError: `op_id` is not in this workspace's log.
-        """
-        with self._writer_lock():
-            entries = self.ops()
-            try:
-                idx = next(i for i, e in enumerate(entries) if e.id == op_id)
-            except StopIteration:
-                raise TetherError(
-                    f"no operation {op_id!r} in this workspace's log"
-                ) from None
-            report = UndoToReport(target=entries[idx])
-            for e in entries[:idx]:
-                if e.undoes is not None or e.undone_by is not None:
-                    continue
-                if not e.undoable:
-                    report.stopped_at, report.reason = (
-                        e,
-                        f"{e.command} cannot be undone",
-                    )
-                    break
-                try:
-                    report.reports.append(self.undo(e.id, discard=discard))
-                except TetherError as exc:
-                    report.stopped_at, report.reason = e, str(exc)
-                    break
-            return report
-
     def _reload(self) -> None:
         self.objects = read_objects(self.root)
         self.workspace = read_workspace(self.root)
@@ -5099,11 +5039,15 @@ class Repo:
         created: Mapping[str, str],
         reset: Mapping[str, str],
     ) -> None:
-        """Delete branches an op created; re-point the ones it reset."""
-        # Refuse before touching anything if a branch gained writes since.
+        """Delete the branches an op *created*. Branches it reset are reported
+        with the head they had: putting a branch back at an old state is a
+        `restore`/`new --discard` you choose, not something undo guesses at
+        (the branch may have children, pins, or a store that cannot re-point).
+        """
+        # Refuse before touching anything if a created branch gained writes.
         if not discard:
             dirty = []
-            for key, ref in {**created, **reset}.items():
+            for key, ref in created.items():
                 head = self._branch_has_new_writes(key, ref)
                 if head is not None:
                     dirty.append(f"{key}: {ref} has writes since ({short_state(head)})")
@@ -5124,26 +5068,12 @@ class Repo:
             except TetherError as exc:
                 report.irreversible.append(f"{key}: could not delete {ref}: {exc}")
         for key, ref in sorted(reset.items()):
-            m = self.objects.get(key)
             head = heads.get(key)
-            if m is None:
-                report.skipped.append(f"{key}: object no longer registered; {ref} left")
-                continue
-            backend = self.backend_for(m.kind)
-            eff = effective_capabilities(backend, m.locator, m.policy)
-            if head is None or Capability.ADDRESSABLE not in eff:
-                report.irreversible.append(
-                    f"{key}: {ref} was reset and its previous head "
-                    f"{'is unknown' if head is None else 'cannot be re-pointed to'}"
-                )
-                continue
-            try:
-                backend.fork(m.locator, dict(head), ref)
-                report.restored.append(f"{key}: {ref} back at {short_state(head)}")
-            except TetherError as exc:
-                report.irreversible.append(
-                    f"{key}: {ref} could not go back to {short_state(head)}: {exc}"
-                )
+            was = f" (was {short_state(head)})" if head is not None else ""
+            report.irreversible.append(
+                f"{key}: {ref} was reset{was}; `tether restore {key} --from REV` or "
+                f"`tether new --discard` puts it where you want"
+            )
 
     def _undo_commit(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         commit = entry.result.get("vcs_commit")
@@ -5210,38 +5140,21 @@ class Repo:
         self._restore_workspace(entry, report)
 
     def _undo_gc(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
-        plan = Plan.from_dict(entry.plan) if entry.plan else Plan(command="gc")
         r = entry.result
-        deleted = {
+        deleted = sorted(
             ref
             for refs in (r.get("deleted_working_refs") or {}).values()
             for ref in refs
-        }
-        for a in plan.actions:
-            if a.op == "delete-branch" and a.target in deleted:
-                head = a.params.get("head")
-                backend = self.backend_for(a.kind)
-                locator = dict(a.params["locator"])
-                if head is None:
-                    report.irreversible.append(
-                        f"{a.target}: deleted; its head was not recorded"
-                    )
-                    continue
-                if Capability.ADDRESSABLE not in backend.capabilities:
-                    report.irreversible.append(
-                        f"{a.target}: deleted; {a.kind} cannot recreate a branch "
-                        "from a state"
-                    )
-                    continue
-                try:
-                    backend.fork(locator, dict(head), a.target)
-                    report.restored.append(
-                        f"{a.target}: recreated at {short_state(head)}"
-                    )
-                except TetherError as exc:
-                    report.irreversible.append(
-                        f"{a.target}: could not recreate at {short_state(head)}: {exc}"
-                    )
+        )
+        if deleted:
+            # A branch gc judged dead is not recreated from a recorded head:
+            # `repair` recreates missing branches from what the manifests say,
+            # which is the state that matters.
+            report.irreversible.append(
+                f"{len(deleted)} branch(es) deleted ({', '.join(deleted[:3])}"
+                f"{', ...' if len(deleted) > 3 else ''}); `tether repair` recreates "
+                "a bookmark's branches from its manifests"
+            )
         n_pins = sum(len(v) for v in (r.get("unpinned") or {}).values())
         if n_pins:
             report.irreversible.append(

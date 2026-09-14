@@ -23,12 +23,14 @@ unless `--force` -- but nothing coordinates two systems.
 **What `undo` can and cannot do.** `jj undo` / `git reset` move the
 manifests, never the stores. `tether undo` covers tether's side from its
 [operation log](02-concepts.qmd#the-operation-log): a commit is uncommitted
-(pins kept), a `new`'s branches are deleted or re-pointed to their recorded
-heads, a `gc`'s branches come back but its released pins do not (`tether
-repair` recreates them once a manifest references them again, while the
-snapshot still exists), a `promote` is refused with the previous heads printed.
-A branch that gained writes is never reset or deleted without `--discard` --
-by `undo` or by `new`.
+(pins kept); the branches a `new`, `fork`, or `restore` *created* are deleted,
+and a branch one of them *reset* is reported with its old head for you to
+`restore` (undo never guesses where a branch should go); a `gc`'s forgotten
+working refs and listings come back but its deleted branches and released
+pins do not (`tether repair` recreates them from the manifests once a
+manifest references them again, while the snapshot still exists); a `promote`
+is refused with the previous heads printed. A branch that gained writes is
+never deleted without `--discard` -- by `undo` or by `new`.
 
 **Icechunk never reuses a deleted tag name.** A `tether.*` tag deleted by
 hand, or released by a `gc` you then regret, cannot be recreated under the

@@ -28,7 +28,7 @@ tether gc [--dry-run | --no-dry-run] [--prune-bookmarks [--keep-bookmark NAME]..
 tether abandon REV... [--gc]
 tether forget-workspace [WORKSPACE_ID] [--dry-run | --plan FILE | --from-plan FILE]
 tether ops [-n N]
-tether undo [OP_ID | --to OP_ID] [--discard]
+tether undo [OP_ID] [--discard]
 tether repair [--all-history] [--dry-run | --plan FILE | --from-plan FILE]
 tether upgrade [--ignore-immutable] [--dry-run | --plan FILE | --from-plan FILE]
 tether export PATH [--rev REV]... [--format sqlite|parquet|csv|jsonl] [--listings] [--workspace] [--append]
@@ -305,9 +305,9 @@ undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
 | Undoing a... | Does | Refused when |
 | --- | --- | --- |
 | `commit` | uncommits it (jj: squash into `@`; git: `reset --soft`); manifests become working-tree edits; pins stay | it is no longer the working copy's parent |
-| `new`, lazy fork | deletes branches it created, re-points branches it reset to their recorded heads, restores `workspace.toml`, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made | a branch gained writes since (commit them, or `--discard`) |
+| `new`, lazy fork, `restore` | deletes the branches it *created*, restores `workspace.toml`, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made; a branch it *reset* is reported with its old head (`IRREVERSIBLE`, exit `2`) -- `restore KEY --from REV` or `new --discard` puts it where you want | a created branch gained writes since (commit them, or `--discard`) |
 | `pull` | uncommits it like a `commit`; pins stay | it is no longer the working copy's parent |
-| `gc` | recreates deleted branches and listings; deleted *pins* cannot come back and print as `IRREVERSIBLE` (exit `2`) | -- |
+| `gc` | restores forgotten working refs and deleted listings; deleted *branches* and *pins* stay deleted and print as `IRREVERSIBLE` (exit `2`) -- `repair` recreates a bookmark's branches from its manifests, and pins while the state is reachable | -- |
 | `add`, `remove`, `import` | restores the manifests | -- |
 | `promote` | -- | always; the previous upstream heads are printed (the trunk bookmark: `jj bookmark set main -r <before>`) |
 | `repair`, `upgrade`, `abandon`, `forget-workspace` | -- | always |
@@ -318,10 +318,11 @@ dataset commit), `tether status` prints a `warning:` per vanished commit and
 manifests as uncommitted edits -- commit again; an *abandoned* one reverts
 them -- `gc` releases its pins, `repair` recreates them if it comes back.
 
-`tether undo --to OP_ID` undoes every newer operation, newest first, and stops
--- keeping what it already reversed -- at the first it cannot undo. It is not
-`jj op restore`: tether's log holds per-op deltas, not whole views, so the walk
-is stepwise. Exit `2` unless every step was complete.
+The rule for the store side: `undo` deletes what an operation *created* and
+never guesses where something it *reset* should go. Several slips in a row are
+several `undo`s, newest first (there is no `--to`; tether's log holds per-op
+deltas, not whole views, and a walk that stops half-way is worse than one step
+you can see).
 
 `tether repair` rebuilds what the manifests promise: a pin whose native ref is
 missing is recreated from the recorded state (if the store still has it); a
@@ -386,8 +387,10 @@ manifests, and the VCS working copy stay. The object is *not* stale
 afterwards: the next `commit` pins what you restored. Its fork point moves to
 `REV`'s state, so `promote` treats a base that moved since as a divergence
 (merge or refuse), not a fast-forward. A branch holding writes you never
-committed is refused unless `--discard`; `undo` puts the branch back to the
-head it had. Plan/apply like the others.
+committed is refused unless `--discard`. `undo` of a restore deletes the
+branch if the restore *created* it and otherwise reports the head it had:
+`restore` again, from the commit you want, is the way back. Plan/apply like
+the others.
 
 ## What `promote` does
 
@@ -481,7 +484,6 @@ per-table counts.
 | `forget-workspace` | `{"workspace": id8, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "removed_files": [paths], "vcs": str or null, "failed": {target: reason}}`; with `--dry-run`: the plan |
 | `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by", "vcs_commit_gone"}]`, newest first |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
-| `undo --to` | `{"to": op id, "undone": [{"op", "command", "undo_id", "restored", "irreversible", "skipped"}], "stopped_at": op id or null, "reason"}` |
 | `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |
 | `upgrade` | `{"from_version", "to_version", "renamed_pins": {old ref: new ref}, "renamed_branches": {old: new}, "rewritten_commits": {old id: new id}, "failed": {target: reason}, "vcs_commit"}`; with `--dry-run`: the plan |
 | plan | `{"format": 1, "command", "created_at", "context": {...}, "notes": [str], "actions": [{"op", "key", "kind", "target", "detail", "params": {...}}]}` -- what `--plan FILE` writes and `--from-plan` reads |

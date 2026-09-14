@@ -21,7 +21,6 @@ import contextlib
 import datetime
 import hashlib
 import io
-import json
 import os
 import re
 import shutil
@@ -780,12 +779,23 @@ def test_use_cases_story(
     story.tether("restore", "restore", "zarr/imaging", "--from", q3)
     story.tether("status-restored", "status", "--snapshot")
     story.tether("undo-restore", "undo")
-    # Two more slips, walked back together.
+    trial4_commit = story.jj_value(
+        "log",
+        "--no-graph",
+        "-r",
+        'subject("sweep: trial 4")',
+        "-T",
+        "commit_id.short(12)",  # hex: the harness normalises it
+    )
+    story.tether(
+        "restore-back", "restore", "zarr/imaging", "--from", trial4_commit, "--discard"
+    )
+    # Two more slips, undone one at a time, newest first.
     story.tether("restore-features", "restore", "features", "--from", q3)
     story.tether("new-again", "new", "-b", "again", "--eager")
-    ops = json.loads(story.tether_quiet("ops", "-n", "3", "--json"))
     story.tether("ops-again", "ops", "-n", "3")
-    story.tether("undo-to", "undo", "--to", ops[2]["id"])
+    story.tether("undo-again", "undo")
+    story.tether("undo-restore-features", "undo")
     story.jj("log-recovered", "log", "-r", "main::@")
 
     if registry_dsn is None:
