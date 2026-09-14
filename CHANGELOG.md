@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0a10] - 2026-09-13
+
+0.1.0a9 was tagged in history but never published; a10 is the first release
+carrying both sets of changes. Datasets created with a8 need `tether upgrade`
+(v3 and v4 migrations; working tree only, no history rewrite).
+
 ### Added
 
 - **The op log is a journal.** Store-writing commands (`commit`, `pull`,
