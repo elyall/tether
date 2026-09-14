@@ -39,7 +39,7 @@ GITIGNORE_FILENAME = ".gitignore"
 REF_PREFIX = "tether."
 CONFIG_VERSION = 4
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
-older datasets forward one migration at a time (see `tether.migrations`)."""
+older datasets forward (see `tether.upgrade`; removed at 0.1.0)."""
 
 FileMode = Literal["immutable", "versioned"]
 PinMode = Literal["native", "record"]

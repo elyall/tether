@@ -1321,7 +1321,7 @@ def upgrade(
 ) -> None:
     """Bring a dataset made by an older tether up to this version.
 
-    Runs every pending migration in order (see `tether.migrations`), writing
+    Runs every pending migration in order (see `tether.upgrade`), writing
     the new `[tether] version` after each. When a migration changes how native
     refs are named it renames them in every store and rewrites every historical
     manifest to match, so `gc` keeps seeing the same pins from both sides.

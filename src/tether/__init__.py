@@ -26,7 +26,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 
-from tether import backends, handles, migrations, oplog, testing, vcs
+from tether import backends, handles, oplog, testing, vcs
 from tether.errors import (
     BackendError,
     CapabilityError,
@@ -55,7 +55,6 @@ from tether.manifest import (
     working_ref_name,
     working_ref_workspace,
 )
-from tether.migrations import UpgradeReport
 from tether.oplog import OpEntry
 from tether.plan import Action, Plan
 from tether.repo import (
@@ -123,7 +122,6 @@ __all__ = [
     "handles",
     "listing_name",
     "manifest_hash",
-    "migrations",
     "oplog",
     "ref_for_pin",
     "specs_from_rows",
@@ -135,10 +133,12 @@ __all__ = [
 ]
 
 # The registry layer (`export`, `publish`, `import`) is experimental and lives
-# under `tether.experimental`. Its public names stay importable from `tether`
-# -- that is the stable surface -- but are resolved on first access, so
-# `import tether` loads none of it.
-_EXPERIMENTAL_EXPORTS = {
+# under `tether.experimental`; the alpha-format upgrade path lives under
+# `tether.upgrade` until 0.1.0. Their public names stay importable from
+# `tether` -- that is the stable surface -- but are resolved on first access,
+# so `import tether` loads none of it.
+_LAZY_EXPORTS = {
+    "UpgradeReport": "tether.upgrade",
     "ExportBundle": "tether.experimental.registry",
     "ImportReport": "tether.experimental.registry",
     "ImportSpec": "tether.experimental.registry",
@@ -149,7 +149,7 @@ _EXPERIMENTAL_EXPORTS = {
 
 
 def __getattr__(name: str) -> object:
-    module = _EXPERIMENTAL_EXPORTS.get(name)
+    module = _LAZY_EXPORTS.get(name)
     if module is None:
         raise AttributeError(f"module 'tether' has no attribute {name!r}")
     from importlib import import_module
@@ -160,7 +160,7 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_EXPERIMENTAL_EXPORTS))
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 
 try:

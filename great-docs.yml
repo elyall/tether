@@ -90,7 +90,7 @@ reference:
     - title: Migrations
       desc: Stacked upgrades behind `tether upgrade`; append a `Migration` when the format changes.
       contents:
-        - migrations
+        - upgrade
     - title: Plans
       desc: >-
         What a store-writing command would do, as data. `Repo.plan_*` returns a

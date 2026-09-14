@@ -75,6 +75,18 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
   suffix is no longer mistaken for a legacy workspace id; `new -b` refuses a
   bookmark name ending in `.<number>`.
 
+### Deprecated
+
+- **The alpha upgrade path.** `tether.upgrade` (the one composed migration
+  from any 0.1.0aN format, its history rewriters, and the legacy working-ref
+  parsing) ships with the 0.1.0 betas and is removed at 0.1.0. After that, a
+  dataset at an alpha version fails at open with a message naming the last
+  beta: install `tether-vcs==<last beta>`, run `tether upgrade`, reinstall.
+  `Repo.plan_upgrade` / `apply_upgrade` / `upgrade` are thin delegates that
+  import the package on first use; `repo.py` and `vcs.py` read without it.
+  `tether.migrations` is now `tether.upgrade.migrations`; `UpgradeReport`
+  still imports from `tether`.
+
 ### Changed
 
 - Hygiene: `forget-workspace` lost its dead `delete-branch`/`keep-branch`

@@ -632,7 +632,7 @@ def test_any_alpha_version_upgrades_in_one_step(vcs_root: Path, start: int) -> N
     parts run on what the dataset shows, so a dataset whose manifests already
     have the current shape gets only the version change."""
     from tether.manifest import CONFIG_VERSION
-    from tether.migrations import pending
+    from tether.upgrade import pending
 
     if start == 1:
         _v1_dataset(vcs_root)
@@ -683,3 +683,28 @@ def test_any_alpha_version_upgrades_in_one_step(vcs_root: Path, start: int) -> N
     # The op log holds the single upgrade with its parts.
     (op,) = [e for e in fresh.ops() if e.command == "upgrade"]
     assert op.plan is not None and op.plan["context"]["parts"] == parts
+
+
+def test_upgrade_is_a_lazy_boundary_with_a_removal_message(vcs_root: Path) -> None:
+    """`import tether` loads no `tether.upgrade`; an outdated dataset's error
+    names the pending work and the beta that can still do it."""
+    import subprocess
+    import sys
+
+    from tether.upgrade import LAST_BETA_WITH_UPGRADE, outdated_message
+
+    code = (
+        "import sys, tether, tether.cli; "
+        "print(sorted(m for m in sys.modules if m.startswith('tether.upgrade')))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert out.strip() == "[]", out
+    _v1_dataset(vcs_root)
+    with pytest.raises(ConfigError) as exc:
+        Repo.find(vcs_root)
+    text = str(exc.value)
+    assert text == outdated_message(1)
+    assert "tether upgrade" in text and LAST_BETA_WITH_UPGRADE in text
+    assert "removed at 0.1.0" in text

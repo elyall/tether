@@ -91,13 +91,13 @@ from tether.manifest import (
     write_object,
     write_workspace,
 )
-from tether.migrations import UpgradeReport, pending
 from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
 from tether.plan import Action, Plan
 from tether.vcs import VcsAdapter, detect_vcs
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.experimental.registry import ExportBundle, ImportReport, ImportSpec
+    from tether.upgrade import UpgradeReport
 
 TETHER_REV_ENV = "TETHER_REV"
 """Environment variable `Repo.open` reads for its default revision.
@@ -503,14 +503,9 @@ class Repo:
                 f"understands ({CONFIG_VERSION}); upgrade tether-vcs"
             )
         if config.version < CONFIG_VERSION and not allow_outdated:
-            steps = ", ".join(
-                f"v{m.version} {m.title}" for m in pending(config.version)
-            )
-            raise ConfigError(
-                f"tether.toml is version {config.version}; this tether expects "
-                f"{CONFIG_VERSION}. Run `tether upgrade --dry-run`, then "
-                f"`tether upgrade` (pending: {steps})"
-            )
+            from tether.upgrade import outdated_message
+
+            raise ConfigError(outdated_message(config.version))
         self.root = root
         self.config = config
         self.vcs = vcs
@@ -4735,104 +4730,30 @@ class Repo:
             return report
 
     # -- upgrade --------------------------------------------------------- #
+    # -- upgrade (tether.upgrade; removed at 0.1.0) ---------------------- #
+    # Thin delegates: the alpha-format migration lives under `tether.upgrade`
+    # and is imported on first use. See that package's docstring for the
+    # removal contract.
     def plan_upgrade(self, *, ignore_immutable: bool = False) -> Plan:
-        """Compute what bringing this dataset to the current version would do.
+        """Compute what bringing this dataset to the current version would do;
+        see :func:`tether.upgrade.plan_upgrade`."""
+        from tether.upgrade import plan_upgrade
 
-        Runs the plan step of every pending `tether.migrations.Migration`, in
-        order. Actions: `rename-pin` / `rename-branch` (native refs in the
-        stores), `rewrite-history` (historical manifests get the new names),
-        `vcs-commit`. Nothing is written.
-
-        Args:
-            ignore_immutable: Let the history rewrite touch commits jj marks
-                immutable (recorded in the plan; applied by `apply_upgrade`).
-        """
-        steps = pending(self.config.version)
-        plan = Plan(
-            command="upgrade",
-            context={
-                "from": self.config.version,
-                "to": CONFIG_VERSION,
-                "ignore_immutable": ignore_immutable,
-                "steps": [f"v{m.version}: {m.title}" for m in steps],
-            },
-        )
-        if not steps:
-            plan.notes.append(f"already at version {self.config.version}")
-            return plan
-        for m in steps:
-            m.plan(self, plan)
-        return plan
+        return plan_upgrade(self, ignore_immutable=ignore_immutable)
 
     def apply_upgrade(self, plan: Plan) -> UpgradeReport:
-        """Execute a plan from `plan_upgrade`.
+        """Execute a plan from `plan_upgrade`; see
+        :func:`tether.upgrade.apply_upgrade`."""
+        from tether.upgrade import apply_upgrade
 
-        One migration brings any alpha format to the current version; its
-        parts run on what the dataset shows, `tether.toml` records the version
-        once at the end, and one VCS commit lands it. A part that renames
-        native refs fails *closed*: if any store rename fails, it stops before
-        rewriting history or the manifests, so both sides keep naming the old
-        refs; the renames that did succeed are logged and skipped on the next
-        run. Rewriting history changes commit ids: every other clone must
-        re-sync.
-
-        Raises:
-            ConfigError: Not an upgrade plan, or the dataset's version differs
-                from the plan's.
-            TetherError: The dataset's manifests have uncommitted changes, or a
-                store rename failed (nothing else was changed).
-        """
-        with self._writer_lock():
-            if plan.command != "upgrade":
-                raise ConfigError(f"expected an upgrade plan, got {plan.command!r}")
-            if int(plan.context.get("from", -1)) != self.config.version:
-                raise StalePlanError(
-                    f"plan was made for version {plan.context.get('from')}, the "
-                    f"dataset is at {self.config.version}; re-run the plan"
-                )
-            report = UpgradeReport(
-                from_version=self.config.version, to_version=CONFIG_VERSION, plan=plan
-            )
-            steps = pending(self.config.version)
-            if not steps:
-                return report
-            # Manifests must be committed. tether.toml and .tether/.gitignore may be
-            # dirty for tether's own reasons (a stopped upgrade wrote the dataset
-            # id; opening the dataset taught it about the op log).
-            rel = self._dataset_rel()
-            if self.vcs.dirty([(rel / _m.TETHER_DIR / _m.OBJECTS_DIR).as_posix()]):
-                raise TetherError(
-                    "the dataset's manifests have uncommitted changes; commit or "
-                    "restore them before upgrading"
-                )
-            for m in steps:
-                try:
-                    m.apply(self, plan, report)
-                except TetherError:
-                    # Record what did happen (store renames), then surface the stop.
-                    if report.renamed_pins or report.renamed_branches:
-                        self._log_op(
-                            "upgrade",
-                            plan=plan,
-                            result={**_report_dict(report), "stopped": True},
-                        )
-                    raise
-            write_config(self.root, self.config)
-            ensure_ignored(self.root)  # every untracked file this version knows
-            if self.vcs.dirty(self._vcs_paths()):
-                report.vcs_commit = self.vcs.commit(
-                    self._vcs_paths(),
-                    f"tether upgrade: v{report.from_version} -> v{report.to_version}",
-                )
-            self._log_op("upgrade", plan=plan, result=_report_dict(report))
-            return report
+        return apply_upgrade(self, plan)
 
     def upgrade(self, *, ignore_immutable: bool = False) -> UpgradeReport:
-        """Bring the dataset to this tether's version.
+        """Bring the dataset to this tether's version; see
+        :func:`tether.upgrade.upgrade`."""
+        from tether.upgrade import upgrade
 
-        Equivalent to `apply_upgrade(plan_upgrade(...))`.
-        """
-        return self.apply_upgrade(self.plan_upgrade(ignore_immutable=ignore_immutable))
+        return upgrade(self, ignore_immutable=ignore_immutable)
 
     # -- undo ------------------------------------------------------------ #
     def undo(self, op_id: str | None = None, *, discard: bool = False) -> UndoReport:
