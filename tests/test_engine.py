@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -712,6 +713,77 @@ def test_gc_plan_sees_a_commit_that_lands_during_its_history_walk(
     assert orphan.ref in store.system(system).tags
 
 
+def test_vcs_drift_asks_the_vcs_once(vcs_root: Path) -> None:
+    """`status` runs `vcs_drift` every time; it must not spawn a process per
+    op-log entry. Whatever the number of commits, liveness is one batched
+    call and `commit_alive` is never used."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    for i in range(6):
+        store.write(system, "main", {"v": i})
+        repo.commit(f"v{i}")
+    calls: list[list[str]] = []
+    single: list[str] = []
+    real = repo.vcs.alive_commits
+
+    def batched(commits: list[str]) -> set[str]:
+        calls.append(list(commits))
+        return real(commits)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(repo.vcs, "alive_commits", batched)
+        mp.setattr(repo.vcs, "commit_alive", lambda c: single.append(c) or True)
+        assert repo.vcs_drift() == []
+    assert len(calls) == 1 and len(calls[0]) == 6 and single == []
+
+
+def test_find_does_not_touch_the_ignore_file(vcs_root: Path) -> None:
+    """Opening a dataset is read-only: the ignore file is rewritten by `init`
+    and `upgrade`, and by `find` only when an untracked file that exists is
+    not yet ignored (never let secrets.toml reach a commit)."""
+    from tether.manifest import GITIGNORE_FILENAME, tether_path
+
+    Repo.init(vcs_root)
+    gitignore = tether_path(vcs_root) / GITIGNORE_FILENAME
+    text = gitignore.read_text()
+    assert "/secrets.toml" in text and "/lock" in text
+    stat = gitignore.stat()
+    Repo.find(vcs_root)
+    assert gitignore.stat().st_mtime_ns == stat.st_mtime_ns  # untouched
+    # An older dataset whose ignore file predates secrets.toml: a find with
+    # the file present adds the entry; without the file, nothing is written.
+    gitignore.write_text("/workspace.toml\n/ops.jsonl\n")
+    stat = gitignore.stat()
+    Repo.find(vcs_root)
+    assert gitignore.stat().st_mtime_ns == stat.st_mtime_ns
+    secrets = tether_path(vcs_root) / "secrets.toml"
+    secrets.write_text("[vcs]\n")
+    secrets.chmod(0o600)
+    Repo.find(vcs_root)
+    assert "/secrets.toml" in gitignore.read_text()
+
+
+def test_saved_gc_plan_survives_a_jj_snapshot(vcs_root: Path) -> None:
+    """Under jj the working-copy commit's id changes whenever the tree is
+    snapshotted (`jj log` after touching a file). A saved gc plan binds to
+    the parent and to the history without working copies, so that alone
+    does not stale it -- a real commit elsewhere still does."""
+    if not (vcs_root / ".jj").exists():
+        pytest.skip("jj only")
+    import subprocess
+
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    repo.commit("v1")
+    plan = repo.plan_gc()
+    (vcs_root / "scratch.txt").write_text("touch")
+    subprocess.run(
+        ["jj", "log", "-r", "@"], cwd=vcs_root, check=True, capture_output=True
+    )
+    repo.apply_gc(plan)  # not stale
+
+
 def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
     vcs_root: Path, tmp_path: Path
 ) -> None:
@@ -753,7 +825,7 @@ def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
     _someone_else_commits(other, "db", orphan_state)
     other.vcs.commit(other._vcs_paths(), "theirs names the orphan")
 
-    assert repo.vcs.current_rev() == plan.context["vcs_head"]  # our head did not move
+    assert repo._vcs_head_or_none() == plan.context["vcs_head"]  # our head did not move
     with pytest.raises(StalePlanError, match="another workspace"):
         repo.apply_gc(plan)
     assert orphan.ref in store.system(system).tags
@@ -1362,14 +1434,15 @@ def test_a_long_lived_repo_does_not_write_back_stale_workspace_state(
 
 
 def test_one_writer_per_checkout(vcs_root: Path) -> None:
-    """A second Repo on the same checkout cannot write while the first holds
-    the lock; the lock is re-entrant within one Repo."""
+    """A second Repo on the same checkout waits for the lock and gives up
+    after `LOCK_TIMEOUT`; the lock is re-entrant within one Repo."""
     import fcntl
 
     from tether.manifest import LOCK_FILENAME, tether_path
 
     repo = Repo.init(vcs_root)
     _mem_object(repo)
+    repo.LOCK_TIMEOUT = 0.3
     lock = tether_path(vcs_root) / LOCK_FILENAME
     with (
         repo._writer_lock(),
@@ -1377,8 +1450,11 @@ def test_one_writer_per_checkout(vcs_root: Path) -> None:
     ):  # re-entrant
         assert lock.exists()
         other = Repo.find(vcs_root)
+        other.LOCK_TIMEOUT = 0.3
+        started = time.monotonic()
         with pytest.raises(TetherError, match="another tether command is writing"):
             other.commit("blocked")
+        assert time.monotonic() - started >= 0.3  # it waited, then gave up
         # Manifest-only writers wait for the lock too.
         with pytest.raises(TetherError, match="another tether command is writing"):
             other.add("late", "memory", {"system": "x", "branch": "main"})

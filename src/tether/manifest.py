@@ -178,19 +178,38 @@ def working_ref_name(dataset_id: str, bookmark: str) -> str:
     )
 
 
+_GENERATION = re.compile(r"^(?P<name>.+)\.(?P<n>[0-9]+)$")
+
+
 def _working_ref_parts(ref: str) -> tuple[str, str, str | None] | None:
-    """``(dataset, bookmark slug, legacy workspace id | None)`` for a working ref."""
+    """``(dataset, bookmark slug, legacy workspace id | None)`` for a working ref.
+
+    A backend that cannot reset a branch in place (Neon, Lance) hands back a
+    sibling ``<name>.<n>``; the suffix is parsed off first, so the sibling
+    still stands for its bookmark -- and an 8-hex bookmark with a suffix is
+    not mistaken for a legacy per-workspace name.
+    """
     if not ref.startswith(WORKING_REF_PREFIX):
         return None
     rest = ref[len(WORKING_REF_PREFIX) :]
     ds, _, rest = rest.partition(".")
     if not is_dataset_id(ds) or not rest:
         return None
+    if (m := _GENERATION.match(rest)) is not None:
+        rest = m.group("name")
     head, dot, tail = rest.partition(".")
     if dot and tail and is_dataset_id(head):
         # Pre-bookmark name: `tether.ws.<ds8>.<ws8>.<slug>-<key6>`.
         return ds, tail, head
     return ds, rest, None
+
+
+def working_ref_generation(ref: str) -> int | None:
+    """The sibling generation of a working ref (``name.2`` -> 2), else None."""
+    if not ref.startswith(WORKING_REF_PREFIX):
+        return None
+    m = _GENERATION.match(ref)
+    return int(m.group("n")) if m else None
 
 
 def working_ref_dataset(ref: str) -> str | None:
@@ -674,17 +693,25 @@ def ensure_layout(root: Path) -> None:
     ensure_ignored(root)
 
 
-def ensure_ignored(root: Path) -> None:
+def ensure_ignored(root: Path, *, only_present: bool = False) -> None:
     """Make sure ``.tether/.gitignore`` lists every per-workspace file.
 
     jj snapshots anything not ignored into the working-copy commit, so a new
     untracked file (the op log, say) must be ignored before it first appears.
+    With ``only_present``, entries are added only for untracked files that
+    exist and are not yet ignored -- the check a read-only command runs, so
+    it writes nothing in the steady state but never lets ``secrets.toml``
+    reach a commit.
     """
     gitignore = tether_path(root) / GITIGNORE_FILENAME
     lines = (
         gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
     )
     missing = [f"/{name}" for name in UNTRACKED_FILES if f"/{name}" not in lines]
+    if only_present:
+        missing = [m for m in missing if (tether_path(root) / m[1:]).exists()]
+        if not missing:
+            return
     if missing or not gitignore.exists():
         gitignore.parent.mkdir(parents=True, exist_ok=True)
         gitignore.write_text("".join(f"{x}\n" for x in [*lines, *missing]), "utf-8")

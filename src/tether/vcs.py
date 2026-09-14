@@ -396,6 +396,11 @@ class VcsAdapter(Protocol):
         commits still resolve) and asks whether that change is visible, so a
         rewrite does not count as loss; git checks reachability from any ref."""
 
+    def alive_commits(self, commits: list[str]) -> set[str]:
+        """``commit_alive`` for many commits in a bounded number of calls --
+        ``status`` asks about every commit the op log records, and must not
+        spawn a process per entry."""
+
     def abandon(
         self, revs: list[str], keep_dir: str
     ) -> tuple[list[str], dict[str, str]]:
@@ -633,7 +638,19 @@ class JjAdapter:
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
     def history_digest(self) -> str:
-        return _digest_revs(self.history_revs())
+        # Not the working-copy commits: jj re-snapshots them on any command,
+        # so a digest over `all()` would stale a saved gc plan after `jj log`.
+        # A commit that lands in any workspace still changes the set.
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            "all() ~ working_copies()",
+            "-T",
+            'commit_id ++ "\\n"',
+        )
+        return _digest_revs([line.strip() for line in out.stdout.splitlines() if line])
 
     def shared_dir(self) -> Path:
         repo = self.root / ".jj" / "repo"
@@ -944,6 +961,40 @@ class JjAdapter:
             check=False,
         )
         return visible.returncode == 0 and bool(visible.stdout.strip())
+
+    def alive_commits(self, commits: list[str]) -> set[str]:
+        if not commits:
+            return set()
+        # Two calls: every visible change id, and the change id of each asked
+        # commit (hidden commits still resolve when named in full).
+        visible = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            "all()",
+            "-T",
+            'change_id ++ "\\n"',
+            check=False,
+        )
+        if visible.returncode != 0:
+            return {c for c in commits if self.commit_alive(c)}
+        changes = set(visible.stdout.split())
+        asked = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            " | ".join(commits),
+            "-T",
+            'commit_id ++ " " ++ change_id ++ "\\n"',
+            check=False,
+        )
+        if asked.returncode != 0:
+            # One of them does not resolve at all: fall back per commit.
+            return {c for c in commits if self.commit_alive(c)}
+        change_of = dict(line.split() for line in asked.stdout.splitlines() if line)
+        return {c for c in commits if change_of.get(c) in changes}
 
     def abandon(
         self, revs: list[str], keep_dir: str
@@ -1282,6 +1333,11 @@ class GitAdapter:
     def commit_alive(self, commit: str) -> bool:
         out = self._git("rev-list", "--all", check=False)
         return commit in out.stdout.split()
+
+    def alive_commits(self, commits: list[str]) -> set[str]:
+        out = self._git("rev-list", "--all", check=False)
+        reachable = set(out.stdout.split())
+        return {c for c in commits if c in reachable}
 
     def abandon(
         self, revs: list[str], keep_dir: str

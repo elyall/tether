@@ -49,6 +49,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pattern. Neon runs the shared conformance suite and a full `Repo` lifecycle
   against the API fake; the suite's stability and fork checks compare
   content states (up to `VOLATILE_KEYS`).
+- `status` spawned two VCS processes per commit in the op log to detect
+  drift; `vcs_drift` now asks once (`VcsAdapter.alive_commits`).
+- Opening a dataset rewrote `.tether/.gitignore`; `Repo.find` now writes it
+  only when an untracked file that exists is not yet ignored (so an older
+  dataset's new `secrets.toml` never reaches a commit). `init` and `upgrade`
+  write the full list.
+- The checkout lock failed outright when another command held it; it now
+  waits up to `Repo.LOCK_TIMEOUT` (30 s) like the repository lock, and the
+  no-`fcntl` branch is re-entrant.
+- A saved `gc` plan under jj went stale after any snapshot: the digest now
+  covers `all() ~ working_copies()` and binds to the working copy's parent.
+- `name.2` working refs (a Neon or Lance sibling of a branch that could not be
+  reset) are parsed back to their bookmark, and an 8-hex bookmark with a
+  suffix is no longer mistaken for a legacy workspace id; `new -b` refuses a
+  bookmark name ending in `.<number>`.
 
 ### Added
 

@@ -85,6 +85,7 @@ def test_ref_and_slug_helpers() -> None:
         bookmark_slug,
         working_ref_bookmark,
         working_ref_dataset,
+        working_ref_generation,
         working_ref_workspace,
     )
 
@@ -102,6 +103,15 @@ def test_ref_and_slug_helpers() -> None:
     odd = working_ref_name("0a1b2c3d", "feat/x.1")
     assert odd.startswith("tether.ws.0a1b2c3d.feat-x-1-") and "." not in odd[19:]
     assert odd != working_ref_name("0a1b2c3d", "feat.x/1")
+    # A store that cannot reset a branch hands back a sibling `name.2`; it
+    # still stands for the bookmark -- even an 8-hex one, which is not a
+    # legacy workspace id just because a suffix follows it.
+    assert working_ref_bookmark(f"{name}.2") == "feature"
+    assert working_ref_generation(f"{name}.2") == 2
+    assert working_ref_generation(name) is None
+    hexish = working_ref_name("0a1b2c3d", "deadbeef")
+    assert working_ref_bookmark(f"{hexish}.3") == "deadbeef"
+    assert working_ref_workspace(f"{hexish}.3") is None
     # Legacy per-workspace names are still recognised as ours, for gc.
     legacy = "tether.ws.0a1b2c3d.abcd1234.zarr-imaging-9f2e1c"
     assert working_ref_dataset(legacy) == "0a1b2c3d"

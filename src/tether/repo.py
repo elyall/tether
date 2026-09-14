@@ -553,7 +553,11 @@ class Repo:
         self.root = root
         self.config = config
         self.vcs = vcs
-        ensure_ignored(root)  # the op log is new since a7; never let jj snapshot it
+        # A read-only command must not dirty the tree, so the ignore file is
+        # only touched when an untracked file that exists is not yet ignored
+        # (an older dataset that just gained a secrets.toml); `init` and
+        # `upgrade` write the full list.
+        ensure_ignored(root, only_present=True)
         self.objects = read_objects(root)
         self.workspace = read_workspace(root)
         self.secrets = read_secrets(root)
@@ -594,19 +598,34 @@ class Repo:
                 self._lock_depth -= 1
             return
         if fcntl is None:
-            self._refresh()
-            yield
+            # No advisory locks (Windows): still one refresh per outermost
+            # entry, and nested entries must not re-read half-written state.
+            self._lock_depth = 1
+            try:
+                self._refresh()
+                yield
+            finally:
+                self._lock_depth = 0
             return
+        import time
+
         path = _m.tether_path(self.root) / _m.LOCK_FILENAME
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a+", encoding="utf-8") as fh:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise TetherError(
-                    "another tether command is writing in this checkout "
-                    f"({path} is locked); wait for it to finish"
-                ) from exc
+            # Wait, as the repository lock does: a `status` running while a
+            # `commit` finishes should follow it, not fail.
+            deadline = time.monotonic() + self.LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TetherError(
+                            "another tether command is writing in this checkout "
+                            f"({path} is locked); wait for it to finish"
+                        ) from exc
+                    time.sleep(0.05)
             self._lock_depth = 1
             try:
                 self._refresh()
@@ -618,6 +637,9 @@ class Repo:
 
     REPO_LOCK_TIMEOUT = 60.0
     """Seconds a command waits for the repository-wide lock before giving up."""
+
+    LOCK_TIMEOUT = 30.0
+    """Seconds a command waits for the checkout lock before giving up."""
 
     @contextlib.contextmanager
     def _repo_lock(self) -> Iterator[None]:
@@ -705,7 +727,7 @@ class Repo:
         if _m.config_path(root).exists():
             raise ConfigError(f"tether already initialized at {root}")
         config = config or RepoConfig()
-        ensure_layout(root)
+        ensure_layout(root)  # writes .tether/.gitignore for every untracked file
         write_config(root, config)
         jj_path, git_path = _vcs_executables(root, config)
         vcs = detect_vcs(
@@ -1065,7 +1087,9 @@ class Repo:
                 gone.update(str(c) for c in e.result.get("abandoned") or [])
             for old, new in (e.result.get("rewritten_commits") or {}).items():
                 alias[str(old)] = str(new)
-        out: list[VcsDrift] = []
+        # Resolve every commit the log names first, then ask the VCS once:
+        # `status` runs this on every invocation and must stay local.
+        wanted: list[tuple[OpEntry, str]] = []
         for e in entries:
             if e.command != "commit" or e.undone_by or not e.result.get("vcs_commit"):
                 continue
@@ -1074,7 +1098,12 @@ class Repo:
             while commit in alias and commit not in seen:
                 seen.add(commit)
                 commit = alias[commit]
-            if commit in gone or self.vcs.commit_alive(commit):
+            if commit not in gone:
+                wanted.append((e, commit))
+        alive = self.vcs.alive_commits(sorted({c for _, c in wanted}))
+        out: list[VcsDrift] = []
+        for e, commit in wanted:
+            if commit in alive:
                 continue
             pinned = {k: v for k, v in (e.result.get("pinned") or {}).items() if v}
             referenced: dict[str, bool] = {}
@@ -1260,8 +1289,12 @@ class Repo:
         return None
 
     def _vcs_head_or_none(self) -> str | None:
-        """The current VCS revision, or `None` before the first commit."""
+        """The commit a plan binds to, or `None` before the first commit: HEAD
+        under git; under jj the working copy's *parent*, since the working-copy
+        commit's own id changes whenever jj snapshots the tree."""
         try:
+            if self.vcs.kind == "jj":
+                return self.vcs.position().get("parent") or self.vcs.current_rev()
             return self.vcs.current_rev()
         except VcsError:
             return None
@@ -2250,6 +2283,11 @@ class Repo:
             if bookmark in known:
                 raise ConfigError(
                     f"bookmark {bookmark!r} exists; `tether new {bookmark}` joins it"
+                )
+            if _m.working_ref_generation(working_ref_name("00000000", bookmark)):
+                raise ConfigError(
+                    f"bookmark {bookmark!r} ends in `.<number>`, which is how a store "
+                    "names a sibling of a branch it cannot reset; pick another name"
                 )
             create = True
         elif rev is not None and rev in known:
@@ -3573,7 +3611,7 @@ class Repo:
             head_then = plan.context.get("vcs_head")
             if head_then is not None:
                 with contextlib.suppress(VcsError):
-                    if self.vcs.current_rev() != head_then:
+                    if self._vcs_head_or_none() != head_then:
                         raise StalePlanError(
                             "history moved since the gc plan was made (a new commit "
                             "may reference a pin it would release); re-run the plan"
@@ -4832,6 +4870,7 @@ class Repo:
                         )
                     raise
             write_config(self.root, self.config)
+            ensure_ignored(self.root)  # every untracked file this version knows
             if self.vcs.dirty(self._vcs_paths()):
                 report.vcs_commit = self.vcs.commit(
                     self._vcs_paths(),
