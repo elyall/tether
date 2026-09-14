@@ -91,7 +91,14 @@ from tether.manifest import (
     write_object,
     write_workspace,
 )
-from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
+from tether.oplog import (
+    OpEntry,
+    append_op,
+    mark_done,
+    mark_progress,
+    read_ops,
+    report_dict,
+)
 from tether.plan import Action, Plan, Precondition
 from tether.vcs import VcsAdapter, detect_vcs
 
@@ -426,13 +433,6 @@ def _source_object(source: Mapping[str, Any]) -> str | Pin | State:
     if "pin" in source:
         return Pin.from_dict(dict(source["pin"]))
     return dict(source["state"])
-
-
-def _report_dict(report: Any) -> dict[str, Any]:
-    """A report dataclass as plain data for the op log (without its plan)."""
-    data = dataclasses.asdict(report)
-    data.pop("plan", None)
-    return data
 
 
 def short_state(state: State | None) -> str:
@@ -2157,24 +2157,31 @@ class Repo:
             ConfigError: The plan is for another command.
             StalePlanError: A precondition failed.
         """
-        if plan.command != command:
-            raise ConfigError(f"expected a {command} plan, got {plan.command!r}")
+        self._require_command(plan, command)
         if not verify:
             return
         for pre in plan.preconditions:
             self._check_precondition(pre)
+
+    @staticmethod
+    def _require_command(plan: Plan, command: str) -> None:
+        """Refuse a plan made for another command."""
+        if plan.command != command:
+            raise ConfigError(f"expected a {command} plan, got {plan.command!r}")
 
     def _check_precondition(self, pre: Precondition) -> None:
         """Run one precondition against the current state (see `_verify_plan`)."""
         kind, params = pre.kind, pre.params
 
         def fail(observed: object = None) -> NoReturn:
+            # A literal substitution: the detail is plan-authored text and may
+            # carry an object key with braces in it, which `str.format` would
+            # read as a field.
             detail = pre.detail or f"{kind} changed since the plan was made"
-            raise StalePlanError(
-                detail.format(observed=observed) + "; re-run the plan"
-                if "re-run" not in detail
-                else detail.format(observed=observed)
-            )
+            detail = detail.replace("{observed}", str(observed))
+            if "re-run" not in detail:
+                detail += "; re-run the plan"
+            raise StalePlanError(detail)
 
         if kind == "manifest_hash":
             rev = params.get("rev")
@@ -2189,9 +2196,9 @@ class Repo:
             if pre.expected not in (None, self.workspace.workspace_id):
                 fail(self.workspace.workspace_id)
         elif kind == "vcs_head":
-            with contextlib.suppress(VcsError):
-                if self._vcs_head_or_none() != pre.expected:
-                    fail(self._vcs_head_or_none())
+            observed = self._vcs_head_or_none()
+            if observed != pre.expected:
+                fail(observed)
         elif kind == "history_digest":
             observed = self.vcs.history_digest()
             if observed != pre.expected:
@@ -3753,7 +3760,7 @@ class Repo:
                         self._end_op(
                             op,
                             result={
-                                **_report_dict(report),
+                                **report_dict(report),
                                 "failed": {k: str(v) for k, v in errors.items()},
                                 "stopped": str(exc),
                             },
@@ -3767,7 +3774,7 @@ class Repo:
                 self._end_op(
                     op,
                     result={
-                        **_report_dict(report),
+                        **report_dict(report),
                         "failed": {k: str(v) for k, v in errors.items()},
                     },
                 )
@@ -4250,7 +4257,7 @@ class Repo:
             MultiObjectError: A backend failed for reasons other than conflicts.
         """
         with self._writer_lock():
-            self._verify_plan(plan, "promote", verify=False)  # command only
+            self._require_command(plan, "promote")
             report = PromoteReport(plan=plan)
             writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
             for a in plan.actions:
@@ -4360,7 +4367,7 @@ class Repo:
                 self._end_op(
                     op,
                     result={
-                        **_report_dict(report),
+                        **report_dict(report),
                         "failed": {k: str(v) for k, v in errors.items()},
                     },
                 )
@@ -4571,7 +4578,7 @@ class Repo:
             StalePlanError: The manifests changed since the plan was made.
         """
         with self._writer_lock():
-            self._verify_plan(plan, "restore", verify=False)  # command only
+            self._require_command(plan, "restore")
             refused = [a for a in plan.actions if a.op == "refuse"]
             if refused:
                 raise TetherError(
@@ -5314,7 +5321,7 @@ class Repo:
             if report.reforked:
                 write_workspace(self.root, self.workspace)
             if op is not None:
-                self._end_op(op, result=_report_dict(report))
+                self._end_op(op, result=report_dict(report))
             return report
 
     def repair(self, *, all_history: bool = False) -> RepairReport:

@@ -18,6 +18,7 @@ appends loses at most the line being written, never the log.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import threading
@@ -52,6 +53,18 @@ def new_op_id() -> str:
 
 def ops_path(root: Path) -> Path:
     return tether_path(root) / OPS_FILENAME
+
+
+def report_dict(report: Any) -> dict[str, Any]:
+    """A report dataclass as plain data for the op log (without its plan).
+
+    Every `apply_*` -- in the core, in `tether.upgrade`, in
+    `tether.experimental.registry` -- records its report this way, so the
+    helper lives with the log rather than as a private name in `repo.py`.
+    """
+    data = dataclasses.asdict(report)
+    data.pop("plan", None)
+    return data
 
 
 @dataclass

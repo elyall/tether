@@ -23,7 +23,12 @@ Removal checklist (for the 0.1.0 release):
   branch) and gc's legacy-branch judgement in `repo.py`
 - drop `UpgradeReport` from `tether.__all__`
 
-`rewrite_history` stays in `vcs.py`: `abandon` uses it.
+Not part of the removal: `abandon` and the two `rewrite_history`
+implementations in `vcs.py` (jj and git) it relies on. `abandon` drops dataset
+commits while keeping every later commit's manifests exactly as they were
+(snapshot, not patch, semantics), which "jj abandon, then tether gc" cannot
+do -- a plain rebase would re-apply the dropped commit's manifest changes as
+a diff. That is why the history rewriters outlive this package.
 """
 
 from __future__ import annotations
@@ -33,8 +38,8 @@ from typing import TYPE_CHECKING
 from tether import manifest as _m
 from tether.errors import TetherError
 from tether.manifest import CONFIG_VERSION, ensure_ignored, write_config
+from tether.oplog import report_dict
 from tether.plan import Plan
-from tether.repo import _report_dict
 from tether.upgrade.migrations import (
     MIGRATIONS,
     Migration,
@@ -153,7 +158,7 @@ def apply_upgrade(repo: Repo, plan: Plan) -> UpgradeReport:
                     repo._log_op(
                         "upgrade",
                         plan=plan,
-                        result={**_report_dict(report), "stopped": True},
+                        result={**report_dict(report), "stopped": True},
                     )
                 raise
         write_config(repo.root, repo.config)
@@ -163,7 +168,7 @@ def apply_upgrade(repo: Repo, plan: Plan) -> UpgradeReport:
                 repo._vcs_paths(),
                 f"tether upgrade: v{report.from_version} -> v{report.to_version}",
             )
-        repo._log_op("upgrade", plan=plan, result=_report_dict(report))
+        repo._log_op("upgrade", plan=plan, result=report_dict(report))
         return report
 
 

@@ -20,8 +20,8 @@ from tether.errors import ConfigError
 from tether.experimental.registry.export import ExportBundle, build_bundle
 from tether.experimental.registry.registry import ImportSpec, specs_from_rows
 from tether.manifest import Policy, write_object, write_workspace
+from tether.oplog import report_dict
 from tether.plan import Action, Plan
-from tether.repo import _report_dict
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.repo import Repo
@@ -221,7 +221,7 @@ def apply_import(repo: Repo, plan: Plan, *, verify: bool = True) -> ImportReport
                 report.removed.append(a.key)
         write_workspace(repo.root, repo.workspace)
         if plan.actions:
-            repo._log_op("import", plan=plan, result=_report_dict(report), pre=pre)
+            repo._log_op("import", plan=plan, result=report_dict(report), pre=pre)
         return report
 
 

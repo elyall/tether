@@ -216,3 +216,21 @@ def test_verify_plan_checks_each_kind(vcs_root: Path) -> None:
         "pin_state",
         "no_new_holders",
     } <= PRECONDITION_KINDS
+
+
+def test_precondition_detail_is_literal_text(vcs_root: Path) -> None:
+    """The detail is plan-authored and may quote an object key with braces in
+    it; the refusal must not read it as a format field."""
+    repo = Repo.init(vcs_root)
+    plan = Plan(command="gc")
+    plan.require(
+        "manifest_hash",
+        "nope",
+        key="odd{key}",
+        detail="'odd{key}' changed ({observed}); re-run the plan",
+    )
+    with pytest.raises(StalePlanError, match=r"'odd\{key\}' changed \([0-9a-f]+\)"):
+        repo._verify_plan(plan, "gc")
+    # Command mismatch is its own helper, used without a plan re-check.
+    with pytest.raises(ConfigError, match="expected a commit plan"):
+        Repo._require_command(plan, "commit")
