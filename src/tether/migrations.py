@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from tether.backends.base import Capability, content_state, effective_capabilities
 from tether.errors import TetherError
 from tether.manifest import (
+    CONFIG_VERSION,
     WORKING_REF_PREFIX,
     ObjectManifest,
     Pin,
@@ -77,7 +78,7 @@ class UpgradeReport:
 
 @dataclass(frozen=True)
 class Migration:
-    """One step of `tether upgrade`: version ``n-1`` -> ``n``."""
+    """A step of `tether upgrade`: bring a dataset to ``version``."""
 
     version: int
     title: str
@@ -86,7 +87,12 @@ class Migration:
 
 
 def pending(version: int) -> list[Migration]:
-    """Migrations a dataset at `version` still needs, oldest first."""
+    """Migrations a dataset at `version` still needs, oldest first.
+
+    Every alpha format is brought to the current one by a single migration
+    whose parts run on what the dataset *shows* (old-format pins, mtime file
+    states, misplaced manifests), not on its recorded version.
+    """
     return [m for m in MIGRATIONS if m.version > version]
 
 
@@ -274,14 +280,6 @@ def _plan_v2(repo: Repo, plan: Plan) -> None:
                 params={"migration": 2},
             )
         )
-    plan.actions.append(
-        Action(
-            "vcs-commit",
-            target="tether upgrade: v1 -> v2 (dataset-namespaced refs)",
-            detail="tether.toml gets [dataset] id and version = 2",
-            params={"migration": 2},
-        )
-    )
 
 
 def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
@@ -395,8 +393,6 @@ def _apply_v2(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
             if _is_v1_branch(ref, slugs):
                 refs[key] = _new_branch_name(ref, dataset_id, slugs)
     write_workspace(repo.root, repo.workspace)
-    repo.config.version = 2
-    write_config(repo.root, repo.config)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,17 +465,6 @@ def _plan_v3(repo: Repo, plan: Plan) -> None:
             f"{repo.config.trunk!r} (created if the VCS has none), or on the "
             "bookmark its working copy is on"
         )
-    plan.actions.append(
-        Action(
-            "vcs-commit",
-            target="tether upgrade: v2 -> v3 (content-hashed file states; no write "
-            "policy)",
-            detail="manifests of local file objects get {size, sha256} states and "
-            "the write policy line goes; history keeps the old forms (it recorded "
-            "what the bytes were then, and a write key is read and ignored)",
-            params={"migration": 3},
-        )
-    )
 
 
 def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
@@ -488,7 +473,6 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         objects_dir,
         read_objects,
         relpath_to_key,
-        write_config,
         write_listing,
         write_object,
         write_workspace,
@@ -538,8 +522,6 @@ def _apply_v3(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     if repo.workspace.bookmark is None:
         repo.workspace.bookmark = repo.adopt_trunk()
         write_workspace(repo.root, repo.workspace)
-    repo.config.version = 3
-    write_config(repo.root, repo.config)
 
 
 # --------------------------------------------------------------------------- #
@@ -623,21 +605,10 @@ def _plan_v4(repo: Repo, plan: Plan) -> None:
             "v4: every manifest already sits at its key's path and no locator "
             "holds a relative path"
         )
-    plan.actions.append(
-        Action(
-            "vcs-commit",
-            target="tether upgrade: v3 -> v4 (one manifest file per key; absolute "
-            "local paths)",
-            detail="manifests of keys whose last segment contains a dot move to "
-            "`<key>.toml`, and relative local paths in locators become absolute; "
-            "history is read by the key each manifest embeds and stays as it is",
-            params={"migration": 4},
-        )
-    )
 
 
 def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
-    from tether.manifest import read_objects, write_config, write_object
+    from tether.manifest import read_objects, write_object
 
     # Every destination is checked before anything moves: a collision found
     # half-way would leave earlier moves in a dirty tree that the rerun's
@@ -676,28 +647,112 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
         repo.objects[key] = updated
         if key not in report.rewritten_manifests:
             report.rewritten_manifests.append(key)
-    repo.config.version = 4
+
+
+# --------------------------------------------------------------------------- #
+# The one migration: every alpha format -> CONFIG_VERSION
+# --------------------------------------------------------------------------- #
+def _needs_namespacing(repo: Repo) -> bool:
+    """Pins or working branches in the pre-dataset-id format, or no id at all."""
+    if not repo.config.dataset_id:
+        return True
+    if any(_old_pin(m) for m in repo.objects.values()):
+        return True
+    return any(
+        _old_pin(m)
+        for _rev, objects in repo._iter_history_objects()
+        for m in objects.values()
+    )
+
+
+def _needs_content_hashes(repo: Repo) -> bool:
+    """Manifests with a `write =` policy, mtime-based local file states, or a
+    workspace that predates bookmarks."""
+    if _manifests_with_write(repo) or repo.workspace.bookmark is None:
+        return True
+    return any(
+        not (
+            m.state is not None
+            and m.state.get("type") == "file"
+            and "sha256" in m.state
+        )
+        for m in _local_file_objects(repo)
+    )
+
+
+def _needs_manifest_layout(repo: Repo) -> bool:
+    """Manifests not at their key's path, or locators with relative paths."""
+    return bool(_misplaced_manifests(repo) or _relative_locators(repo))
+
+
+_PARTS: list[
+    tuple[
+        str,
+        Callable[[Repo], bool],
+        Callable[[Repo, Plan], None],
+        Callable[[Repo, Plan, UpgradeReport], None],
+    ]
+] = [
+    ("dataset-namespaced refs", _needs_namespacing, _plan_v2, _apply_v2),
+    (
+        "content-hashed file states; no write policy",
+        _needs_content_hashes,
+        _plan_v3,
+        _apply_v3,
+    ),
+    (
+        "one manifest file per key; absolute local paths",
+        _needs_manifest_layout,
+        _plan_v4,
+        _apply_v4,
+    ),
+]
+"""What an alpha dataset may need, oldest first; each part runs only when the
+dataset shows the condition. Append here when the format changes."""
+
+
+def _plan_all(repo: Repo, plan: Plan) -> None:
+    parts = [(title, planner) for title, needs, planner, _ in _PARTS if needs(repo)]
+    plan.context["parts"] = [title for title, _ in parts]
+    for _title, planner in parts:
+        planner(repo, plan)
+    if not parts:
+        plan.notes.append(
+            "the dataset already has the current format; only the version changes"
+        )
+    plan.actions.append(
+        Action(
+            "vcs-commit",
+            target=f"tether upgrade: v{repo.config.version} -> v{CONFIG_VERSION}",
+            detail="tether.toml records version = "
+            f"{CONFIG_VERSION}"
+            + (f" after: {'; '.join(t for t, _ in parts)}" if parts else ""),
+            params={"migration": CONFIG_VERSION},
+        )
+    )
+
+
+def _apply_all(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
+    """Run the parts the plan chose, in order, then record the version once.
+    Store renames fail closed inside the first part, before any history or
+    manifest rewrite; no intermediate version is ever written."""
+    from tether.manifest import write_config
+
+    chosen = set(plan.context.get("parts") or [])
+    for title, _needs, _planner, applier in _PARTS:
+        if title in chosen:
+            applier(repo, plan, report)
+    repo.config.version = CONFIG_VERSION
     write_config(repo.root, repo.config)
 
 
 MIGRATIONS: list[Migration] = [
     Migration(
-        version=2,
-        title="Namespace native refs by dataset id",
-        plan=_plan_v2,
-        apply=_apply_v2,
-    ),
-    Migration(
-        version=3,
-        title="Content-hash local file states; drop the write policy",
-        plan=_plan_v3,
-        apply=_apply_v3,
-    ),
-    Migration(
-        version=4,
-        title="One manifest file per key",
-        plan=_plan_v4,
-        apply=_apply_v4,
+        version=CONFIG_VERSION,
+        title="Bring an alpha dataset to the current format",
+        plan=_plan_all,
+        apply=_apply_all,
     ),
 ]
-"""Every migration, oldest first. Append here when the format changes."""
+"""Every migration, oldest first. One step covers every alpha format; when the
+format changes again, add a part to `_PARTS` (and bump `CONFIG_VERSION`)."""

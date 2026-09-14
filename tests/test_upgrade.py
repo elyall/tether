@@ -619,3 +619,67 @@ def test_upgrade_v4_stops_on_a_manifest_collision(vcs_root: Path) -> None:
     assert not vcs.dirty([".tether/objects"])
     with pytest.raises(TetherError, match="upgrade stopped"):
         repo.apply_upgrade(repo.plan_upgrade())
+
+
+# --------------------------------------------------------------------------- #
+# One migration for every alpha format
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("start", [1, 2, 3])
+def test_any_alpha_version_upgrades_in_one_step(vcs_root: Path, start: int) -> None:
+    """Whatever alpha version a dataset records, `upgrade` is one migration:
+    one plan with one `vcs-commit`, one version write straight to
+    CONFIG_VERSION (no intermediate `version = 2/3`), one VCS commit. The
+    parts run on what the dataset shows, so a dataset whose manifests already
+    have the current shape gets only the version change."""
+    from tether.manifest import CONFIG_VERSION
+    from tether.migrations import pending
+
+    if start == 1:
+        _v1_dataset(vcs_root)
+    else:
+        (vcs_root / ".tether" / "objects").mkdir(parents=True)
+        (vcs_root / ".tether" / ".gitignore").write_text(
+            "/workspace.toml\n/ops.jsonl\n/cache\n"
+        )
+        (vcs_root / "tether.toml").write_text(V2_CONFIG if start == 2 else V3_CONFIG)
+        system = f"sys-{uuid.uuid4().hex[:8]}"
+        default_store().system(system)
+        # Current-shape manifest: a memory object with a namespaced pin, at
+        # its key's path -- nothing for any part to do.
+        m = ObjectManifest(
+            key="db",
+            kind="memory",
+            locator={"system": system, "branch": "main"},
+            policy=Policy(),
+        )
+        (vcs_root / ".tether" / "objects" / "db.toml").write_text(m.to_toml())
+        vcs = detect_vcs(vcs_root)
+        vcs.commit([".tether/objects", ".tether/.gitignore", "tether.toml"], "old")
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    assert repo.config.version == start
+    (step,) = pending(start)
+    assert step.version == CONFIG_VERSION
+    before = len(repo.vcs.history_revs())
+
+    plan = repo.plan_upgrade()
+    assert plan.context["from"] == start and plan.context["to"] == CONFIG_VERSION
+    assert [a.op for a in plan.actions].count("vcs-commit") == 1
+    parts = plan.context["parts"]
+    if start == 1:
+        assert parts[0] == "dataset-namespaced refs"
+    else:
+        # A current-shape dataset with no bookmark yet: only the bookmark part.
+        assert not any(a.op in ("rename-pin", "rewrite-history") for a in plan.actions)
+
+    report = repo.apply_upgrade(plan)
+    assert not report.failed
+    assert report.from_version == start and report.to_version == CONFIG_VERSION
+    fresh = Repo.find(vcs_root)
+    assert fresh.config.version == CONFIG_VERSION
+    # Exactly one commit landed (a v1 history rewrite replaces, not adds).
+    grew = len(fresh.vcs.history_revs()) - before
+    assert grew == 1, grew
+    assert fresh.plan_upgrade().is_empty
+    # The op log holds the single upgrade with its parts.
+    (op,) = [e for e in fresh.ops() if e.command == "upgrade"]
+    assert op.plan is not None and op.plan["context"]["parts"] == parts

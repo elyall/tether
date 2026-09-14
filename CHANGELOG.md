@@ -67,6 +67,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **One migration.** `tether upgrade` brings any alpha dataset to the
+  current version in a single step whose parts run on what the dataset shows
+  (old-format pins, `write =` or mtime file states, misplaced manifests or
+  relative locators), not on its recorded version. One version write at the
+  end, one VCS commit; store renames still fail closed before any history
+  rewrite. The plan records its `parts`.
 - **Backend contract.** Icechunk, Iceberg, Delta, Dolt, Neon, `file`, and
   DuckLake re-raise their library's exceptions as `BackendError`
   (`wrap_library_errors`), so a network blip or a missing ref is a refusal at

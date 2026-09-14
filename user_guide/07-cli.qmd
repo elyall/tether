@@ -340,10 +340,12 @@ fall back to the recorded snapshot while the store has it.
 ## `upgrade`
 
 `tether.toml` carries `[tether] version`. A dataset made by an older tether is
-refused by every command except `upgrade` (and the error says so). `tether
-upgrade` runs every pending migration in order -- each takes the dataset from
-version `n-1` to `n` and writes the new version before the next starts, so an
-interrupted upgrade resumes where it stopped.
+refused by every command except `upgrade` (and the error says so). One
+migration brings any alpha dataset to the current version: its parts run on
+what the dataset *shows* (old-format pins, mtime file states, misplaced
+manifests), not on the version it recorded, the version is written once at
+the end, and one VCS commit lands it. An interrupted upgrade re-runs the same
+plan; the store renames already made are skipped.
 
 ```
 $ tether upgrade --dry-run
@@ -352,17 +354,15 @@ plan: upgrade (5 write(s))
           rename-pin  db  [icechunk] tether.0a1b2c3d.c48b2f6e1d07a9b0  from tether.c48b2f6e1d07
        rename-branch  db  [icechunk] tether.ws.0a1b2c3d.7c1e0a4d.db-61a22c  from tether.ws.7c1e0a4d.db
      rewrite-history      3 commit(s)  manifests with old-format pins get the new names; commit ids change, every clone must re-sync
-          vcs-commit      tether upgrade: v1 -> v2 (dataset-namespaced refs)
+          vcs-commit      tether upgrade: v1 -> v4
                           dataset id: 0a1b2c3d
 ```
 
-| Version | Migration | Touches |
+| Migration | Parts (each only when the dataset shows the condition) | Touches |
 | --- | --- | --- |
-| v2 | dataset id; every pin and working branch renamed into its namespace (the branches keep their pre-bookmark per-workspace names, which `gc --prune-bookmarks` judges as legacy) | stores and history |
-| v3 | local `file` states become content hashes (one read per file; the stat cache remembers); the `write` policy line is dropped -- whether writes fork or land upstream is the bookmark now | working tree only |
-| v4 | one manifest file per key: `.toml` is appended to the key's last segment (`foo.bar` -> `foo.bar.toml`; before, `foo` and `foo.bar` shared `foo.toml`); relative local paths in locators are resolved against the dataset root | working tree only |
+| any alpha version -> v4 | **dataset-namespaced refs**: dataset id; every pin and working branch renamed into its namespace (the branches keep their pre-bookmark per-workspace names, which `gc --prune-bookmarks` judges as legacy). **content-hashed file states; no write policy**: local `file` states become content hashes (one read per file; the stat cache remembers); the `write` policy line is dropped -- whether writes fork or land upstream is the bookmark now; a workspace with no bookmark adopts the trunk. **one manifest file per key; absolute local paths**: `.toml` is appended to the key's last segment (`foo.bar` -> `foo.bar.toml`; before, `foo` and `foo.bar` shared `foo.toml`); relative local paths in locators are resolved against the dataset root | stores and history (first part); working tree only (the others) |
 
-A migration that renames native refs (v2) has to rewrite history too: `gc`
+The part that renames native refs has to rewrite history too: `gc`
 subtracts what history references from what the stores hold, and both sides
 must agree. That means:
 

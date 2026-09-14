@@ -4818,15 +4818,16 @@ class Repo:
         return plan
 
     def apply_upgrade(self, plan: Plan) -> UpgradeReport:
-        """Execute a plan from `plan_upgrade`, one migration at a time.
+        """Execute a plan from `plan_upgrade`.
 
-        After each migration `tether.toml` records the new version, so an
-        interrupted upgrade resumes from the last completed step. A migration
-        that renames native refs fails *closed*: if any store rename fails, it
-        stops before rewriting history or the manifests, so both sides keep
-        naming the old refs; the renames that did succeed are logged and
-        skipped on the next run. Rewriting history changes commit ids: every
-        other clone must re-sync.
+        One migration brings any alpha format to the current version; its
+        parts run on what the dataset shows, `tether.toml` records the version
+        once at the end, and one VCS commit lands it. A part that renames
+        native refs fails *closed*: if any store rename fails, it stops before
+        rewriting history or the manifests, so both sides keep naming the old
+        refs; the renames that did succeed are logged and skipped on the next
+        run. Rewriting history changes commit ids: every other clone must
+        re-sync.
 
         Raises:
             ConfigError: Not an upgrade plan, or the dataset's version differs
