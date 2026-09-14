@@ -28,7 +28,7 @@ tether did to the *stores* to get there -- goes in tether's own
 | snapshot on every command | **snapshot**: concurrent fan-out fingerprint -- of every object on `verify`, `status --snapshot`, `tether snapshot`; of this bookmark's branches on `commit`. A plain `status` shows the last one with its age |
 | `jj commit` | **pin** the bookmark's branch heads + write state into manifests + `jj/git commit` + move the bookmark there |
 | `jj new -b`, `jj new <bookmark>` | **new**: create or join a bookmark; per Forkable object its branch is forked on the first write (`--eager`: now), or kept if it already sits at the pin |
-| stale working copy | per object: the committed state a branch was forked from is recorded; a manifest that now says otherwise refuses writes to that object until `new` |
+| stale working copy | the committed state each branch was forked from is recorded; a manifest that now says otherwise makes the *workspace* stale: `status` names the objects, writable `open` and `commit` refuse for every object until `new` |
 | `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
 | `jj log` | **log**: an object's *native* history (snapshots / versions / commits); ids feed `add --at` |
 | `jj git fetch` + rebase | **pull**: read the heads of the bookmark's branches -- on the trunk, every upstream branch and every branch-less object -- and commit what moved onto the bookmark |
@@ -217,16 +217,17 @@ says exactly what it could not reverse:
 | Undoing a ... | does |
 | --- | --- |
 | `commit` | uncommits it (the manifests become working-tree changes again; the pins stay, still referenced) while it is still the working copy's parent |
-| `new` / a lazy fork | deletes the branches it created, re-points the ones it reset to their recorded heads, restores `workspace.toml`, returns the VCS working copy if it has not moved since |
-| `gc` | recreates deleted branches from their recorded heads and listings from the VCS; deleted **pins are irreversible** -- once a manifest references them again, `repair` recreates them while the state is still reachable |
+| `new` / a lazy fork / `restore` | deletes the branches it *created*, restores `workspace.toml`, returns the VCS working copy if it has not moved since; a branch it *reset* is reported with its old head (`restore KEY --from REV` puts it back) |
+| `gc` | restores forgotten working refs and listings from the VCS; deleted **branches and pins are irreversible** -- `repair` recreates a bookmark's branches from its manifests, and pins once a manifest references them again while the state is still reachable |
 | `import` / `add` / `remove` | restores the manifests |
 | `promote` | is refused, with the previous base heads printed for a manual reset; backends only fast-forward |
 
-`tether undo --to ID` walks back through every newer operation in turn -- the
-per-operation-delta version of `jj op restore`, which stops where a store
-will not follow. A branch that gained writes since the operation is never
-deleted or reset silently: `undo` refuses until you commit them or pass
-`--discard`. The same
+The store-side rule: `undo` deletes what an operation *created* and never
+guesses where a branch it *reset* should go -- that is a `restore` you choose.
+Several slips are several `undo`s, newest first (there is no `jj op restore`
+equivalent: tether's log holds per-operation deltas, not whole views). A
+created branch that gained writes since the operation is never deleted
+silently: `undo` refuses until you commit them or pass `--discard`. The same
 rule applies to `new` itself -- a working branch holding writes you never
 committed is only reset with `--discard`.
 
@@ -276,13 +277,15 @@ aside. You read and write with the system's own library.
 ## Stale working copies
 
 jj's stale-working-copy check, applied to external branches. The workspace
-remembers the committed state each working branch was forked from; if the
-manifest now says otherwise, the branch no longer starts where the dataset
-says it does and the object is *stale*: `status` names it, writable `open`
-refuses with `StaleWorkingCopyError`, and `tether new` clears it.
+remembers the committed state each working branch was forked from; if a
+manifest now says otherwise, that branch no longer starts where the dataset
+says it does and the *workspace* is stale. Detection is per object -- `status`
+names which -- but the refusal is workspace-wide, as jj's is: writable `open`
+of any object and `commit` raise `StaleWorkingCopyError` until `tether new`
+re-decides every fork from the current pins. Read-only handles keep working.
 
-- Stale: someone else committed that object on your bookmark (`--shared`);
-  the bookmark was moved by hand to a commit where it is pinned differently.
+- Stale: someone else committed an object on your bookmark (`--shared`); the
+  bookmark was moved by hand to a commit where an object is pinned differently.
 - Never stale: your own commits; other objects being added or removed; the
   trunk (its working refs are the upstream branches themselves).
 

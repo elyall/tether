@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 from pytest_postgresql import factories
 
-_BIN = "/Users/elyall/Documents/Code/.bin"
+# Where `jj` lives when it is not on PATH: an optional TETHER_TEST_BIN dir, else
+# whatever `shutil.which` finds. Tests skip when neither yields a `jj`.
+_BIN = os.environ.get("TETHER_TEST_BIN")
 
 
 # --------------------------------------------------------------------------- #
@@ -80,7 +82,7 @@ def _jj_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch, _jj_config: Path) -> None:
-    if os.path.isdir(_BIN):
+    if _BIN and os.path.isdir(_BIN) and shutil.which("jj") is None:
         monkeypatch.setenv("PATH", _BIN + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("JJ_CONFIG", str(_jj_config))
     monkeypatch.delenv("TETHER_REV", raising=False)

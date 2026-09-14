@@ -2629,7 +2629,7 @@ def _second_checkout(repo: Repo, vcs_root: Path, other_root: Path) -> Repo:
     return Repo.find(other_root)
 
 
-def test_forget_workspace_deletes_its_branches_files_and_checkout(
+def test_forget_workspace_deletes_its_files_and_checkout_not_branches(
     vcs_root: Path, tmp_path: Path
 ) -> None:
     repo = Repo.init(vcs_root)
@@ -2656,7 +2656,6 @@ def test_forget_workspace_deletes_its_branches_files_and_checkout(
     assert ops == {"delete-file", "forget-vcs-workspace"}
     report = repo.apply_forget_workspace(plan)
     assert not report.failed, report.failed
-    assert report.deleted_working_refs == {}
     assert theirs in store.system(system).branches
     assert mine in store.system(system).branches
     assert not ws_file.exists()

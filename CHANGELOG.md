@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0b1] - 2026-09-14
+
+The alpha-exit release. Two security fixes, the engine bugs an external
+review found, a hardened backend contract, one migration for every alpha
+format, an `experimental` package with a seamless graduation path, and a
+narrower `undo` that reverses only what an operation created. Upgrade with
+`tether upgrade`; move `[vcs] git_path`/`jj_path`, `[backends.neon]`,
+`[backends.ducklake] init_sql`, `[backends.lakefs]`, and any endpoint or
+credential option out of `tether.toml` into `.tether/secrets.toml`.
+
 ### Security
 
 - **A cloned dataset is untrusted input.** The committed `tether.toml` could
@@ -67,6 +77,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Hygiene: `forget-workspace` lost its dead `delete-branch`/`keep-branch`
+  actions and the `--force-prune` compatibility flag (branches belong to
+  bookmarks; `gc --prune-bookmarks` judges them); `Handle.key` is documented
+  as a display label, not an identity; the docs describe staleness as the
+  code enforces it (detected per object, refused workspace-wide) and drop
+  the stale `--prune-workspaces` / `--write direct` references; the test
+  suite finds `jj` on `PATH` (or `TETHER_TEST_BIN`) instead of a hard-coded
+  path.
 - **`undo` reverses what an operation created, and reports the rest.**
   `undo new`/`fork`/`restore` delete the branches the op created and restore
   `workspace.toml` and the VCS position; a branch the op *reset* is no longer

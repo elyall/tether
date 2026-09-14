@@ -282,7 +282,7 @@ class GcReport:
     unpinned: dict[str, list[str]] = field(default_factory=dict)
     """Backend kind -> pin ids released (or that would be, in a dry run)."""
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
-    """Object key -> native working branches deleted (`--prune-workspaces`)."""
+    """Object key -> native working branches deleted (`--prune-bookmarks`)."""
     kept_working_refs: dict[str, list[str]] = field(default_factory=dict)
     """Object key -> stray branches kept because they hold unpinned data."""
     forgotten_working_refs: dict[str, list[str]] = field(default_factory=dict)
@@ -362,8 +362,6 @@ class ForgetWorkspaceReport:
 
     Attributes:
         workspace: The 8-char workspace id that was forgotten.
-        deleted_working_refs: Key -> branches deleted.
-        kept_working_refs: Key -> branches kept (unpinned data; `--force-prune`).
         removed_files: Per-workspace files removed (`workspace.toml`, `ops.jsonl`).
         vcs: What the VCS did (`jj workspace forget` / `git worktree remove`),
             if anything.
@@ -372,8 +370,6 @@ class ForgetWorkspaceReport:
     """
 
     workspace: str = ""
-    deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
-    kept_working_refs: dict[str, list[str]] = field(default_factory=dict)
     removed_files: list[str] = field(default_factory=list)
     vcs: str | None = None
     failed: dict[str, str] = field(default_factory=dict)
@@ -1406,7 +1402,7 @@ class Repo:
         write_object(self.root, manifest)
         self.objects[key] = manifest
         # A re-registered key starts without a working ref; any branch left by
-        # its previous incarnation is found by `gc --prune-workspaces`.
+        # its previous incarnation is found by `gc --prune-bookmarks`.
         self.workspace.working_refs.pop(key, None)
         self.workspace.pending_forks.pop(key, None)
         self.workspace.pending_resets.pop(key, None)
@@ -2483,13 +2479,13 @@ class Repo:
                 detail += f"; resets {existing}"
                 # Anything on the branch beyond what this workspace last
                 # committed (or forked from) is about to be thrown away.
-                known = [
+                recorded = [
                     self.workspace.base_states.get(key),
                     self.objects[key].state if key in self.objects else None,
                     self.workspace.fork_points.get(key),
                 ]
                 unpinned = head is not None and not any(
-                    self._same(m.kind, head, k) for k in known if k is not None
+                    self._same(m.kind, head, k) for k in recorded if k is not None
                 )
                 if unpinned and not discard:
                     plan.actions.append(
@@ -4597,9 +4593,7 @@ class Repo:
                     return (root / rel).resolve()
         return None
 
-    def plan_forget_workspace(
-        self, workspace_id: str | None = None, *, force_prune: bool = False
-    ) -> Plan:
+    def plan_forget_workspace(self, workspace_id: str | None = None) -> Plan:
         """Compute what forgetting a workspace would do (default: this one).
 
         `jj workspace forget` / `git worktree remove` plus tether's half: the
@@ -4613,15 +4607,12 @@ class Repo:
         Args:
             workspace_id: Full or 8-char id (see `tether ops` / `status`);
                 default the current workspace.
-            force_prune: Accepted for compatibility; branches are not judged
-                here any more.
         """
         target = (workspace_id or self.workspace.workspace_id)[:8]
         plan = Plan(
             command="forget-workspace",
             context={
                 "workspace": target,
-                "force_prune": force_prune,
                 "current": target == self.workspace.workspace_id[:8],
             },
         )
@@ -4651,8 +4642,10 @@ class Repo:
             )
         else:
             plan.notes.append(f"workspace {target}: no live checkout found")
-        if not any(a.op in ("delete-branch", "keep-branch") for a in plan.actions):
-            plan.notes.append(f"workspace {target}: no working branches in any store")
+        plan.notes.append(
+            "store branches belong to bookmarks, not workspaces: none are touched "
+            "(delete the bookmark and `gc --prune-bookmarks`)"
+        )
         return plan
 
     def apply_forget_workspace(self, plan: Plan) -> ForgetWorkspaceReport:
@@ -4674,16 +4667,7 @@ class Repo:
             )
             for a in plan.actions:
                 try:
-                    if a.op == "delete-branch":
-                        self.backend_for(a.kind).delete_working_ref(
-                            dict(a.params["locator"]), a.target
-                        )
-                        report.deleted_working_refs.setdefault(a.key, []).append(
-                            a.target
-                        )
-                    elif a.op == "keep-branch":
-                        report.kept_working_refs.setdefault(a.key, []).append(a.target)
-                    elif a.op == "delete-file":
+                    if a.op == "delete-file":
                         Path(a.target).unlink(missing_ok=True)
                         report.removed_files.append(a.target)
                     elif a.op == "forget-vcs-workspace":
@@ -4696,13 +4680,11 @@ class Repo:
             return report
 
     def forget_workspace(
-        self, workspace_id: str | None = None, *, force_prune: bool = False
+        self, workspace_id: str | None = None
     ) -> ForgetWorkspaceReport:
         """Forget a workspace (see `plan_forget_workspace`)."""
         with self._writer_lock():
-            return self.apply_forget_workspace(
-                self.plan_forget_workspace(workspace_id, force_prune=force_prune)
-            )
+            return self.apply_forget_workspace(self.plan_forget_workspace(workspace_id))
 
     # -- abandon --------------------------------------------------------- #
     def abandon(self, revs: Sequence[str], *, gc: bool = False) -> AbandonReport:

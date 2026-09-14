@@ -723,7 +723,7 @@ def test_cli_forget_workspace(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -
     r = runner.invoke(app, ["forget-workspace", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["workspace"] == ws8 and payload["deleted_working_refs"] == {}
+    assert payload["workspace"] == ws8 and "deleted_working_refs" not in payload
     assert any(p.endswith("workspace.toml") for p in payload["removed_files"])
     assert wref in store.system(system).branches  # until the bookmark goes and gc runs
 

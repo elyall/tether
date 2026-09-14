@@ -1195,11 +1195,6 @@ def forget_workspace(
     workspace_id: str | None = typer.Argument(
         None, help="Workspace id (full or 8 chars); default: this workspace."
     ),
-    force_prune: bool = typer.Option(
-        False,
-        "--force-prune",
-        help="Delete its branches even if they hold unpinned data.",
-    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show the plan; write nothing."
     ),
@@ -1213,22 +1208,22 @@ def forget_workspace(
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
-    """Forget a workspace: its branches, its state files, and the VCS checkout.
+    """Forget a workspace: its state files and the VCS checkout.
 
     `jj workspace forget` / `git worktree remove` plus tether's half in one
-    step: the workspace's working branches are deleted under the
-    `gc --prune-workspaces` rule (head pinned or equal to the base;
-    `--force-prune` for the rest), its `workspace.toml` and `ops.jsonl` are
-    removed, and the VCS stops tracking the checkout (git's main worktree is
-    left; jj leaves the directory). Forgetting the current workspace means the
-    next tether command here starts a fresh one. Exit code 2 if a step failed.
+    step: the workspace's `workspace.toml` and `ops.jsonl` are removed and the
+    VCS stops tracking the checkout (git's main worktree is left; jj leaves
+    the directory). Store branches belong to bookmarks, not workspaces, so
+    none are touched -- delete the bookmark and `gc --prune-bookmarks` for
+    that. Forgetting the current workspace means the next tether command here
+    starts a fresh one. Exit code 2 if a step failed.
     """
     repo = _repo()
     try:
         if from_plan is not None:
             plan = _load_plan(from_plan, "forget-workspace")
         else:
-            plan = repo.plan_forget_workspace(workspace_id, force_prune=force_prune)
+            plan = repo.plan_forget_workspace(workspace_id)
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
@@ -1240,8 +1235,6 @@ def forget_workspace(
         _emit(
             {
                 "workspace": report.workspace,
-                "deleted_working_refs": report.deleted_working_refs,
-                "kept_working_refs": report.kept_working_refs,
                 "removed_files": report.removed_files,
                 "vcs": report.vcs,
                 "failed": report.failed,
@@ -1250,14 +1243,6 @@ def forget_workspace(
         )
     else:
         typer.echo(f"forgot workspace {report.workspace}")
-        for key, refs in sorted(report.deleted_working_refs.items()):
-            for ref in refs:
-                typer.echo(f"  deleted  {key}: {ref}")
-        for key, refs in sorted(report.kept_working_refs.items()):
-            for ref in refs:
-                typer.secho(
-                    f"  kept     {key}: {ref} (holds data; --force-prune)", fg="yellow"
-                )
         for path in report.removed_files:
             typer.echo(f"  removed  {path}")
         if report.vcs:

@@ -50,7 +50,12 @@ class Handle:
     """Base class for all native handles."""
 
     key: str
-    """The object's native identity (URI, repository, database, ...)."""
+    """A short native label for display: the store's URI, path, repository,
+    or database -- or, for a branch-addressed system such as Neon, the branch
+    the handle opens. Not an identity: two handles on one store may carry
+    different keys, and the engine never compares handles by it. Use the
+    typed fields (`uri`, `path`, `branch`, `snapshot_id`, ...) for anything
+    that matters."""
     read_only: bool
     """Whether writes through this handle are allowed."""
 

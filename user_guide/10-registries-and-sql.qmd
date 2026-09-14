@@ -29,7 +29,7 @@ still does that, and only `commit` does.
 
 ## The tables
 
-Every output shares one schema (`tether.export.TABLES`), so a SQLite export and
+Every output shares one schema (`tether.experimental.registry.TABLES`), so a SQLite export and
 a Postgres schema have the same columns. JSON columns are `TEXT` in SQLite and
 `JSONB` in Postgres; timestamps are ISO-8601 text and `TIMESTAMPTZ`.
 

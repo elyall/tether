@@ -459,8 +459,10 @@ tether open zarr/imaging
 error: working copy is stale: the committed state of zarr/imaging changed since this workspace forked; run `tether new` to refork before writing
 ```
 
-Staleness is per object: the other forks stay writable, your own commits never
-make you stale, and adding or removing unrelated objects does not clear it.
+`status` names the stale objects, but the refusal is for the whole workspace,
+as jj's is: no writable handle and no `commit` until `new` re-decides every
+fork (read-only handles keep working). Your own commits never make you stale,
+and adding or removing unrelated objects neither causes nor clears it.
 
 `tether new` re-decides from the current pins and clears the flag. Everything
 you *committed* is safe: those pins are tags, independent of any branch. Writes
