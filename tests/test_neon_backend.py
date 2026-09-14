@@ -269,6 +269,29 @@ def test_pins_hang_off_the_branch_the_state_came_from(
         assert "neon_lsn:0/2000000" in ro.url
 
 
+def test_neon_free_tier_pins_are_unprotected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEON_API_KEY", "secret")
+    b = NeonBackend({"api_url": BASE, "protected_pins": False})
+    monkeypatch.setattr(b, "_probe", lambda uri: ("0/16B3748", "742"))
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        pin = b.pin(LOCATOR, b.fingerprint(LOCATOR, None), "abc123def456")
+        br = next(x for x in fake.branches.values() if x["name"] == pin.ref)
+        assert br["protected"] is False
+        b.unpin(LOCATOR, pin)  # no unprotect call needed
+        assert pin.ref not in {x["name"] for x in fake.branches.values()}
+
+
+def test_neon_handle_keeps_the_password_out_of_repr() -> None:
+    h = NeonHandle(
+        key="main", read_only=False, url="postgresql://u:pw@h/db", branch="main"
+    )
+    assert "pw" not in repr(h)
+    assert h.redacted_url == "postgresql://u:***@h/db"
+    assert h.url == "postgresql://u:pw@h/db"  # what psql needs
+
+
 def test_verify_detects_lsn_drift(backend: NeonBackend) -> None:
     fake = FakeNeon()
     with respx.mock as router:

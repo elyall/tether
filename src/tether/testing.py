@@ -17,9 +17,11 @@ from tether.backends.base import (
     VerifyStatus,
     content_state,
 )
+from tether.errors import BackendError
 from tether.handles import Handle
 from tether.manifest import (
     Locator,
+    Pin,
     compute_pin_id,
     ref_for_pin,
     working_ref_name,
@@ -130,6 +132,40 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
     # The pin protects state against later drift of the working ref.
     h.mutate(loc, None)
     assert b.verify(loc, state, pin, deep=False).ok, "pin must protect state"
+    # The same id for a *different* state is a contradiction the backend must
+    # not paper over by moving or reusing the ref.
+    other = b.fingerprint(loc, None)
+    assert content_state(b, other) != content, "mutate must change the state"
+    try:
+        b.pin(loc, other, pid)
+    except BackendError:
+        pass
+    else:
+        raise AssertionError("pin(same id, other state) must raise BackendError")
+    assert b.verify(loc, state, pin, deep=False).ok, "the original pin must survive"
+    # Operations on a ref that does not exist raise BackendError, not a
+    # library exception and not a silent success.
+    ghost = Pin(id="0" * 16, ref=ref_for_pin("0" * 16 + ".ghost"))
+    try:
+        b.open(loc, ghost, read_only=True)
+    except BackendError:
+        pass
+    except Exception as exc:  # pragma: no cover - reported to the author
+        raise AssertionError(
+            "open(missing pin) must raise BackendError, got "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    else:
+        raise AssertionError("open(missing pin) must raise BackendError")
+    try:
+        b.unpin(loc, ghost)  # already gone: a no-op or a BackendError
+    except BackendError:
+        pass
+    except Exception as exc:  # pragma: no cover - reported to the author
+        raise AssertionError(
+            "unpin(missing pin) must be a no-op or raise BackendError, got "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return pid
 
 
@@ -158,6 +194,14 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
         "fork onto an existing name must reset the branch to the source"
     )
     wref = again
+    # ...and the other half: a branch already at the source is left alone --
+    # the name comes back unchanged and nothing new appears in the listing.
+    listed_before = set(b.list_working_refs(loc))
+    assert b.fork(loc, pin, wref) == wref, "fork onto an at-source branch keeps it"
+    assert set(b.list_working_refs(loc)) == listed_before, (
+        "fork onto an at-source branch must not create a sibling"
+    )
+    assert same(b.fingerprint(loc, wref), state)
     listed = b.list_working_refs(loc)
     assert wref in listed, f"list_working_refs must include {wref!r} (got {listed})"
     b.delete_working_ref(loc, wref)

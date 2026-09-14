@@ -10,8 +10,9 @@ dataset at a branch/tag, a lakeFS ref URI) and steps out of the way.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -30,6 +31,18 @@ __all__ = [
     "MemoryHandle",
     "NeonHandle",
 ]
+
+
+def redact_url(url: str) -> str:
+    """`url` with any password replaced by `***`."""
+    parts = urlsplit(url)
+    if not parts.password:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{parts.username}:***@{host}" if parts.username else f":***@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 @dataclass
@@ -75,12 +88,21 @@ class IcechunkHandle(Handle):
 
 @dataclass
 class NeonHandle(Handle):
-    """A Neon Postgres connection URL for a branch or a pinned point in time."""
+    """A Neon Postgres connection URL for a branch or a pinned point in time.
 
-    url: str
+    `url` carries the role's password (it is what `tether open` hands to
+    `psql`); it is kept out of `repr` and :attr:`redacted_url` is what
+    anything that logs or displays the handle should use.
+    """
+
+    url: str = field(repr=False)
     """`postgresql://...` connection URL (credentials per the Neon API)."""
-    branch: str
+    branch: str = ""
     """Neon branch name the URL points at."""
+
+    @property
+    def redacted_url(self) -> str:
+        return redact_url(self.url)
 
 
 @dataclass

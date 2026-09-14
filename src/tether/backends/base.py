@@ -12,11 +12,12 @@ stateless coordinators over user-supplied resources.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from tether.errors import CapabilityError
 from tether.handles import Handle
@@ -270,6 +271,7 @@ class ObjectBackend(Protocol):
         Defaults to the full locator; override to exclude non-identity fields
         (region, credential references, source branch, ...).
         """
+        return dict(locator)
 
     LOCAL_PATH_KEYS: tuple[str, ...] = ()
     """Locator keys whose value may be a local filesystem path. The engine
@@ -371,17 +373,24 @@ class ObjectBackend(Protocol):
 
         return canonical_bytes(self.identity(locator)).decode()
 
+    # The protocol's own bodies raise rather than return None: a backend that
+    # advertises a capability and forgets the method fails loudly at the call,
+    # not with a `None` the engine writes into a manifest.
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         """Read the current state at ``working_ref`` (or the locator's base)."""
+        raise NotImplementedError(f"{self.kind} backend does not fingerprint")
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         """Create a durable native ref for ``state``. Requires ``PIN``."""
+        raise NotImplementedError(f"{self.kind} backend does not pin")
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         """Release a pin. Requires ``PIN``."""
+        raise NotImplementedError(f"{self.kind} backend does not pin")
 
     def list_pins(self, locator: Locator) -> set[str]:
         """Return pin ids that currently exist natively. Requires ``PIN``."""
+        raise NotImplementedError(f"{self.kind} backend does not pin")
 
     def verify(
         self,
@@ -391,6 +400,7 @@ class ObjectBackend(Protocol):
         deep: bool,
     ) -> VerifyReport:
         """Check that ``state``/``pin`` still hold."""
+        raise NotImplementedError(f"{self.kind} backend does not verify")
 
     def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         """Create a writable branch ``name`` off ``source``. Requires ``FORK``.
@@ -403,9 +413,11 @@ class ObjectBackend(Protocol):
         ``source`` (whatever was written on it is discarded); a branch already
         at ``source`` is left alone. The conformance suite checks this.
         """
+        raise NotImplementedError(f"{self.kind} backend does not fork")
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
+        raise NotImplementedError(f"{self.kind} backend does not fork")
 
     def base_branch(self, locator: Locator) -> str:
         """The upstream branch a locator names: what the trunk bookmark stands
@@ -516,6 +528,7 @@ class ObjectBackend(Protocol):
         ref, a :class:`~tether.manifest.Pin` (read a pinned state), or a
         recorded ``State`` mapping (read an addressable state without a pin).
         """
+        raise NotImplementedError(f"{self.kind} backend does not open")
 
     def listing(self, locator: Locator, state: State) -> str | None:
         """Optional detailed description of ``state`` to store alongside it.
@@ -702,6 +715,71 @@ def content_state(backend: ObjectBackend, state: State | None) -> State | None:
     if not volatile:
         return state
     return {k: v for k, v in state.items() if k not in volatile}
+
+
+_B = TypeVar("_B")
+
+_GUARDED_METHODS = (
+    "fingerprint",
+    "pin",
+    "unpin",
+    "list_pins",
+    "verify",
+    "fork",
+    "delete_working_ref",
+    "list_working_refs",
+    "promote",
+    "merge",
+    "ancestor_of",
+    "open",
+    "diff",
+    "history",
+    "listing",
+    "check_quiescence",
+    "branch_head",
+    "resolve",
+)
+
+
+def wrap_library_errors(cls: type[_B]) -> type[_B]:
+    """Class decorator: a backend's protocol methods re-raise its library's
+    exceptions as :class:`~tether.errors.BackendError`.
+
+    The class provides ``_library_errors() -> tuple[type[BaseException], ...]``
+    (a staticmethod, importing lazily so an optional dependency is only needed
+    when the backend runs). `TetherError`s pass through untouched. The engine
+    catches `TetherError` at its refusal sites, so a network blip or a missing
+    ref becomes a refusal or a clear message instead of a traceback from
+    inside a third-party client.
+    """
+    from tether.errors import BackendError, TetherError
+
+    # `_library_errors` is a convention of the decorated class, not a protocol
+    # member; look it up dynamically so the decorator stays generic.
+    errors: Callable[[], tuple[type[BaseException], ...]] = getattr(  # noqa: B009
+        cls, "_library_errors"
+    )
+    kind = str(getattr(cls, "kind", "backend"))
+
+    def guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def inner(self: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(self, *args, **kwargs)
+            except TetherError:
+                raise
+            except errors() as exc:
+                raise BackendError(
+                    f"{kind}: {type(exc).__name__}: {exc}", kind=kind
+                ) from exc
+
+        return inner
+
+    for name in _GUARDED_METHODS:
+        fn = cls.__dict__.get(name)
+        if callable(fn):
+            setattr(cls, name, guarded(fn))
+    return cls
 
 
 def unsafe_option_keys(

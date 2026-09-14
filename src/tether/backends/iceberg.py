@@ -24,14 +24,17 @@ from tether.backends.base import (
     base_at,
     iso_utc,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcebergHandle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
+@wrap_library_errors
 class IcebergBackend(ObjectBackend):
     kind = "iceberg"
+    MATURITY = "experimental"  # driven only through a fake; no catalog test yet
     URI_KEYS = ("identifier",)
     SAFE_CONFIG_KEYS = frozenset({"catalog"})
     SAFE_OPTION_KEYS = MappingProxyType(
@@ -50,6 +53,17 @@ class IcebergBackend(ObjectBackend):
         | Capability.HISTORY
         | Capability.PROMOTE
     )
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        import pyiceberg.exceptions as pe
+
+        library = tuple(
+            c
+            for c in vars(pe).values()
+            if isinstance(c, type) and issubclass(c, Exception)
+        )
+        return (*library, OSError)
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}

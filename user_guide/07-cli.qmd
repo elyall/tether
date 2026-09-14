@@ -18,7 +18,7 @@ tether pull [BOOKMARK] [-m MESSAGE]
 tether commit -m MESSAGE [--no-vcs] [--strict] [--force] [--no-snapshot] [--dry-run | --plan FILE]
 tether commit --from-plan FILE [-m MESSAGE] [--no-vcs]
 tether new [REV] [-b NAME] [--shared] [--keep] [--eager | --lazy] [--discard] [--dry-run | --plan FILE | --from-plan FILE]
-tether open KEY [-r REV] [--read-only | --writable]
+tether open KEY [-r REV] [--read-only | --writable] [--with-password]
 tether restore KEY... --from REV [--discard] [--dry-run | --plan FILE | --from-plan FILE]
 tether promote [KEY]... [-r REV] [--strategy auto|ff|merge] [-m MESSAGE] [--dry-run | --plan FILE | --from-plan FILE]
 tether verify [-r REV] [--all-history] [--deep]
@@ -417,7 +417,7 @@ so CI notices. See
 | Handle | Address |
 | --- | --- |
 | `FileHandle` | `uri[#version_id]` |
-| `NeonHandle` | connection URL |
+| `NeonHandle` | connection URL, password redacted (`--with-password` prints it; `--json` never does) |
 | `GitHandle` | `path@sha` |
 | `IcechunkHandle` | `uri#<tag or branch or snapshot_id>` |
 | `IcebergHandle` | `identifier#<ref or snapshot_id>` |

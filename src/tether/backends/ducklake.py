@@ -41,6 +41,7 @@ from tether.backends.base import (
     base_at,
     iso_utc,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError, CapabilityError
 from tether.handles import DuckLakeHandle, Handle
@@ -95,6 +96,7 @@ def attach_sql(
     return f"ATTACH {_quote(metadata)} AS {alias}{suffix}"
 
 
+@wrap_library_errors
 class DuckLakeBackend(ObjectBackend):
     kind = "ducklake"
     MATURITY = "experimental"
@@ -108,6 +110,19 @@ class DuckLakeBackend(ObjectBackend):
         | Capability.DIFF
         | Capability.HISTORY
     )
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        import duckdb
+
+        return (duckdb.Error, OSError)
+
+    def validate_locator(self, locator: Locator) -> None:
+        at = base_at(locator)
+        if at is not None and not at.isdigit():
+            raise BackendError(
+                f"ducklake `at` must be a snapshot number, got {at!r}", kind="ducklake"
+            )
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}

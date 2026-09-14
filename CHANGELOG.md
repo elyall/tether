@@ -65,6 +65,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   suffix is no longer mistaken for a legacy workspace id; `new -b` refuses a
   bookmark name ending in `.<number>`.
 
+### Changed
+
+- **Backend contract.** Icechunk, Iceberg, Delta, Dolt, Neon, `file`, and
+  DuckLake re-raise their library's exceptions as `BackendError`
+  (`wrap_library_errors`), so a network blip or a missing ref is a refusal at
+  the engine's `except TetherError` sites, not a traceback from inside a
+  client. The `ObjectBackend` protocol's own `fingerprint`/`pin`/`fork`/`open`
+  bodies raise `NotImplementedError` instead of returning `None`.
+- Icechunk `pin` resolves the snapshot before spending a tag name (a missing
+  snapshot no longer burns generations); `fork` leaves a branch already at
+  the source alone and wraps `reset_branch` errors. Git `fork` skips
+  `branch -f` when the branch is at the source. Delta `verify --deep` reads
+  the version's data files (a vacuumed version is `missing`). `file` refuses
+  to fingerprint a prefix whose objects report no ETag instead of digesting
+  names alone; its listing cache is guarded by the hash-cache lock. Neon pins
+  are protected by default with `protected_pins = false` for the free tier,
+  `delete_working_ref` re-lists to confirm, and `NeonHandle` keeps the
+  password out of `repr` (`redacted_url`). Dolt `branch_head`/`resolve` no
+  longer read a lost connection as "no such ref".
+- Conformance suite: the "already at source is left alone" half of the fork
+  contract, `pin(same id, other state)` raises, and `open`/`unpin` of a
+  missing ref raise `BackendError` (never a library exception). Iceberg is
+  `experimental` until it runs against a real catalog.
+
 ### Added
 
 - `.tether/secrets.toml` also carries per-URI-prefix and per-object

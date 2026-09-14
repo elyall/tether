@@ -69,6 +69,33 @@ def _default_is_main(path: Path) -> bool:
     return _git(path, "symbolic-ref", "--short", "HEAD") == "main"
 
 
+def test_git_fork_onto_a_branch_at_the_source_leaves_it_alone(tmp_path: Path) -> None:
+    """The reset contract's other half: no `branch -f` (and no reflog entry)
+    when the working branch already sits at the source."""
+    import subprocess
+
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    b = GitBackend()
+    loc = {"path": str(code)}
+    name = "tether.ws.0a1b2c3d.work"
+    assert b.fork(loc, {"sha": sha0}, name) == name
+    reflog = subprocess.run(
+        ["git", "-C", str(code), "reflog", "show", name],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert b.fork(loc, {"sha": sha0}, name) == name
+    again = subprocess.run(
+        ["git", "-C", str(code), "reflog", "show", name],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert again == reflog
+
+
 def test_git_refuses_option_shaped_refs_from_manifests(
     tmp_path: Path, vcs_root: Path
 ) -> None:

@@ -25,12 +25,14 @@ from tether.backends.base import (
     base_at,
     iso_utc,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcechunkHandle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 
+@wrap_library_errors
 class IcechunkBackend(ObjectBackend):
     kind = "icechunk"
     LOCAL_PATH_KEYS = ("uri",)
@@ -46,6 +48,12 @@ class IcechunkBackend(ObjectBackend):
         | Capability.PROMOTE
     )
 
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        import icechunk as ic
+
+        return (ic.IcechunkError, OSError)
+
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
         self._repos: dict[str, Any] = {}
@@ -56,6 +64,18 @@ class IcechunkBackend(ObjectBackend):
         if not uri:
             raise BackendError("icechunk locator needs 'uri'", kind="icechunk")
         return str(uri)
+
+    _SCHEMES = ("", "file", "s3")
+
+    def validate_locator(self, locator: Locator) -> None:
+        # Refused at `add`, not at the first read of a clone.
+        scheme = urlparse(self._uri(locator)).scheme
+        if scheme not in self._SCHEMES:
+            raise BackendError(
+                f"unsupported icechunk storage scheme: {scheme!r} (one of "
+                f"{', '.join(repr(s) for s in self._SCHEMES)})",
+                kind="icechunk",
+            )
 
     def _storage(self, locator: Locator):
         import icechunk as ic
@@ -218,7 +238,10 @@ class IcechunkBackend(ObjectBackend):
         import icechunk as ic
 
         repo = self._repo(locator)
-        sid = str(state["snapshot_id"])
+        # The snapshot must exist before any tag name is spent on it: a
+        # create_tag failure below then means "name taken", not "no such
+        # snapshot", and a missing snapshot does not burn generations.
+        sid = self._resolve(repo, str(state["snapshot_id"]))
         for ref in self._generations(pin_id):
             try:
                 repo.create_tag(ref, sid)
@@ -311,8 +334,17 @@ class IcechunkBackend(ObjectBackend):
             sid = self._resolve(repo, str(source["snapshot_id"]))
         try:
             repo.create_branch(name, sid)
+            return name
         except ic.IcechunkError:
+            pass
+        try:
+            if repo.lookup_branch(name) == sid:
+                return name  # already at the source: left alone
             repo.reset_branch(name, sid)
+        except ic.IcechunkError as exc:
+            raise BackendError(
+                f"cannot reset branch {name} to {sid[:12]}: {exc}", kind="icechunk"
+            ) from exc
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:

@@ -17,6 +17,11 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any
 
+try:
+    from pyarrow import ArrowException as ArrowError
+except ImportError:  # pragma: no cover - optional dep
+    ArrowError = Exception
+
 from tether.backends.base import (
     Capability,
     HistoryEntry,
@@ -28,12 +33,14 @@ from tether.backends.base import (
     base_at,
     iso_utc,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError, CapabilityError
 from tether.handles import DeltaHandle, Handle
 from tether.manifest import Locator, Pin, State
 
 
+@wrap_library_errors
 class DeltaBackend(ObjectBackend):
     kind = "delta"
     LOCAL_PATH_KEYS = ("uri",)
@@ -58,6 +65,19 @@ class DeltaBackend(ObjectBackend):
         | Capability.DIFF
         | Capability.HISTORY
     )
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        from deltalake.exceptions import DeltaError
+
+        return (DeltaError, OSError)
+
+    def validate_locator(self, locator: Locator) -> None:
+        at = base_at(locator)
+        if at is not None and not at.isdigit():
+            raise BackendError(
+                f"delta `at` must be a table version number, got {at!r}", kind="delta"
+            )
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
@@ -186,9 +206,17 @@ class DeltaBackend(ObjectBackend):
                 VerifyStatus.UNKNOWN, "pass --deep to load the version (vacuum check)"
             )
         try:
-            self._table(locator, version=version, without_files=True)
+            # `without_files` skips the very check --deep is for: a vacuumed
+            # version keeps its log but not its data files. Reading every
+            # file's footer touches each one.
+            table = self._table(locator, version=version)
+            table.to_pyarrow_dataset().count_rows()
         except BackendError as exc:
             return VerifyReport(VerifyStatus.MISSING, str(exc))
+        except (*self._library_errors(), ValueError, ArrowError) as exc:
+            return VerifyReport(
+                VerifyStatus.MISSING, f"version {version} cannot be read: {exc}"
+            )
         return VerifyReport(VerifyStatus.OK)
 
     def fork(self, locator: Locator, source: Pin | State, name: str) -> str:

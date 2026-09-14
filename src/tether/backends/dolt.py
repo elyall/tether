@@ -38,6 +38,7 @@ from tether.backends.base import (
     base_at,
     iso_utc,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError, MergeConflict
 from tether.handles import DoltHandle, Handle
@@ -45,6 +46,17 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 MAIN = "main"
 DEFAULT_PORT = 3306
+
+
+def _programming_errors() -> tuple[type[BaseException], ...]:
+    """The exceptions Dolt raises for a bad *statement* (unknown column, unknown
+    ref) as opposed to a failed connection. pymysql's `OperationalError` covers
+    lost connections and refused logins and is deliberately not here."""
+    try:
+        import pymysql
+    except ImportError:  # pragma: no cover - optional dep
+        return (Exception,)
+    return (pymysql.ProgrammingError, pymysql.InternalError, pymysql.DataError)
 
 
 class DoltClient(Protocol):
@@ -131,7 +143,11 @@ class SqlDoltClient:
             row = self._one(
                 "SELECT hash, dirty FROM dolt_branches WHERE name = %s", (branch,)
             )
-        except Exception:  # older Dolt without the `dirty` column
+        except _programming_errors() as exc:
+            if "dirty" not in str(exc).lower():
+                raise
+            # Older Dolt without the `dirty` column; anything else (a lost
+            # connection, a permission error) propagates as a BackendError.
             row = self._one(
                 "SELECT hash, FALSE FROM dolt_branches WHERE name = %s", (branch,)
             )
@@ -180,8 +196,13 @@ class SqlDoltClient:
     def resolve(self, ref: str) -> str | None:
         try:
             row = self._one("SELECT HASHOF(%s)", (ref,))
-        except Exception:  # unknown ref raises in Dolt
-            return None
+        except _programming_errors() as exc:
+            # Dolt raises for an unknown ref; that is the `None` answer. A
+            # connection or server error is not, and must not read as "gone".
+            text = str(exc).lower()
+            if "not found" in text or "invalid ref" in text or "branch not" in text:
+                return None
+            raise
         return str(row[0]) if row and row[0] else None
 
     def log(self, ref: str, limit: int) -> list[dict[str, Any]]:
@@ -214,6 +235,7 @@ class SqlDoltClient:
             return result
 
 
+@wrap_library_errors
 class DoltBackend(ObjectBackend):
     kind = "dolt"
     MATURITY = "experimental"
@@ -229,6 +251,14 @@ class DoltBackend(ObjectBackend):
         | Capability.PROMOTE
         | Capability.MERGE
     )
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        try:
+            import pymysql
+        except ImportError:  # pragma: no cover - optional dep
+            return (OSError,)
+        return (pymysql.Error, OSError)
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}

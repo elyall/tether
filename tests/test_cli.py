@@ -880,3 +880,47 @@ def test_cli_version_and_backends() -> None:
         rows["file"]["maturity"] == "stable" and "diff" in rows["file"]["capabilities"]
     )
     assert rows["dolt"]["maturity"] == "experimental"
+
+
+def test_open_redacts_the_neon_password_by_default(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shell history and CI logs keep stdout: `tether open` prints a
+    connection URL with its password redacted unless --with-password, and
+    never with it under --json."""
+    from tether.handles import NeonHandle
+    from tether.repo import Repo
+
+    monkeypatch.chdir(vcs_root)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    full = "postgresql://runner:s3cret@ep.neon.tech/neondb"
+    monkeypatch.setattr(
+        Repo,
+        "open",
+        lambda self, key, **kw: NeonHandle(
+            key="main", read_only=True, url=full, branch="main"
+        ),
+    )
+    r = runner.invoke(app, ["open", "db"])
+    assert r.exit_code == 0 and "s3cret" not in r.output and "***" in r.output
+    r = runner.invoke(app, ["open", "db", "--with-password"])
+    assert r.exit_code == 0 and full in r.output
+    r = runner.invoke(app, ["open", "db", "--json", "--with-password"])
+    assert r.exit_code == 0 and "s3cret" not in r.output
+    assert (
+        json.loads(r.output)["address"] == "postgresql://runner:***@ep.neon.tech/neondb"
+    )
+
+
+def test_validate_locator_refuses_cheap_mistakes_at_add(vcs_root: Path) -> None:
+    from tether.errors import BackendError
+    from tether.repo import Repo
+
+    repo = Repo.init(vcs_root)
+    with pytest.raises(BackendError, match="unsupported icechunk storage scheme"):
+        repo.add("z", "icechunk", {"uri": "gs://bucket/repo"})
+    with pytest.raises(BackendError, match="delta `at` must be"):
+        repo.add("d", "delta", {"uri": str(vcs_root / "t"), "at": "v3"})
+    with pytest.raises(BackendError, match="ducklake `at` must be"):
+        repo.add("l", "ducklake", {"metadata": str(vcs_root / "m.ducklake"), "at": "x"})
+    assert repo.objects == {}

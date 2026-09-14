@@ -122,11 +122,12 @@ def _age(iso: str | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _handle_address(handle: Handle) -> str:
+def _handle_address(handle: Handle, *, with_password: bool = False) -> str:
     if isinstance(handle, FileHandle):
         return handle.uri + (f"#{handle.version_id}" if handle.version_id else "")
     if isinstance(handle, NeonHandle):
-        return handle.url
+        # Shell history and CI logs keep stdout; the full URL is opt-in.
+        return handle.url if with_password else handle.redacted_url
     if isinstance(handle, GitHandle):
         return f"{handle.path}@{handle.sha}"
     if isinstance(handle, IcechunkHandle):
@@ -849,12 +850,20 @@ def open_(
     read_only: bool | None = typer.Option(
         None, "--read-only/--writable", help="Force read-only or writable."
     ),
+    with_password: bool = typer.Option(
+        False,
+        "--with-password",
+        help="Print a connection URL with its password (Neon); by default the "
+        "password is redacted. Never honoured under --json.",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Print a native handle for an object (address on stdout).
 
     Without --rev, Forkable objects open writable at their working ref and
-    everything else read-only at the base.
+    everything else read-only at the base. A connection URL is printed with
+    its password redacted unless --with-password (for `psql "$(tether open
+    db --with-password)"`); --json is always redacted.
     """
     repo = _repo()
     try:
@@ -872,7 +881,7 @@ def open_(
             as_json=True,
         )
         return
-    typer.echo(_handle_address(handle))
+    typer.echo(_handle_address(handle, with_password=with_password))
 
 
 @app.command()

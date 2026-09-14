@@ -29,6 +29,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError
 from tether.handles import Handle, NeonHandle
@@ -88,6 +89,7 @@ class _NeonApi:
         return self._ok(self._client.patch(path, json=body)).json()
 
 
+@wrap_library_errors
 class NeonBackend(ObjectBackend):
     kind = "neon"
     MATURITY = "experimental"
@@ -108,6 +110,17 @@ class NeonBackend(ObjectBackend):
         | Capability.RETENTION_BOUND
         | Capability.BRANCH_IS_STORAGE
     )
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        import httpx
+
+        errors: tuple[type[BaseException], ...] = (httpx.HTTPError, OSError)
+        try:
+            import psycopg
+        except ImportError:  # pragma: no cover - optional dep
+            return errors
+        return (*errors, psycopg.Error)
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
@@ -336,12 +349,19 @@ class NeonBackend(ObjectBackend):
                         "name": ref,
                         "parent_id": parent["id"],
                         "parent_lsn": str(state["lsn"]),
-                        "protected": True,
+                        "protected": self._protect_pins(),
                     },
                     "endpoints": [],
                 },
             )
         return Pin(id=pin_id, ref=ref, created=existing is None)
+
+    def _protect_pins(self) -> bool:
+        """Pins are created *protected* (Neon refuses to delete a protected
+        branch, so a stray console click cannot lose one). Protected branches
+        are a paid feature: `[backends.neon] protected_pins = false` in
+        secrets.toml turns it off for the free tier."""
+        return bool(self._config.get("protected_pins", True))
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         self._fresh()
@@ -499,8 +519,13 @@ class NeonBackend(ObjectBackend):
         if ref == self._source_branch(locator):
             return
         br = self._branch_by_name(project_id, ref)
-        if br is not None:
-            self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
+        if br is None:
+            return
+        self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
+        # Deletion is asynchronous on Neon's side; re-list rather than trust
+        # the status code, as unpin does.
+        if self._branch_by_name(project_id, ref) is not None:
+            raise BackendError(f"branch {ref} was not deleted", kind="neon")
 
     def list_working_refs(self, locator: Locator) -> list[str]:
         self._fresh()

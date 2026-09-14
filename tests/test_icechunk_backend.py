@@ -55,6 +55,27 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
+def test_icechunk_library_errors_become_backend_errors(tmp_path: Path) -> None:
+    """Every protocol method re-raises icechunk's exceptions as BackendError,
+    so the engine's `except TetherError` sites see a refusal rather than a
+    traceback from inside the library; a pin of a snapshot that does not
+    exist is refused before any tag name is spent."""
+    import icechunk as ic
+
+    from tether.backends.icechunk import IcechunkBackend
+
+    b = IcechunkBackend()
+    with pytest.raises(BackendError, match="RepositoryNotFoundError"):
+        b.fingerprint({"uri": str(tmp_path / "missing")}, None)
+    uri = _new_repo(tmp_path / "repo")
+    loc = {"uri": uri}
+    state = b.fingerprint(loc, None)
+    with pytest.raises(BackendError):
+        b.pin(loc, {**state, "snapshot_id": "0" * 27}, "0" * 16)
+    repo = ic.Repository.open(ic.local_filesystem_storage(str(tmp_path / "repo")))
+    assert not repo.list_tags(), "a failed pin must not leave a tag behind"
+
+
 def test_icechunk_deleted_tag_comes_back_as_a_new_generation(vcs_root: Path) -> None:
     """Icechunk never reuses a deleted tag name, so a pin whose tag was deleted
     is recreated under a generation suffix: same id, ref `tether.<id>.2`.

@@ -327,6 +327,7 @@ class MemoryBackend(ObjectBackend):
             resolved = self._base_branch(locator)
         else:
             resolved = target
+        self.store.resolve(name, resolved)  # a missing ref is a BackendError now
         return MemoryHandle(
             key=name,
             read_only=read_only,

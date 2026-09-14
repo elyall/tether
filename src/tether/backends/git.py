@@ -283,6 +283,8 @@ class GitBackend(ObjectBackend):
             f"{_guard(name, 'branch')}^{{commit}}",
             check=False,
         )
+        if exists == sha:
+            return name  # already at the source: left alone (no reflog entry)
         if exists:
             self._run(locator, "branch", "-f", "--end-of-options", name, sha)
         else:

@@ -44,6 +44,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     register_backend,
+    wrap_library_errors,
 )
 from tether.errors import BackendError, CapabilityError
 from tether.handles import FileHandle, Handle
@@ -270,6 +271,7 @@ def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
     return out
 
 
+@wrap_library_errors
 class FileBackend(ObjectBackend):
     kind = "file"
     LOCAL_PATH_KEYS = ("uri", "path")
@@ -293,6 +295,14 @@ class FileBackend(ObjectBackend):
         | Capability.DIFF
     )
     _LISTING_CACHE = 16  # recent directory/prefix listings kept, by digest
+
+    @staticmethod
+    def _library_errors() -> tuple[type[BaseException], ...]:
+        try:
+            from obstore.exceptions import BaseError
+        except ImportError:  # pragma: no cover - optional dep
+            return (OSError,)
+        return (BaseError, OSError)
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
@@ -330,10 +340,18 @@ class FileBackend(ObjectBackend):
         return not (state.get("type") == "object" and not state.get("version_id"))
 
     def _remember(self, digest: str, rows: ListingRows) -> None:
-        self._listings[digest] = rows
-        self._listings.move_to_end(digest)
-        while len(self._listings) > self._LISTING_CACHE:
-            self._listings.popitem(last=False)
+        with self._hashes._lock:  # shared with the hash cache; one lock per backend
+            self._listings[digest] = rows
+            self._listings.move_to_end(digest)
+            while len(self._listings) > self._LISTING_CACHE:
+                self._listings.popitem(last=False)
+
+    def _recall(self, digest: str) -> ListingRows | None:
+        with self._hashes._lock:
+            rows = self._listings.get(digest)
+            if rows is not None:
+                self._listings.move_to_end(digest)
+            return rows
 
     # -- helpers --------------------------------------------------------- #
     def _uri(self, locator: Locator) -> str:
@@ -423,11 +441,26 @@ class FileBackend(ObjectBackend):
         if key.endswith("/") or key == "":
             rows: ListingRows = {}
             total = 0
+            without_etag: list[str] = []
             for page in obs.list(store, prefix=key or None):
                 for meta in page:
                     size = int(meta["size"])
-                    rows[str(meta["path"])] = (_strip_etag(meta.get("e_tag")), size)
+                    etag = _strip_etag(meta.get("e_tag"))
+                    if not etag:
+                        without_etag.append(str(meta["path"]))
+                    rows[str(meta["path"])] = (etag, size)
                     total += size
+            if without_etag:
+                # A digest over names alone would call any rewrite "unchanged".
+                # Say so rather than degrade silently.
+                sample = ", ".join(without_etag[:3])
+                raise BackendError(
+                    f"{len(without_etag)} object(s) under {key or '/'} report no ETag "
+                    f"({sample}{', ...' if len(without_etag) > 3 else ''}); the store "
+                    "cannot be fingerprinted by listing -- pin single objects "
+                    "with a versioned policy instead",
+                    kind="file",
+                )
             digest = _digest_pairs([(p, tok) for p, (tok, _) in rows.items()])
             self._remember(digest, rows)
             return {
@@ -529,14 +562,16 @@ class FileBackend(ObjectBackend):
         if state.get("type") not in ("dir", "prefix"):
             return None  # a single object's state is already fully descriptive
         digest = str(state.get("digest", ""))
-        rows = self._listings.get(digest)
+        rows = self._recall(digest)
         if rows is None:
             # Not cached (different process / evicted): re-read and use it only
             # if the object still has exactly the recorded state.
             current = self.fingerprint(locator, None)
             if current.get("digest") != digest:
                 return None
-            rows = self._listings[digest]
+            rows = self._recall(digest)
+            if rows is None:  # pragma: no cover - evicted between the two calls
+                return None
         return _dump_listing(rows)
 
     def diff(

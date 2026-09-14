@@ -106,7 +106,15 @@ Raise `BackendError` (or `CapabilityError` for unsupported operations) with
 `kind=self.kind`; the engine aggregates per-object failures into
 `MultiObjectError`. Import optional third-party libraries *inside* methods so
 `import tether.backends.mysys` works without them and the error surfaces when
-the backend is actually used.
+the backend is actually used. Decorate the class with
+`@wrap_library_errors` and provide a `_library_errors()` staticmethod
+returning the library's exception types: every protocol method then re-raises
+them as `BackendError`. The decorator wraps the methods *defined on the
+class* (`cls.__dict__`), so a method inherited from a mixin or base class is
+not wrapped -- define or re-declare it on the decorated class. Implement
+`validate_locator` for the checks that are cheap at `add` time (a URI scheme
+you support, an `at` that must be a number): the refusal then reaches the
+manifest's author, not the first reader of a clone.
 
 ## Capabilities decide behavior
 
