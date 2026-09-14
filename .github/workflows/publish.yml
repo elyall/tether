@@ -60,7 +60,10 @@ jobs:
           cd /tmp
           /tmp/smoke/bin/tether --version
           git init -q smoke-ds && cd smoke-ds
-          git -c user.email=ci@example.com -c user.name=ci commit -q --allow-empty -m init
+          # tether commits through git; the runner has no identity configured.
+          git config user.email ci@example.com
+          git config user.name ci
+          git commit -q --allow-empty -m init
           /tmp/smoke/bin/tether init
           printf 'hello\n' > data.txt
           /tmp/smoke/bin/tether add raw data.txt --kind file
