@@ -27,6 +27,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sha` must be hex, and a `ref`/`at`/`remote`/`path` beginning with `-` is
   refused at `add` (`ObjectBackend.validate_locator`) and at use.
 
+### Fixed
+
+- `promote` moved the trunk bookmark backwards or sideways when the trunk had
+  gained commits the bookmark lacked, dropping them off `main`. A full
+  promotion is refused at plan unless the trunk is an ancestor of the
+  bookmark's commit (merge or rebase the manifests first, or name keys); at
+  apply the trunk is never moved backwards (`PromoteReport.trunk_held`).
+- `new` on an existing bookmark (`reuse`) overwrote the branch's fork point
+  with its own head, so the next `promote` saw a spurious "base moved" and
+  merged (or refused) where a fast-forward was right. A kept branch keeps its
+  fork point, and `promote` asks the store's own history first
+  (`ancestor_of`), using the recorded fork point only where the backend has
+  no DAG.
+
 ### Added
 
 - `.tether/secrets.toml` also carries per-URI-prefix and per-object

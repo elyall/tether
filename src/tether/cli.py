@@ -1616,6 +1616,7 @@ def promote(
                 "held": report.held,
                 "conflicts": report.conflicts,
                 "trunk_moved": report.trunk_moved,
+                "trunk_held": report.trunk_held,
             },
             as_json=True,
         )
@@ -1644,6 +1645,8 @@ def promote(
         typer.echo("run `tether commit` to pin the merge result(s), then promote again")
     if report.trunk_moved:
         typer.echo(f"{repo.config.trunk} -> {report.trunk_moved[:12]}")
+    if report.trunk_held:
+        typer.echo(f"{repo.config.trunk} not moved: {report.trunk_held}")
     if report.refused:
         raise typer.Exit(1)
 

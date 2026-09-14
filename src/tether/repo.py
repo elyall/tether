@@ -329,6 +329,9 @@ class PromoteReport:
     """The commit the trunk bookmark now points at, when every promoted object
     fast-forwarded and nothing was refused: the bookmark's commit describes
     what the upstream branches now hold, so `main` is set to it."""
+    trunk_held: str | None = None
+    """Why the trunk bookmark was left where it is although the data landed:
+    it gained commits since the plan, and it is never moved backwards."""
     plan: Plan | None = None
 
 
@@ -2627,7 +2630,15 @@ class Repo:
                         pending_resets[a.key] = dict(a.params["head"])
                 elif a.op == "reuse":
                     working_refs[a.key] = a.target
-                    reused[a.key] = dict(a.params["then_state"])
+                    # The branch is kept, not forked: where it diverged from
+                    # the base is unchanged. Only a branch this workspace never
+                    # knew (joining a bookmark) takes the pin as its best guess.
+                    known = self.workspace.fork_points.get(a.key)
+                    reused[a.key] = (
+                        dict(known)
+                        if known is not None
+                        else dict(a.params["then_state"])
+                    )
 
             # The VCS has moved; before the first store write, make the
             # workspace agree with it. Every planned fork is recorded as
@@ -2702,7 +2713,10 @@ class Repo:
                         pending_resets[a.key] = pending_resets[first]
                 elif first in reused:
                     working_refs[a.key] = a.target
-                    reused[a.key] = dict(a.params["state"])
+                    known = self.workspace.fork_points.get(a.key)
+                    reused[a.key] = (
+                        dict(known) if known is not None else dict(a.params["state"])
+                    )
 
             # Keep refs of removed objects around until `gc` deletes their branches.
             self.workspace.working_refs = {**leftovers, **working_refs}
@@ -2719,9 +2733,7 @@ class Repo:
                 state = self.objects[key].state
                 if state is not None:
                     fork_points[key] = dict(state)
-            fork_points.update(
-                reused
-            )  # the branch sits at the pin: that is its fork point
+            fork_points.update(reused)  # kept branches keep their fork point
             self.workspace.fork_points = fork_points
             self.workspace.base_states = {
                 k: v for k, v in self.workspace.base_states.items() if k in leftovers
@@ -3842,13 +3854,16 @@ class Repo:
                 plan.notes.append(f"{key}: base already at the target")
                 continue
 
-            unchanged: bool | None
-            if fork_point is not None:
+            # Is the base still behind the source? The store's own history
+            # answers exactly where it can (`ancestor_of`: git, icechunk,
+            # lakeFS, Dolt, memory); the recorded fork point is the fallback
+            # for backends without a DAG -- a heuristic that lies after a
+            # bookmark is joined from elsewhere or reset by hand.
+            unchanged: bool | None = backend.ancestor_of(
+                m.locator, base_state, _source_object(source)
+            )
+            if unchanged is None and fork_point is not None:
                 unchanged = self._same(m.kind, fork_point, base_state)
-            else:
-                unchanged = backend.ancestor_of(
-                    m.locator, base_state, _source_object(source)
-                )
 
             can_ff = Capability.PROMOTE in eff
             can_merge = Capability.MERGE in eff and "state" not in source
@@ -3958,7 +3973,52 @@ class Repo:
         if keys:
             self._refuse_partial_scopes(plan, set(selected), ("fast-forward", "merge"))
         self._share_scope_writes(plan, ("fast-forward", "merge"))
+        self._refuse_trunk_regression(plan, keys, rev)
         return plan
+
+    def _refuse_trunk_regression(
+        self, plan: Plan, keys: Sequence[str] | None, rev: str | None
+    ) -> None:
+        """A full promotion moves the trunk bookmark onto this bookmark's
+        commit. That is a fast-forward only when the trunk is an ancestor of
+        it; otherwise `main` would drop commits (`jj bookmark set` without
+        `--allow-backwards` refuses the same move). Land the data anyway and
+        `main` would describe a different upstream than the stores hold, so
+        the whole plan is refused: merge or rebase the manifests first, or
+        name keys (a subset never moves the trunk).
+        """
+        bookmark = self.workspace.bookmark
+        if keys or rev is not None or not bookmark or self.on_trunk():
+            return
+        writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
+        if not writes:
+            return
+        marks = self.vcs.bookmarks()
+        trunk_commit = marks.get(self.config.trunk)
+        here = marks.get(bookmark)
+        if not trunk_commit or not here or self.vcs.is_ancestor(trunk_commit, here):
+            return
+        why = (
+            f"{self.config.trunk} ({trunk_commit[:12]}) has commits this bookmark "
+            f"({bookmark} at {here[:12]}) does not; landing would move "
+            f"{self.config.trunk} backwards or sideways and drop them. Merge or "
+            f"rebase the manifests onto {self.config.trunk} first, or name keys to "
+            "land a subset (which never moves the trunk)"
+        )
+        plan.actions = [
+            Action(
+                "refuse",
+                a.key,
+                a.kind,
+                target=a.target,
+                detail=why,
+                params={"locator": a.params.get("locator", {})},
+            )
+            if a.op in ("fast-forward", "merge", "share", "hold")
+            else a
+            for a in plan.actions
+        ]
+        plan.notes.append(f"nothing moved: {why}")
 
     def _action_scope(self, a: Action) -> tuple[str, str] | None:
         """The branch scope of a write action, from what the *plan* captured.
@@ -4189,10 +4249,22 @@ class Repo:
                 and not report.merged
                 and not errors
             ):
-                commit = self.vcs.bookmarks().get(bookmark)
-                if commit:
+                marks = self.vcs.bookmarks()
+                commit = marks.get(bookmark)
+                trunk_commit = marks.get(self.config.trunk)
+                if commit and (
+                    not trunk_commit or self.vcs.is_ancestor(trunk_commit, commit)
+                ):
                     self.vcs.bookmark_set(self.config.trunk, commit)
                     report.trunk_moved = commit
+                elif commit:
+                    # The trunk gained a commit since the plan: the data landed,
+                    # the bookmark stays where it is rather than going backwards.
+                    report.trunk_held = (
+                        f"{self.config.trunk} moved to {str(trunk_commit)[:12]} since "
+                        "the plan; not moved backwards -- merge the manifests and "
+                        "promote again"
+                    )
             if op is not None:
                 self._end_op(
                     op,

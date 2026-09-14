@@ -160,6 +160,66 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
         repo.plan_promote(["nope"])
 
 
+def test_promote_never_moves_the_trunk_backwards(vcs_root: Path) -> None:
+    """The trunk bookmark advanced (an unrelated dataset commit) after the
+    feature bookmark forked. Landing the feature would set `main` to the
+    feature's commit and drop the newer one off `main`: refused at plan, with
+    the manifests to merge first; naming keys still lands a subset."""
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    other = _mem(repo, "other")
+    store = default_store()
+    wref = _forked(repo)  # bookmark `work`, forked from the baseline
+    store.write(system, wref, {"a": 1, "b": 2})
+    repo.commit("feature work")
+    feature_commit = repo.vcs.bookmarks()["work"]
+
+    # Meanwhile main moves on: an unrelated object changes on the trunk.
+    trunk_checkout = Repo.find(vcs_root)
+    trunk_checkout.new("main")
+    store.write(other, "main", {"x": 1})
+    trunk_checkout.commit("unrelated on main")
+    main_commit = trunk_checkout.vcs.bookmarks()["main"]
+    assert not trunk_checkout.vcs.is_ancestor(main_commit, feature_commit)
+
+    repo.new("work")
+    plan = repo.plan_promote()
+    assert {a.op for a in plan.actions if a.key} == {"refuse"}
+    assert any("backwards or sideways" in n for n in plan.notes)
+    report = repo.apply_promote(plan)
+    assert not report.fast_forwarded and report.trunk_moved is None
+    assert repo.vcs.bookmarks()["main"] == main_commit  # untouched
+    assert store.read(system, "main") == {"a": 1}  # nothing landed
+
+    # A subset lands the data and leaves the trunk where it is, as always.
+    report = repo.promote(["db"])
+    assert report.fast_forwarded and report.trunk_moved is None
+    assert store.read(system, "main") == {"a": 1, "b": 2}
+    assert repo.vcs.bookmarks()["main"] == main_commit
+
+
+def test_reusing_a_branch_keeps_its_fork_point(vcs_root: Path) -> None:
+    """`commit` then `new work` again reuses the branch. Its fork point is
+    where it diverged from main, not its own head: the next promote is a
+    fast-forward, not a spurious merge that claims 'base moved'."""
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    fork_point = dict(repo.workspace.fork_points["db"])
+    store.write(system, wref, {"a": 1, "b": 2})
+    repo.commit("v2 on work")
+    repo.new("work")  # reuse: the branch sits at its pin
+    assert repo.workspace.fork_points["db"] == fork_point  # unchanged
+    store.write(system, wref, {"a": 1, "b": 2, "c": 3})
+    repo.commit("v3 on work")
+    plan = repo.plan_promote()
+    (a,) = plan.actions
+    assert a.op == "fast-forward" and "base unchanged since fork" in a.detail
+    repo.apply_promote(plan)
+    assert store.read(system, "main") == {"a": 1, "b": 2, "c": 3}
+
+
 def test_promote_refuses_when_backend_cannot(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
