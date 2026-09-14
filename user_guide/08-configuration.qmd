@@ -171,6 +171,47 @@ other users (`chmod 600`) and never prints its contents -- not in `status`,
 not in `--json`, not in an error. `init` lists it in `.tether/.gitignore`;
 `Repo.find` re-adds the entry if an older dataset lacks it.
 
+### Advanced: two stores, two identities
+
+The case the per-URI and per-object entries exist for. A dataset tracks an
+Icechunk repository in the imaging lab's account and another in the
+sequencing core's; each account issues its own credentials, and one
+`commit` fingerprints and pins both. With `from_env` alone that is an
+`AWS_PROFILE` switch between commands, which a single `commit` cannot do.
+
+```bash
+tether add zarr/imaging s3://imaging-lab-data/plate-01.icechunk --kind icechunk
+tether add zarr/reads   s3://seqcore-archive/run-2026-09.icechunk --kind icechunk
+```
+
+```toml
+# .tether/secrets.toml (this checkout only; never committed)
+[uris."s3://imaging-lab-data/"]      # every object in the imaging bucket
+profile = "imaging-lab"              # a profile in ~/.aws/config
+
+[objects."zarr/reads"]               # one object, whichever bucket it is in
+role_arn = "arn:aws:iam::210987654321:role/seqcore-reader"
+region = "us-east-2"
+```
+
+`tether commit` now opens `zarr/imaging` with the `imaging-lab` profile's
+keys and `zarr/reads` with a session assumed into the sequencing core's role,
+in the same process, with no environment change between them. Each entry is
+resolved through `boto3` when the object is first touched; a third object
+with no entry keeps using the ambient environment. The manifests record only
+the two URIs -- the identities never leave this checkout.
+
+On CI the same layout works with literal keys injected by the runner:
+
+```toml
+[uris."s3://imaging-lab-data/"]
+access_key_id = "${IMAGING_KEY_ID}"      # a template your CI expands before
+secret_access_key = "${IMAGING_SECRET}"  # writing the file; tether reads values
+```
+
+(tether does not expand `${...}` itself; write the file with the values in
+place, or use a profile / role and let the runner's identity assume it.)
+
 ## Workspace state
 
 `.tether/workspace.toml` is untracked (ignored by the `.tether/.gitignore` that
