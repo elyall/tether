@@ -32,6 +32,7 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 class GitBackend(ObjectBackend):
     kind = "git"
     LOCAL_PATH_KEYS = ("path", "uri")  # `uri` is the CLI's positional locator
+    SAFE_CONFIG_KEYS = frozenset()  # git_path / jj_path: secrets.toml only
     # A change id is derived from the sha (and only present with jj); the same
     # sha must pin identically with or without jj installed.
     VOLATILE_KEYS = frozenset({"change_id"})

@@ -19,6 +19,7 @@ Two Lance specifics shape the mapping:
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 from tether.backends.base import (
@@ -51,6 +52,19 @@ def _tag_target(meta: dict[str, Any]) -> tuple[str, int]:
 class LanceBackend(ObjectBackend):
     kind = "lance"
     LOCAL_PATH_KEYS = ("uri",)
+    SAFE_CONFIG_KEYS = frozenset({"storage_options"})
+    SAFE_OPTION_KEYS = MappingProxyType(
+        {
+            "storage_options": frozenset(
+                {
+                    "region",
+                    "allow_http",
+                    "virtual_hosted_style_request",
+                    "conditional_put",
+                }
+            )
+        }
+    )
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -91,9 +105,12 @@ class LanceBackend(ObjectBackend):
         """Open the dataset at its main head (never cached: heads move)."""
         import lance
 
-        options = self._config.get("storage_options") or None
+        from tether.credentials import storage_options
+
+        options = dict(self._config.get("storage_options") or {})
+        options.update(storage_options(self.secrets_for(locator)))
         try:
-            return lance.dataset(self._uri(locator), storage_options=options)
+            return lance.dataset(self._uri(locator), storage_options=options or None)
         except _LANCE_ERRORS as exc:
             raise BackendError(
                 f"cannot open lance dataset {self._uri(locator)}: {exc}", kind="lance"

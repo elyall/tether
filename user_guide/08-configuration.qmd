@@ -8,9 +8,11 @@ title: "Configuration"
 <dataset-root>/
   tether.toml                 # committed: tether.version (older -> `tether upgrade`), dataset.id (the namespace
                               #   of this dataset's refs), snapshot.auto, verify.on_status,
-                              #   new.fork (lazy|eager), default policies, backend options, credential *references*
+                              #   new.fork (lazy|eager), default policies, non-secret backend options
   .tether/
-    .gitignore                # ignores workspace.toml and ops.jsonl
+    .gitignore                # ignores workspace.toml, ops.jsonl, secrets.toml, cache/, lock
+    secrets.toml              # untracked: everything a clone must not decide -- credentials or references,
+                              #   endpoints, executables, init SQL; per kind, per URI prefix, per object
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
                               #   states (so `diff --content` can compare them); pruned by gc
@@ -56,17 +58,9 @@ pin = "native"       # native | record
 [vcs]
 prefer = "jj"        # which adapter to use when both .jj and .git exist
 trunk = "main"       # the bookmark that stands for every object's upstream branch
-# jj_path = "/opt/jj/bin/jj"
-# git_path = "/usr/bin/git"
 
-[backends.file]      # passed verbatim to the backend factory; one table per kind
+[backends.file]      # non-secret options only; one table per kind (see "Trust boundary")
 storage_options = { region = "us-west-2" }
-
-[backends.neon]
-api_key_env = "NEON_API_KEY"
-
-[backends.ducklake]
-init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
 ```
 
 ## Dataset id
@@ -118,10 +112,64 @@ query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHE
 
 ## Backend options
 
-`[backends.<kind>]` is handed to the backend when it is first used. Only
-non-secret settings belong here (regions, endpoints, environment-variable
-*names*); credentials come from the environment. The per-backend keys are
-listed in [Backends](09-backends.qmd).
+`[backends.<kind>]` is handed to the backend when it is first used. Only what
+a backend allowlists may be set in the committed file -- `storage_options` for
+`file`/`delta`/`lance`, `catalog` for `iceberg` -- and inside those tables only
+the keys the backend names (`region`, `allow_http`,
+`virtual_hosted_style_request`, `conditional_put`; `type`, `warehouse`,
+`name`). Any other key is refused by name: an allowlist, so an option tether
+has never heard of cannot reach a store from a clone. Everything else goes in
+`.tether/secrets.toml` (next section), where the same tables may hold any key.
+The per-backend keys are listed in [Backends](09-backends.qmd).
+
+## Trust boundary: `.tether/secrets.toml`
+
+A cloned dataset is untrusted input. `tether.toml` and the manifests arrive
+with every clone, so nothing in them may choose an executable tether runs, an
+endpoint your credentials are sent to, SQL to execute, or which environment
+variable holds a secret. tether refuses a committed `tether.toml` that tries
+(`[vcs] git_path`, `[backends.neon] api_url`, `[backends.ducklake] init_sql`,
+any `[backends.lakefs]` client option, a `storage_options.endpoint`, ...) and
+says where the key belongs.
+
+Those settings live in `.tether/secrets.toml` -- untracked, per checkout,
+never committed -- or in the environment:
+
+```toml
+[vcs]
+git_path = "/usr/bin/git"                 # or TETHER_GIT / TETHER_JJ in the environment
+# jj_path = "/opt/jj/bin/jj"
+
+[backends.neon]                           # per-kind options the committed file may not set
+api_key_env = "NEON_API_KEY"
+
+[backends.ducklake]
+init_sql = ["CREATE SECRET (TYPE S3, PROVIDER credential_chain)"]
+
+[uris."s3://lab-a-bucket/"]               # every object whose store URI starts here
+profile = "lab-a"                          # an AWS shared-config profile ...
+# role_arn = "arn:aws:iam::123456789012:role/lab-a"   # ... or a role, assumed via STS ...
+# access_key_id = "..."                    # ... or, when nothing else will do, literal keys
+# secret_access_key = "..."
+# endpoint_url = "http://minio.local:9000"
+
+[objects."zarr/imaging"]                  # one object; beats a URI prefix
+profile = "imaging"
+```
+
+Resolution per object, first match wins: `[objects."<key>"]`, then the
+longest matching `[uris."<prefix>"]`, then `[backends.<kind>]`, then the
+environment and instance credential chain -- which is exactly today's
+behaviour for an object with no entry. A `profile` or `role_arn` is resolved
+through `boto3` (install it when you use them) into explicit credentials, so
+two stores with two identities work in one command; `file`, `delta`, and
+`lance` take the same entries as storage options; `icechunk` passes them to
+`s3_storage` instead of reading the environment.
+
+The file may hold literal credentials, so tether warns when it is readable by
+other users (`chmod 600`) and never prints its contents -- not in `status`,
+not in `--json`, not in an error. `init` lists it in `.tether/.gitignore`;
+`Repo.find` re-adds the entry if an older dataset lacks it.
 
 ## Workspace state
 

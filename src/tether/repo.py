@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import warnings
 
 try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
@@ -34,8 +35,11 @@ from tether.backends.base import (
     absolutize_locator,
     base_at,
     build_backend,
+    check_committed_config,
     content_state,
     effective_capabilities,
+    safe_config_keys,
+    safe_option_keys,
     tier_of,
 )
 from tether.errors import (
@@ -74,6 +78,7 @@ from tether.manifest import (
     read_config,
     read_listing,
     read_objects,
+    read_secrets,
     read_workspace,
     ref_for_pin,
     remove_object,
@@ -480,6 +485,31 @@ def short_state(state: State | None) -> str:
 # --------------------------------------------------------------------------- #
 # Repo
 # --------------------------------------------------------------------------- #
+_UNTRUSTED_VCS_KEYS = ("git_path", "jj_path")
+
+
+def _vcs_executables(root: Path, config: RepoConfig) -> tuple[str | None, str | None]:
+    """Where `git` and `jj` come from: `.tether/secrets.toml`, then the
+    environment (`TETHER_GIT`, `TETHER_JJ`), never the committed `tether.toml`.
+
+    Raises:
+        ConfigError: The committed file names an executable -- a clone must
+            not choose what runs on your machine.
+    """
+    committed = [k for k in _UNTRUSTED_VCS_KEYS if config.vcs.get(k)]
+    if committed:
+        raise ConfigError(
+            f"tether.toml [vcs] sets {', '.join(committed)}; a committed file "
+            "arrives with every clone and must not choose executables. Put it in "
+            ".tether/secrets.toml (untracked) under [vcs], or set TETHER_GIT / "
+            "TETHER_JJ"
+        )
+    secrets = read_secrets(root)
+    jj = secrets.vcs.get("jj_path") or os.environ.get("TETHER_JJ")
+    git = secrets.vcs.get("git_path") or os.environ.get("TETHER_GIT")
+    return (str(jj) if jj else None, str(git) if git else None)
+
+
 class Repo:
     """A tether dataset: manifests in a VCS working tree plus the systems they name.
 
@@ -523,6 +553,13 @@ class Repo:
         ensure_ignored(root)  # the op log is new since a7; never let jj snapshot it
         self.objects = read_objects(root)
         self.workspace = read_workspace(root)
+        self.secrets = read_secrets(root)
+        if self.secrets.insecure:
+            warnings.warn(
+                f"{_m.secrets_path(root)} is readable by other users; "
+                "`chmod 600` it -- it may hold credentials",
+                stacklevel=2,
+            )
         self._backends: dict[str, ObjectBackend] = {}
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
@@ -667,10 +704,11 @@ class Repo:
         config = config or RepoConfig()
         ensure_layout(root)
         write_config(root, config)
+        jj_path, git_path = _vcs_executables(root, config)
         vcs = detect_vcs(
             root,
-            jj_path=config.vcs.get("jj_path"),
-            git_path=config.vcs.get("git_path"),
+            jj_path=jj_path,
+            git_path=git_path,
             prefer=str(config.vcs.get("prefer", "jj")),
         )
         repo = cls(root, config, vcs)
@@ -725,10 +763,11 @@ class Repo:
         if root is None:
             raise ConfigError(f"no tether dataset found at or above {path}")
         config = read_config(root)
+        jj_path, git_path = _vcs_executables(root, config)
         vcs = detect_vcs(
             root,
-            jj_path=config.vcs.get("jj_path"),
-            git_path=config.vcs.get("git_path"),
+            jj_path=jj_path,
+            git_path=git_path,
             prefer=str(config.vcs.get("prefer", "jj")),
         )
         return cls(root, config, vcs, allow_outdated=allow_outdated)
@@ -744,10 +783,39 @@ class Repo:
         """
         backend = self._backends.get(kind)
         if backend is None:
-            backend = build_backend(kind, self.config.backends.get(kind, {}))
+            committed = dict(self.config.backends.get(kind, {}))
+            local = dict(self.secrets.backends.get(kind, {}))
+            # The committed file is untrusted input: only allowlisted keys, with
+            # nested option tables screened. The secrets file may set anything
+            # and wins where both set a key.
+            check_committed_config(
+                kind, safe_config_keys(kind), committed, safe_option_keys(kind)
+            )
+            backend = build_backend(kind, {**committed, **local})
             backend.configure_cache(_m.tether_path(self.root) / _m.CACHE_DIR)
+            backend.configure_secrets(
+                {**committed, **local}, self._secret_rules_for(kind, backend)
+            )
             self._backends[kind] = backend
         return backend
+
+    def _secret_rules_for(
+        self, kind: str, backend: ObjectBackend
+    ) -> dict[str, dict[str, Any]]:
+        """URI-prefix -> credential options for `kind`: `[uris."<prefix>"]` as
+        written, plus each `[objects."<key>"]` entry as an exact rule on that
+        object's own store URI (so an object entry beats a prefix)."""
+        rules: dict[str, dict[str, Any]] = dict(self.secrets.uris)
+        for key, options in self.secrets.objects.items():
+            m = self.objects.get(key)
+            if m is None or m.kind != kind:
+                continue
+            uri = next(
+                (str(m.locator[k]) for k in backend.URI_KEYS if m.locator.get(k)), None
+            )
+            if uri is not None:
+                rules[uri] = {**rules.get(uri, {}), **options}
+        return rules
 
     def _working_ref_for(self, key: str) -> str:
         """The store branch this workspace's bookmark stands for (`key` names

@@ -15,6 +15,7 @@ the untracked ``workspace.toml``. Everything in this module is pure data +
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -656,7 +657,14 @@ def find_dataset_root(start: Path) -> Path | None:
 
 CACHE_DIR = "cache"
 LOCK_FILENAME = "lock"
-UNTRACKED_FILES = (WORKSPACE_FILENAME, "ops.jsonl", CACHE_DIR, LOCK_FILENAME)
+SECRETS_FILENAME = "secrets.toml"
+UNTRACKED_FILES = (
+    WORKSPACE_FILENAME,
+    "ops.jsonl",
+    CACHE_DIR,
+    LOCK_FILENAME,
+    SECRETS_FILENAME,
+)
 """Per-workspace files under ``.tether/`` that must never be committed."""
 
 
@@ -692,6 +700,66 @@ def _atomic_write(path: Path, text: str) -> None:
 def read_config(root: Path) -> RepoConfig:
     text = config_path(root).read_text(encoding="utf-8")
     return RepoConfig.from_toml(text)
+
+
+def secrets_path(root: Path) -> Path:
+    return tether_path(root) / SECRETS_FILENAME
+
+
+SECRETS_HEADER = """\
+# .tether/secrets.toml -- everything a cloned dataset must not decide for you.
+#
+# Untracked and never committed. Credentials (literal or by reference:
+# profile, role_arn), endpoints, executables, and init SQL live here or in the
+# environment -- never in tether.toml, which arrives with a clone.
+#
+#   [vcs]             git_path / jj_path
+#   [backends.<kind>] per-kind options (api_url, init_sql, storage_options ...)
+#   [uris."<prefix>"] per-store credentials by URI prefix (longest match wins)
+#   [objects."<key>"] per-object credentials (beat a URI prefix)
+"""
+
+
+@dataclass
+class Secrets:
+    """The untracked per-checkout settings a clone must not choose.
+
+    Attributes:
+        vcs: `[vcs]` -- `git_path`, `jj_path`.
+        backends: `[backends.<kind>]` -- per-kind options merged over the
+            committed, allowlisted ones (endpoints, init SQL, client kwargs).
+        uris: `[uris."<prefix>"]` -- credentials or references for every
+            object whose primary locator starts with the prefix.
+        objects: `[objects."<key>"]` -- the same, for one object.
+        insecure: The file is readable by others (a warning, not a refusal).
+    """
+
+    vcs: dict[str, Any] = field(default_factory=dict)
+    backends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    uris: dict[str, dict[str, Any]] = field(default_factory=dict)
+    objects: dict[str, dict[str, Any]] = field(default_factory=dict)
+    insecure: bool = False
+
+    @classmethod
+    def from_toml(cls, text: str) -> Secrets:
+        data = _loads_plain(text)
+        return cls(
+            vcs=dict(data.get("vcs") or {}),
+            backends={str(k): dict(v) for k, v in (data.get("backends") or {}).items()},
+            uris={str(k): dict(v) for k, v in (data.get("uris") or {}).items()},
+            objects={str(k): dict(v) for k, v in (data.get("objects") or {}).items()},
+        )
+
+
+def read_secrets(root: Path) -> Secrets:
+    """Load `.tether/secrets.toml` (absent: empty), noting lax permissions."""
+    path = secrets_path(root)
+    if not path.is_file():
+        return Secrets()
+    secrets = Secrets.from_toml(path.read_text(encoding="utf-8"))
+    with contextlib.suppress(OSError):
+        secrets.insecure = bool(path.stat().st_mode & 0o077)
+    return secrets
 
 
 def write_config(root: Path, config: RepoConfig) -> None:

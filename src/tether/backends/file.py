@@ -32,6 +32,7 @@ import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlparse
 
@@ -272,6 +273,19 @@ def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
 class FileBackend(ObjectBackend):
     kind = "file"
     LOCAL_PATH_KEYS = ("uri", "path")
+    SAFE_CONFIG_KEYS = frozenset({"storage_options"})
+    SAFE_OPTION_KEYS = MappingProxyType(
+        {
+            "storage_options": frozenset(
+                {
+                    "region",
+                    "allow_http",
+                    "virtual_hosted_style_request",
+                    "conditional_put",
+                }
+            )
+        }
+    )
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -349,10 +363,14 @@ class FileBackend(ObjectBackend):
         """
         from obstore.store import from_url
 
+        from tether.credentials import storage_options
+
         options: dict[str, Any] = dict(self._config.get("storage_options") or {})
         region = locator.get("region")
         if region:
             options["region"] = str(region)
+        # Per-object credentials from secrets.toml, resolved to static keys.
+        options.update(storage_options(self.secrets_for(locator)))
         return from_url(root, **options)
 
     def _store(self, root: str, locator: Locator) -> Any:

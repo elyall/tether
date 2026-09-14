@@ -84,6 +84,7 @@ class _NeonApi:
 class NeonBackend(ObjectBackend):
     kind = "neon"
     MATURITY = "experimental"
+    SAFE_CONFIG_KEYS = frozenset()  # api_url / api_key_env: secrets.toml only
     # The LSN advances on checkpoints and autovacuum with no user write; it is
     # where a pin branch is cut, not what identifies the data. `next_xid` is.
     VOLATILE_KEYS = frozenset({"lsn"})

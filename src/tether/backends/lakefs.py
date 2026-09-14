@@ -43,6 +43,7 @@ MAIN = "main"
 class LakeFSBackend(ObjectBackend):
     kind = "lakefs"
     MATURITY = "experimental"
+    SAFE_CONFIG_KEYS = frozenset()  # client kwargs (host, keys): secrets.toml only
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

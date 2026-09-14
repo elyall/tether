@@ -14,6 +14,7 @@ Reads are handed back as a ``deltalake.DeltaTable``; writes go through
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 from tether.backends.base import (
@@ -36,6 +37,19 @@ from tether.manifest import Locator, Pin, State
 class DeltaBackend(ObjectBackend):
     kind = "delta"
     LOCAL_PATH_KEYS = ("uri",)
+    SAFE_CONFIG_KEYS = frozenset({"storage_options"})
+    SAFE_OPTION_KEYS = MappingProxyType(
+        {
+            "storage_options": frozenset(
+                {
+                    "region",
+                    "allow_http",
+                    "virtual_hosted_style_request",
+                    "conditional_put",
+                }
+            )
+        }
+    )
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -56,10 +70,13 @@ class DeltaBackend(ObjectBackend):
         return str(uri)
 
     def _storage_options(self, locator: Locator) -> dict[str, str] | None:
+        from tether.credentials import storage_options
+
         options = dict(self._config.get("storage_options") or {})
         region = locator.get("region")
         if region:
             options.setdefault("AWS_REGION", str(region))
+        options.update(storage_options(self.secrets_for(locator)))
         return {str(k): str(v) for k, v in options.items()} or None
 
     def _table(

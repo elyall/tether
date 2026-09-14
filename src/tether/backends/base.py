@@ -12,7 +12,7 @@ stateless coordinators over user-supplied resources.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
 from pathlib import Path
@@ -277,6 +277,55 @@ class ObjectBackend(Protocol):
     (`add`, `import`), against the caller's working directory, so a committed
     locator means the same path from every directory and every clone."""
 
+    SAFE_CONFIG_KEYS: frozenset[str] = frozenset()
+    """`[backends.<kind>]` keys the *committed* `tether.toml` may set. A clone
+    arrives with that file, so anything that chooses an executable, an
+    endpoint credentials are sent to, SQL to run, or which environment
+    variable holds a secret must come from the untracked `.tether/secrets.toml`
+    or the environment instead. A key whose value is a table (such as
+    `storage_options`) must also appear in :attr:`SAFE_OPTION_KEYS`; see
+    :func:`check_committed_config`."""
+
+    SAFE_OPTION_KEYS: Mapping[str, frozenset[str]] = {}
+    """For each committed option *table* (`storage_options`, `catalog`), the
+    keys a clone may set inside it. An allowlist, not a pattern: a key the
+    backend has not named is refused, so a new endpoint- or credential-shaped
+    option cannot slip through by spelling. Everything else in that table
+    comes from `secrets.toml`, where the same table may hold any key."""
+
+    URI_KEYS: tuple[str, ...] = ("uri", "path")
+    """Locator keys that name the object's store, in order of preference; the
+    per-URI entries of `secrets.toml` are matched against the first present."""
+
+    _secret_defaults: dict[str, Any]
+    _secret_rules: dict[str, dict[str, Any]]
+
+    def configure_secrets(
+        self, defaults: Mapping[str, Any], rules: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Receive the untracked per-checkout settings for this kind.
+
+        `defaults` is the merged `[backends.<kind>]` (committed allowlisted
+        keys under the secrets file's); `rules` maps a URI prefix to the
+        credential options for objects under it (the engine folds
+        `[objects."<key>"]` entries in as exact-URI rules). Backends read
+        them through :meth:`secrets_for`.
+        """
+        self._secret_defaults = dict(defaults)
+        self._secret_rules = {str(k): dict(v) for k, v in rules.items()}
+
+    def secrets_for(self, locator: Locator) -> dict[str, Any]:
+        """Credential options for one object: the longest matching URI prefix
+        rule over the kind defaults; empty when nothing applies (the backend
+        then falls back to the environment, as it always did)."""
+        defaults = dict(getattr(self, "_secret_defaults", {}) or {})
+        rules = getattr(self, "_secret_rules", {}) or {}
+        uri = next((str(locator[k]) for k in self.URI_KEYS if locator.get(k)), None)
+        if uri is None or not rules:
+            return defaults
+        best = max((p for p in rules if uri.startswith(p)), key=len, default=None)
+        return {**defaults, **rules[best]} if best is not None else defaults
+
     def state_addressable(self, locator: Locator, state: State) -> bool:
         """Whether *this* recorded state can be opened again later.
 
@@ -523,7 +572,13 @@ def register_backend(kind: str, factory: BackendFactory) -> None:
     _REGISTRY[kind] = factory
 
 
-def build_backend(kind: str, config: dict | None = None) -> ObjectBackend:
+def _factory_for(kind: str) -> BackendFactory:
+    """The registered factory for `kind`, importing its built-in module on
+    first use.
+
+    Raises:
+        ConfigError: Unknown kind, or its optional dependency is missing.
+    """
     from importlib import import_module
 
     from tether.errors import ConfigError
@@ -537,13 +592,61 @@ def build_backend(kind: str, config: dict | None = None) -> ObjectBackend:
                 f"Install the matching extra (e.g. `pip install tether-vcs[{kind}]`)."
             ) from exc
     try:
-        factory = _REGISTRY[kind]
+        return _REGISTRY[kind]
     except KeyError as exc:
         raise ConfigError(
             f"unknown backend kind: {kind!r} "
             f"(known: {', '.join(known_kinds()) or 'none'})"
         ) from exc
-    return factory(config or {})
+
+
+def build_backend(kind: str, config: dict | None = None) -> ObjectBackend:
+    return _factory_for(kind)(config or {})
+
+
+_CLASSES: dict[str, type[ObjectBackend]] = {}
+
+
+def backend_class(kind: str) -> type[ObjectBackend]:
+    """The backend class for `kind`, without building an instance -- for the
+    class-level contract (`SAFE_CONFIG_KEYS`, `MATURITY`, `capabilities`).
+
+    Resolved once per kind: the class in the factory's module whose `kind`
+    matches; a factory that is a closure (tests register those) falls back to
+    building one instance and taking its type. Raises the same `ConfigError`
+    as :func:`build_backend`.
+    """
+    import sys
+
+    cls = _CLASSES.get(kind)
+    if cls is None:
+        factory = _factory_for(kind)
+        module = sys.modules.get(factory.__module__)
+        # `ObjectBackend` is a Protocol with data members, so `issubclass` is
+        # off the table; backends inherit from it explicitly, so the MRO tells.
+        found = (
+            [
+                v
+                for v in vars(module).values()
+                if isinstance(v, type)
+                and ObjectBackend in v.__mro__
+                and getattr(v, "kind", None) == kind
+            ]
+            if module is not None
+            else []
+        )
+        cls = _CLASSES[kind] = found[0] if len(found) == 1 else type(factory({}))
+    return cls
+
+
+def safe_config_keys(kind: str) -> frozenset[str]:
+    """`SAFE_CONFIG_KEYS` of the backend class for `kind` (no instance built)."""
+    return frozenset(getattr(backend_class(kind), "SAFE_CONFIG_KEYS", frozenset()))
+
+
+def safe_option_keys(kind: str) -> Mapping[str, frozenset[str]]:
+    """`SAFE_OPTION_KEYS` of the backend class for `kind` (no instance built)."""
+    return dict(getattr(backend_class(kind), "SAFE_OPTION_KEYS", {}))
 
 
 def known_kinds() -> list[str]:
@@ -591,6 +694,48 @@ def content_state(backend: ObjectBackend, state: State | None) -> State | None:
     if not volatile:
         return state
     return {k: v for k, v in state.items() if k not in volatile}
+
+
+def unsafe_option_keys(
+    options: Mapping[str, Any], allowed: Collection[str] = ()
+) -> list[str]:
+    """Keys of a committed option table that are not on the backend's
+    allowlist for it -- and so must come from `secrets.toml` instead."""
+    return sorted(str(k) for k in options if k not in allowed)
+
+
+def check_committed_config(
+    kind: str,
+    safe_keys: frozenset[str],
+    config: Mapping[str, Any],
+    safe_option_keys: Mapping[str, Collection[str]] | None = None,
+) -> None:
+    """Refuse committed `[backends.<kind>]` keys a clone must not set.
+
+    Raises:
+        ConfigError: A key outside `safe_keys`, or a key inside an option
+            table that the backend's `SAFE_OPTION_KEYS` does not name (a
+            table with no allowlist at all refuses every key); the message
+            names the key and where it belongs.
+    """
+    from tether.errors import ConfigError
+
+    tables = safe_option_keys or {}
+    bad = sorted(k for k in config if k not in safe_keys)
+    nested = [
+        f"{k}.{sub}"
+        for k, v in config.items()
+        if k in safe_keys and isinstance(v, Mapping)
+        for sub in unsafe_option_keys(v, tables.get(k, ()))
+    ]
+    if bad or nested:
+        names = ", ".join(bad + nested)
+        raise ConfigError(
+            f"tether.toml [backends.{kind}] sets {names}; a committed file arrives "
+            "with every clone and must not choose executables, endpoints, "
+            "credentials, or SQL. Put it in .tether/secrets.toml (untracked) under "
+            f"[backends.{kind}], or in the environment"
+        )
 
 
 def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> Locator:

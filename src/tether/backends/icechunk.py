@@ -34,6 +34,7 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 class IcechunkBackend(ObjectBackend):
     kind = "icechunk"
     LOCAL_PATH_KEYS = ("uri",)
+    SAFE_CONFIG_KEYS = frozenset()  # credentials and endpoints: secrets.toml only
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -64,12 +65,25 @@ class IcechunkBackend(ObjectBackend):
         if parsed.scheme in ("", "file"):
             return ic.local_filesystem_storage(parsed.path or uri)
         if parsed.scheme == "s3":
-            return ic.s3_storage(
-                bucket=parsed.netloc,
-                prefix=parsed.path.lstrip("/") or None,
-                region=locator.get("region"),
-                from_env=True,
-            )
+            # One identity per object: a `secrets.toml` entry (profile, role,
+            # or literal keys) resolves to explicit credentials; without one
+            # the ambient environment serves, as it always did.
+            from tether.credentials import aws_credentials
+
+            secrets = self.secrets_for(locator)
+            creds = aws_credentials(secrets)
+            kwargs: dict[str, Any] = {
+                "bucket": parsed.netloc,
+                "prefix": parsed.path.lstrip("/") or None,
+                "region": secrets.get("region") or locator.get("region"),
+            }
+            if secrets.get("endpoint_url"):
+                kwargs["endpoint_url"] = str(secrets["endpoint_url"])
+            if creds:
+                kwargs.update(creds)
+            else:
+                kwargs["from_env"] = True
+            return ic.s3_storage(**kwargs)
         raise BackendError(
             f"unsupported icechunk storage scheme: {parsed.scheme!r}",
             kind="icechunk",

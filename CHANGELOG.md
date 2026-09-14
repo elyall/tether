@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A cloned dataset is untrusted input.** The committed `tether.toml` could
+  choose the executables tether runs (`[vcs] git_path`/`jj_path`), the
+  endpoint credentials are sent to (`[backends.neon] api_url`,
+  `storage_options.endpoint`, lakeFS client kwargs), SQL to run
+  (`[backends.ducklake] init_sql`), and which environment variable is sent as
+  a password (`[backends.dolt] password_env`). Backends now declare
+  `SAFE_CONFIG_KEYS`; a committed key outside the allowlist -- or an
+  endpoint-/credential-shaped key inside an allowed option table -- is
+  refused with a message saying where it belongs. Those settings live in the
+  new untracked `.tether/secrets.toml` (`[vcs]`, `[backends.<kind>]`) or the
+  environment (`TETHER_GIT`, `TETHER_JJ`). An Iceberg locator's `catalog`
+  table is screened the same way.
+
+### Added
+
+- `.tether/secrets.toml` also carries per-URI-prefix and per-object
+  credentials: `profile`, `role_arn` (resolved through `boto3` into explicit
+  keys), `endpoint_url`, `region`, or literal keys. Icechunk passes them to
+  `s3_storage` instead of `from_env`; `file`, Delta, and Lance take them as
+  storage options. Resolution: object entry, longest URI prefix, kind
+  section, then the environment -- an object with no entry behaves as before.
+  tether warns when the file is readable by other users and never prints its
+  contents. `ObjectBackend.configure_secrets`/`secrets_for` are the hooks.
+
 ## [0.1.0a10] - 2026-09-13
 
 0.1.0a9 was tagged in history but never published; a10 is the first release

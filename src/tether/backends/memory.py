@@ -100,6 +100,7 @@ class MemoryStore:
 
 class MemoryBackend(ObjectBackend):
     kind = "memory"
+    SAFE_CONFIG_KEYS = frozenset({"store"})  # a test seam; no reach beyond the process
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

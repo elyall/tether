@@ -217,6 +217,7 @@ class SqlDoltClient:
 class DoltBackend(ObjectBackend):
     kind = "dolt"
     MATURITY = "experimental"
+    SAFE_CONFIG_KEYS = frozenset()  # user_env / password_env: secrets.toml only
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

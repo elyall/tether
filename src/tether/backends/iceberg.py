@@ -10,6 +10,7 @@ retention window (hence ``RETENTION_BOUND``).
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 from tether.backends.base import (
@@ -31,6 +32,11 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 class IcebergBackend(ObjectBackend):
     kind = "iceberg"
+    URI_KEYS = ("identifier",)
+    SAFE_CONFIG_KEYS = frozenset({"catalog"})
+    SAFE_OPTION_KEYS = MappingProxyType(
+        {"catalog": frozenset({"type", "warehouse", "name"})}
+    )
     VOLATILE_KEYS = frozenset({"metadata_location"})
     """Rewritten by every table commit; part of the state until 0.1.0a7 and
     still present in old manifests, so it must not affect content identity."""
@@ -54,7 +60,22 @@ class IcebergBackend(ObjectBackend):
     def _catalog(self, locator: Locator):
         from pyiceberg.catalog import load_catalog
 
-        props = dict(locator.get("catalog") or self._config.get("catalog") or {})
+        from tether.backends.base import unsafe_option_keys
+
+        committed = dict(locator.get("catalog") or {})
+        allowed = self.SAFE_OPTION_KEYS.get("catalog", ())
+        if unsafe := unsafe_option_keys(committed, allowed):
+            raise BackendError(
+                f"iceberg locator sets catalog.{', catalog.'.join(unsafe)}; a "
+                "manifest is committed and may only set catalog."
+                f"{{{', '.join(sorted(allowed))}}} -- put the rest in "
+                ".tether/secrets.toml under [backends.iceberg] catalog or "
+                '[uris."<identifier>"]',
+                kind="iceberg",
+            )
+        props = dict(committed or self._config.get("catalog") or {})
+        # Catalog endpoint and credentials come from secrets.toml.
+        props.update(dict(self.secrets_for(locator).get("catalog") or {}))
         name = str(locator.get("catalog_name", props.pop("name", "default")))
         cache_key = f"{name}:{sorted(props.items())}"
         cat = self._catalogs.get(cache_key)

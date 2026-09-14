@@ -65,6 +65,16 @@ price of retention-bound recoverability. `commit`, `new`, `gc`, `promote`,
 `--from-plan FILE`) so store writes can be reviewed before they happen. See
 [Reclaiming Storage](05-reclaiming-storage.qmd).
 
+**A clone is untrusted input.** Nothing in `tether.toml` or the manifests may
+choose an executable, an endpoint, SQL, or the environment variable a secret
+is read from; tether refuses committed files that try. Those settings live in
+the untracked `.tether/secrets.toml` or the environment (see
+[Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). What
+the trust boundary does *not* cover: a manifest's locator still names the
+store tether reads and writes -- a hostile clone can point an object at a
+bucket you have access to, and a `commit` will pin what it finds there. Review
+manifests as you would review code.
+
 **Secrets** are never stored in manifests -- only credential *references* (an
 environment variable or secret name). Each backend reads the real credential
 from the environment.

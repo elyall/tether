@@ -121,7 +121,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `uri` (positional; `path` accepted). A trailing `/` (or empty key) means a prefix. `region` overrides the store region. |
-| Config | `storage_options = {...}` passed to `obstore.store.from_url` (region, endpoint, account name -- non-secret options). Credentials come from the environment / instance metadata. |
+| Config | `storage_options = {...}` passed to `obstore.store.from_url`. Committed (`tether.toml`): region, account name and other non-secret options; endpoints and credentials only in `.tether/secrets.toml`, which may also name a `profile`/`role_arn` or literal keys per URI prefix or object. Otherwise credentials come from the environment / instance metadata. |
 | Identity | `{uri}` |
 | State | local file: `type=file, size, sha256`; local dir: `type=dir, count, size, digest` (digest over per-file sha256s); remote object: `type=object, size, etag[, version_id]`; prefix: `type=prefix, count, size, digest` (one paged `LIST`, etag+size per key). Local hashes are cached by `(size, mtime_ns, ctime_ns, inode)` in `.tether/cache/file-hashes.json`, so only files whose stat changed are re-read |
 | Tier | Observed by default. `--file versioned` on a single *remote* object makes it Addressable via `version_id` (S3 version id / GCS generation / Azure version id; requires versioning on the bucket/container -- a recorded state without a version id is refused by `open`). Local paths and prefixes are always Observed. |
@@ -136,7 +136,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `uri` (local path or `s3://bucket/prefix`), `branch` (default `main`), `region` (S3) |
-| Config | none (S3 credentials from the environment) |
+| Config | none committed. `.tether/secrets.toml` may set `profile`, `role_arn`, literal keys, `endpoint_url`, `region` per URI prefix or object; otherwise S3 credentials come from the environment (`from_env`). |
 | Identity | `{uri}` |
 | State | `snapshot_id` of the branch head |
 | Pin | `create_tag("tether.<id>", snapshot_id)`; tags are immutable and exempt from expiry |
@@ -149,7 +149,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `project_id` (required), `branch` (default `main`), `database`, `role` (used for connection URIs) |
-| Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2) |
+| Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2) -- `.tether/secrets.toml` only; a committed value is refused |
 | Identity | `{project_id, branch, database}` -- `role` is how you connect, not what you pin, so changing it does not change pin ids |
 | State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
@@ -167,7 +167,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `path` (local checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
-| Config | `git_path`, `jj_path` |
+| Config | `git_path`, `jj_path` -- `.tether/secrets.toml` `[vcs]` or `TETHER_GIT`/`TETHER_JJ` only; a committed value is refused |
 | Identity | `{path}` (resolved absolute) |
 | State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available, volatile so the same sha pins identically with or without jj |
 | Pin | lightweight tag `tether.<id>` at the sha. With `remote` set the pin is pushed and is only a pin once the push succeeds: a failed push fails the `pin` and removes the local tag; `unpin` deletes on the remote first and fails if that fails, so local and remote never diverge silently |
@@ -181,7 +181,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `identifier` (`ns.table`; `table` accepted), `branch` (default `main`), `catalog_name` (default `default`), `catalog` (dict of pyiceberg catalog properties, or set once in config) |
-| Config | `catalog = {...}` pyiceberg properties (`type`, `uri`, `warehouse`, ...) |
+| Config | `catalog = {...}` pyiceberg properties. Committed: `type`, `warehouse` and other non-secret properties; `uri`, `token`, `credential` only in `.tether/secrets.toml` (`[backends.iceberg] catalog` or per identifier), in the file or the locator alike |
 | Identity | `{identifier, branch, catalog_name}` |
 | State | `snapshot_id` (nothing else: `metadata_location` changes on every table commit on any branch) |
 | Pin | `--pin native` (default): tag `tether.<id>`; `--pin record`: no native ref, the snapshot id alone (drops `PIN`; recoverable only within snapshot retention -- for S3 Tables and other catalogs where user refs disable maintenance) |
@@ -194,7 +194,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `uri` (positional), `region` (sets `AWS_REGION`) |
-| Config | `storage_options = {...}` passed to `DeltaTable` (non-secret) |
+| Config | `storage_options = {...}` passed to `DeltaTable`; committed for non-secret options, `.tether/secrets.toml` for endpoints and credentials (per URI prefix or object) |
 | Identity | `{uri}` |
 | State | `version`, `table_id` (metadata id -- a recreated table verifies as drifted) |
 | Pin / fork | none: Delta has no tags or branches. Versions stay readable until `VACUUM` (7-day default) / log retention (30 days). |
@@ -206,7 +206,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `uri` (positional), `branch` (default `main`) |
-| Config | `storage_options = {...}` passed to `lance.dataset` |
+| Config | `storage_options = {...}` passed to `lance.dataset`; committed for non-secret options, `.tether/secrets.toml` for endpoints and credentials (per URI prefix or object) |
 | Identity | `{uri}` |
 | State | `branch`, `version` (Lance version numbers are branch-scoped; `--at N` therefore means version `N` of the locator's `branch` -- it is a *base* coordinate and is never consulted once a working branch exists; use a tag to name a version on another branch) |
 | Pin | `tags.create("tether.<id>", (branch, version))`; tagged versions are exempt from `cleanup_old_versions()` |
@@ -222,7 +222,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `repository` (required; `--repository`), `branch` (default `main`), `prefix` (scopes the handle URI and the diff; pins are repository-wide) |
-| Config | keyword arguments for `lakefs.Client` (e.g. `host`); by default the SDK reads `LAKECTL_*` / `~/.lakectl.yaml` |
+| Config | keyword arguments for `lakefs.Client` (e.g. `host`) -- `.tether/secrets.toml` only; by default the SDK reads `LAKECTL_*` / `~/.lakectl.yaml` |
 | Identity | `{repository}` -- deliberately not `prefix`: a lakeFS commit is repository-wide, so two objects with different prefixes on the same branch describe the same commit and share one pin (and their forks are separate branches by key regardless) |
 | State | `commit_id` of the branch head, plus `dirty = true` when the staging area has uncommitted changes (refused at pin time) |
 | Pin | tag `tether.<id>` at the commit |
@@ -237,7 +237,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `metadata` (positional `uri` accepted; the `ducklake:` prefix is added if missing, e.g. `ducklake:postgres:dbname=lake`), `data_path`, `table` (scopes the handle only -- snapshots are catalog-wide) |
-| Config | `init_sql = ["CREATE SECRET ...", ...]` run on every fresh connection (put credentials here or in the environment, not in the locator) |
+| Config | `init_sql = ["CREATE SECRET ...", ...]` run on every fresh connection -- `.tether/secrets.toml` only (it runs code); credentials there or in the environment, never in the locator |
 | Identity | `{metadata[, data_path]}` |
 | State | `snapshot_id`, `snapshot_time_us` (epoch microseconds; a recreated catalog verifies as drifted) |
 | Pin / fork | none: DuckLake has no tags or branches. `ducklake_expire_snapshots` bounds how long a snapshot stays readable. |
@@ -252,7 +252,7 @@ jj repositories work through their `.git`.
 | | |
 | --- | --- |
 | Locator | `host` (default `127.0.0.1`), `port` (default 3306), `database` (required), `branch` (default `main`), `user`; or `url = mysql://user@host:port/database` |
-| Config | `password_env` (default `DOLT_PASSWORD`), `user_env` (default `DOLT_USER`, used when the locator has no `user`) |
+| Config | `password_env` (default `DOLT_PASSWORD`), `user_env` (default `DOLT_USER`, used when the locator has no `user`) -- `.tether/secrets.toml` only: a clone must not pick which of your environment variables is sent as a password |
 | Identity | `{host, port, database}` |
 | State | `commit` (branch head hash), plus `dirty = true` when `dolt_branches.dirty` reports uncommitted working-set changes (refused at pin time) |
 | Pin | `CALL DOLT_TAG('tether.<id>', commit)` |
