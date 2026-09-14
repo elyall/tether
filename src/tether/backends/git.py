@@ -9,6 +9,7 @@ clone; otherwise they are durable only locally (documented).
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,6 +33,7 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 class GitBackend(ObjectBackend):
     kind = "git"
     LOCAL_PATH_KEYS = ("path", "uri")  # `uri` is the CLI's positional locator
+    _LOCATOR_REFS = ("ref", "at", "remote")
     SAFE_CONFIG_KEYS = frozenset()  # git_path / jj_path: secrets.toml only
     # A change id is derived from the sha (and only present with jj); the same
     # sha must pin identically with or without jj installed.
@@ -65,6 +67,18 @@ class GitBackend(ObjectBackend):
                 kind="git",
             )
         return Path(str(path))
+
+    def validate_locator(self, locator: Locator) -> None:
+        # Manifests are committed: a `ref` or `at` that starts with `-` would
+        # reach git as an option. Every call site also says --end-of-options;
+        # refusing here gives the error at `add`, not at the first read.
+        for key in self._LOCATOR_REFS:
+            value = locator.get(key)
+            if value is not None:
+                _guard(str(value), key)
+        path = locator.get("path") or locator.get("uri")
+        if path is not None:
+            _guard(str(path), "path")
 
     def _run(self, locator: Locator, *args: str, check: bool = True) -> str:
         proc = subprocess.run(
@@ -111,7 +125,13 @@ class GitBackend(ObjectBackend):
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         ref = working_ref or self._base_ref(locator)
-        sha = self._run(locator, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        sha = self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{_guard(ref)}^{{commit}}",
+        )
         # Uncommitted changes belong to the checked-out ref only; a dirty
         # worktree says nothing about a branch that is not checked out.
         checked_out = self._checked_out(locator)
@@ -130,17 +150,18 @@ class GitBackend(ObjectBackend):
                 kind="git",
             )
         ref = ref_for_pin(pin_id)
-        sha = str(state["sha"])
+        sha = _sha(state["sha"])
         existing = self._run(
             locator,
             "rev-parse",
             "--verify",
             "--quiet",
+            "--end-of-options",
             f"{ref}^{{commit}}",
             check=False,
         )
         if not existing:
-            self._run(locator, "tag", ref, sha)
+            self._run(locator, "tag", "--end-of-options", ref, sha)
         elif existing != sha:
             raise BackendError(
                 f"tag {ref} already points at {existing}, not {sha}", kind="git"
@@ -151,7 +172,13 @@ class GitBackend(ObjectBackend):
             # fails must fail the pin -- and not leave a local tag that would
             # make the two diverge silently.
             try:
-                self._run(locator, "push", str(remote), f"refs/tags/{ref}")
+                self._run(
+                    locator,
+                    "push",
+                    "--end-of-options",
+                    _guard(str(remote), "remote"),
+                    f"refs/tags/{ref}",
+                )
             except BackendError as exc:
                 if not existing:
                     self._run(locator, "tag", "-d", ref, check=False)
@@ -171,8 +198,9 @@ class GitBackend(ObjectBackend):
                     "-C",
                     str(self._path(locator)),
                     "push",
-                    str(remote),
                     "--delete",
+                    "--end-of-options",
+                    _guard(str(remote), "remote"),
                     f"refs/tags/{pin.ref}",
                 ],
                 capture_output=True,
@@ -218,13 +246,14 @@ class GitBackend(ObjectBackend):
         pin: Pin | None,
         deep: bool,
     ) -> VerifyReport:
-        sha = str(state["sha"])
+        sha = _sha(state["sha"])
         target = pin.ref if pin is not None else sha
         resolved = self._run(
             locator,
             "rev-parse",
             "--verify",
             "--quiet",
+            "--end-of-options",
             f"{target}^{{commit}}",
             check=False,
         )
@@ -238,24 +267,39 @@ class GitBackend(ObjectBackend):
 
     def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
         ref = source.ref if isinstance(source, Pin) else str(source["sha"])
-        sha = self._run(locator, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        sha = self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{_guard(ref, 'source')}^{{commit}}",
+        )
         exists = self._run(
             locator,
             "rev-parse",
             "--verify",
             "--quiet",
-            f"{name}^{{commit}}",
+            "--end-of-options",
+            f"{_guard(name, 'branch')}^{{commit}}",
             check=False,
         )
         if exists:
-            self._run(locator, "branch", "-f", name, sha)
+            self._run(locator, "branch", "-f", "--end-of-options", name, sha)
         else:
-            self._run(locator, "branch", name, sha)
+            self._run(locator, "branch", "--end-of-options", name, sha)
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         out = subprocess.run(
-            [self._git, "-C", str(self._path(locator)), "branch", "-D", ref],
+            [
+                self._git,
+                "-C",
+                str(self._path(locator)),
+                "branch",
+                "-D",
+                "--end-of-options",
+                _guard(ref, "branch"),
+            ],
             capture_output=True,
             text=True,
         )
@@ -327,8 +371,9 @@ class GitBackend(ObjectBackend):
                 str(self._path(locator)),
                 "merge-base",
                 "--is-ancestor",
-                str(ancestor["sha"]),
-                self._source_ref(descendant),
+                "--end-of-options",
+                _sha(ancestor["sha"]),
+                _guard(self._source_ref(descendant), "source"),
             ],
             capture_output=True,
             text=True,
@@ -340,7 +385,11 @@ class GitBackend(ObjectBackend):
     def promote(self, locator: Locator, source: str | Pin | State) -> State:
         base = self._base_branch(locator)
         target = self._run(
-            locator, "rev-parse", "--verify", f"{self._source_ref(source)}^{{commit}}"
+            locator,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{_guard(self._source_ref(source), 'source')}^{{commit}}",
         )
         head = self._run(locator, "rev-parse", "--verify", f"refs/heads/{base}")
         if target == head:
@@ -358,7 +407,7 @@ class GitBackend(ObjectBackend):
                     "them first",
                     kind="git",
                 )
-            self._run(locator, "merge", "--ff-only", target)
+            self._run(locator, "merge", "--ff-only", "--end-of-options", target)
         else:
             self._run(locator, "update-ref", f"refs/heads/{base}", target, head)
         return self.fingerprint(locator, base)
@@ -385,7 +434,8 @@ class GitBackend(ObjectBackend):
                 "--no-ff",
                 "-m",
                 message,
-                source_ref,
+                "--end-of-options",
+                _guard(source_ref, "source"),
             ],
             capture_output=True,
             text=True,
@@ -411,13 +461,25 @@ class GitBackend(ObjectBackend):
     ) -> Handle:
         path = str(self._path(locator).resolve())
         if isinstance(target, Pin):
-            sha = self._run(locator, "rev-parse", f"{target.ref}^{{commit}}")
+            sha = self._run(
+                locator,
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{target.ref}^{{commit}}",
+            )
             return GitHandle(key=path, read_only=True, path=path, sha=sha)
         if isinstance(target, dict):
-            sha = str(target["sha"])
+            sha = _sha(target["sha"])
             return GitHandle(key=path, read_only=True, path=path, sha=sha)
         ref = target or self._base_ref(locator)
-        sha = self._run(locator, "rev-parse", f"{ref}^{{commit}}")
+        sha = self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{_guard(ref)}^{{commit}}",
+        )
         return GitHandle(key=path, read_only=read_only, path=path, sha=sha)
 
     def history(
@@ -432,7 +494,8 @@ class GitBackend(ObjectBackend):
             "log",
             f"--max-count={int(limit)}",
             "--format=%H%x1f%cI%x1f%D%x1f%s",
-            start,
+            "--end-of-options",
+            _guard(start),
             "--",
         )
         entries: list[HistoryEntry] = []
@@ -464,8 +527,13 @@ class GitBackend(ObjectBackend):
                 out.note = f"dirty {a.get('dirty')} -> {b.get('dirty')}"
             return out
         # One call for per-file status (with renames), one for line counts.
-        status = self._run(locator, "diff", "--name-status", "-M", sha_a, sha_b)
-        numstat = self._run(locator, "diff", "--numstat", "-M", sha_a, sha_b)
+        sha_a, sha_b = _sha(sha_a), _sha(sha_b)
+        status = self._run(
+            locator, "diff", "--name-status", "-M", "--end-of-options", sha_a, sha_b
+        )
+        numstat = self._run(
+            locator, "diff", "--numstat", "-M", "--end-of-options", sha_a, sha_b
+        )
         lines: dict[str, str] = {}
         for line in numstat.splitlines():
             parts = line.split("\t")
@@ -488,6 +556,31 @@ class GitBackend(ObjectBackend):
                 change = "modified"
             out.add(path, change, lines.get(parts[-1], ""))
         return out
+
+
+_HEX = re.compile(r"^[0-9a-f]{4,64}$")
+
+
+def _guard(value: str, what: str = "ref") -> str:
+    """A git positional argument from a manifest, a state, or a plan.
+
+    Values starting with `-` would be read as options; every call also passes
+    `--end-of-options`, and this makes the refusal a clear BackendError
+    instead of whatever git does with `--output=FILE`.
+    """
+    if not value or value.startswith("-"):
+        raise BackendError(
+            f"git {what} {value!r} looks like an option; refused", kind="git"
+        )
+    return value
+
+
+def _sha(value: object) -> str:
+    """A commit id from a state: hex only, so it can never be an option."""
+    text = str(value)
+    if not _HEX.match(text):
+        raise BackendError(f"not a git commit id: {text!r}", kind="git")
+    return text
 
 
 def _factory(config: dict) -> GitBackend:

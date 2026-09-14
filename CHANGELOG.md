@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   new untracked `.tether/secrets.toml` (`[vcs]`, `[backends.<kind>]`) or the
   environment (`TETHER_GIT`, `TETHER_JJ`). An Iceberg locator's `catalog`
   table is screened the same way.
+- **git argument injection.** Manifest and state values (`ref`, `at`,
+  `remote`, a pin's ref, a `sha`) reached git positionally without
+  `--end-of-options`, so `at = "--output=FILE"` made `git log` write FILE.
+  Every git call now passes `--end-of-options` before its positionals, a
+  `sha` must be hex, and a `ref`/`at`/`remote`/`path` beginning with `-` is
+  refused at `add` (`ObjectBackend.validate_locator`) and at use.
 
 ### Added
 

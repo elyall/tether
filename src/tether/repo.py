@@ -1376,10 +1376,12 @@ class Repo:
         # paths now, against the caller's directory: the manifest is read from
         # every directory and every clone.
         backend = self.backend_for(kind)
+        resolved = absolutize_locator(backend, dict(locator), Path.cwd())
+        backend.validate_locator(resolved)
         manifest = ObjectManifest(
             key=key,
             kind=kind,
-            locator=absolutize_locator(backend, dict(locator), Path.cwd()),
+            locator=resolved,
             policy=policy or self.config.defaults,
         )
         write_object(self.root, manifest)
@@ -5372,6 +5374,7 @@ class Repo:
             locator = absolutize_locator(
                 self.backend_for(spec.kind), dict(spec.locator), Path.cwd()
             )
+            self.backend_for(spec.kind).validate_locator(locator)
             params = {"locator": locator, "policy": spec.policy.to_dict()}
             if current is None:
                 plan.actions.append(

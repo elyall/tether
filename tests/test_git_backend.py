@@ -69,6 +69,46 @@ def _default_is_main(path: Path) -> bool:
     return _git(path, "symbolic-ref", "--short", "HEAD") == "main"
 
 
+def test_git_refuses_option_shaped_refs_from_manifests(
+    tmp_path: Path, vcs_root: Path
+) -> None:
+    """A manifest field that starts with `-` must never reach git as an option.
+    `add` refuses it, and a manifest that arrives with a clone is refused at
+    use (every call site passes --end-of-options and guards its positionals):
+    `at = "--output=FILE"` writes no FILE."""
+    from tether.manifest import ObjectManifest, Policy, write_object
+
+    code = tmp_path / "code"
+    _init_code_repo(code)
+    b = GitBackend()
+    evil = tmp_path / "pwned"
+    for field in ("ref", "at", "remote"):
+        with pytest.raises(BackendError, match="looks like an option"):
+            b.validate_locator({"path": str(code), field: f"--output={evil}"})
+    repo = Repo.init(vcs_root)
+    with pytest.raises(BackendError, match="looks like an option"):
+        repo.add("code", "git", {"path": str(code), "at": f"--output={evil}"})
+    # A hostile clone bypasses `add`: write the manifest directly.
+    write_object(
+        vcs_root,
+        ObjectManifest(
+            key="code",
+            kind="git",
+            locator={"path": str(code), "at": f"--output={evil}"},
+            policy=Policy(),
+        ),
+    )
+    fresh = Repo.find(vcs_root)
+    with pytest.raises(BackendError, match="looks like an option"):
+        fresh.history_for("git", fresh.objects["code"].locator, limit=5)
+    with pytest.raises((BackendError, Exception)):
+        fresh.snapshot()
+    assert not evil.exists()
+    # States are hex or nothing.
+    with pytest.raises(BackendError, match="not a git commit id"):
+        b.open({"path": str(code)}, {"sha": "--output=x"}, read_only=True)
+
+
 def test_git_backend_conformance(tmp_path: Path) -> None:
     from tether.testing import run_conformance
 

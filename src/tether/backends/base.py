@@ -300,6 +300,14 @@ class ObjectBackend(Protocol):
     _secret_defaults: dict[str, Any]
     _secret_rules: dict[str, dict[str, Any]]
 
+    def validate_locator(self, locator: Locator) -> None:
+        """Refuse a locator this backend must never be handed.
+
+        Called when an object is registered (`add`, `import`) so the refusal
+        comes with the manifest's author present, not at the first read of a
+        clone. Default: accept. Raise `BackendError` to refuse.
+        """
+
     def configure_secrets(
         self, defaults: Mapping[str, Any], rules: Mapping[str, Mapping[str, Any]]
     ) -> None:
