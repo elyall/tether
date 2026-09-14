@@ -11,6 +11,13 @@ from tether.experimental.registry.export import (
     PublishReport,
     build_bundle,
 )
+from tether.experimental.registry.ops import (
+    ImportReport,
+    apply_import,
+    export,
+    import_objects,
+    plan_import,
+)
 from tether.experimental.registry.registry import (
     CANONICAL_COLUMNS,
     ImportSpec,
@@ -22,9 +29,14 @@ __all__ = [
     "CANONICAL_COLUMNS",
     "TABLES",
     "ExportBundle",
+    "ImportReport",
     "ImportSpec",
     "PublishReport",
+    "apply_import",
     "build_bundle",
+    "export",
+    "import_objects",
+    "plan_import",
     "read_source",
     "specs_from_rows",
 ]

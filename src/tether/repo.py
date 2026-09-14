@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -55,12 +55,6 @@ from tether.errors import (
     TetherError,
     UnpinnedStateError,
     VcsError,
-)
-from tether.experimental.registry import (
-    ExportBundle,
-    ImportSpec,
-    build_bundle,
-    specs_from_rows,
 )
 from tether.handles import Handle
 from tether.manifest import (
@@ -101,6 +95,9 @@ from tether.migrations import UpgradeReport, pending
 from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
 from tether.plan import Action, Plan
 from tether.vcs import VcsAdapter, detect_vcs
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tether.experimental.registry import ExportBundle, ImportReport, ImportSpec
 
 TETHER_REV_ENV = "TETHER_REV"
 """Environment variable `Repo.open` reads for its default revision.
@@ -293,21 +290,6 @@ class GcReport:
     """Whether anything was actually released."""
     plan: Plan | None = None
     """The plan that was (or would be) applied."""
-
-
-@dataclass
-class ImportReport:
-    """Result of `Repo.apply_import`."""
-
-    added: list[str] = field(default_factory=list)
-    """Keys registered."""
-    updated: list[str] = field(default_factory=list)
-    """Keys whose locator or policy changed (committed state kept)."""
-    removed: list[str] = field(default_factory=list)
-    """Keys unregistered (`sync=True` only)."""
-    unchanged: list[str] = field(default_factory=list)
-    """Keys the source listed identically."""
-    plan: Plan | None = None
 
 
 @dataclass
@@ -5328,7 +5310,10 @@ class Repo:
         """
         return self.apply_repair(self.plan_repair(all_history=all_history))
 
-    # -- export (manifests -> tables) ------------------------------------ #
+    # -- registry (experimental; tether.experimental.registry.ops) ------- #
+    # Thin delegates: the bodies live under `tether.experimental` and are
+    # imported on first use, so `import tether` never loads the registry
+    # layer. `repo.export()` and friends keep working unchanged.
     def export(
         self,
         revs: Sequence[str] | None = None,
@@ -5336,22 +5321,12 @@ class Repo:
         listings: bool = False,
         workspace: bool = False,
     ) -> ExportBundle:
-        """Derive relational tables from the repository's history.
+        """Derive relational tables from the repository's history; see
+        :func:`tether.experimental.registry.ops.export`."""
+        from tether.experimental.registry.ops import export
 
-        The tables (`commits`, `commit_parents`, `refs`, `objects`,
-        `object_states`, optional `listings` / `listing_entries` and
-        `workspace`) are what `tether export` writes and `tether publish`
-        upserts; see `tether.experimental.registry.export.TABLES`.
+        return export(self, revs, listings=listings, workspace=workspace)
 
-        Args:
-            revs: Revisions to include (jj revsets / git revisions). `None`
-                exports every reachable commit.
-            listings: Include per-file listings from `.tether/listings/`.
-            workspace: Include this checkout's working refs and last snapshot.
-        """
-        return build_bundle(self, revs=revs, listings=listings, workspace=workspace)
-
-    # -- import (registry rows -> manifests) ----------------------------- #
     def plan_import(
         self,
         specs: Sequence[ImportSpec],
@@ -5359,165 +5334,27 @@ class Repo:
         sync: bool = False,
         notes: Sequence[str] = (),
     ) -> Plan:
-        """Diff desired objects against the working tree without writing.
+        """Diff desired objects against the working tree without writing; see
+        :func:`tether.experimental.registry.ops.plan_import`."""
+        from tether.experimental.registry.ops import plan_import
 
-        Actions: `add` for new keys, `update` when a registered key's locator
-        or policy differs (its committed state and pin are kept), and, with
-        `sync`, `remove` for registered keys the source no longer lists.
-
-        Raises:
-            ConfigError: A key's `kind` would change; remove and re-add it
-                explicitly instead.
-        """
-        plan = Plan(
-            command="import",
-            context={
-                "manifest_hash": self.current_manifest_hash(),
-                "sync": sync,
-                "rows": len(specs),
-            },
-            notes=list(notes),
-        )
-        wanted = {s.key: s for s in specs}
-        for key in sorted(wanted):
-            spec = wanted[key]
-            current = self.objects.get(key)
-            locator = absolutize_locator(
-                self.backend_for(spec.kind), dict(spec.locator), Path.cwd()
-            )
-            self.backend_for(spec.kind).validate_locator(locator)
-            params = {"locator": locator, "policy": spec.policy.to_dict()}
-            if current is None:
-                plan.actions.append(
-                    Action(
-                        "add",
-                        key,
-                        spec.kind,
-                        target=str(spec.locator.get("uri", "")),
-                        detail="register",
-                        params=params,
-                    )
-                )
-                continue
-            if current.kind != spec.kind:
-                raise ConfigError(
-                    f"{key!r} is registered as {current.kind!r} but the source says "
-                    f"{spec.kind!r}; remove and re-add it to change kinds"
-                )
-            changed = []
-            if dict(current.locator) != locator:
-                changed.append("locator")
-            if current.policy != spec.policy:
-                changed.append("policy")
-            if changed:
-                plan.actions.append(
-                    Action(
-                        "update",
-                        key,
-                        spec.kind,
-                        target=str(spec.locator.get("uri", "")),
-                        detail=f"{' and '.join(changed)} changed; committed state kept",
-                        params=params,
-                    )
-                )
-            else:
-                plan.notes.append(f"{key}: unchanged")
-        if sync:
-            for key in sorted(set(self.objects) - set(wanted)):
-                plan.actions.append(
-                    Action(
-                        "remove",
-                        key,
-                        self.objects[key].kind,
-                        detail="not listed by the source (sync)",
-                    )
-                )
-        return plan
+        return plan_import(self, specs, sync=sync, notes=notes)
 
     def apply_import(self, plan: Plan, *, verify: bool = True) -> ImportReport:
-        """Write the manifests a `plan_import` plan describes.
+        """Write the manifests a `plan_import` plan describes; see
+        :func:`tether.experimental.registry.ops.apply_import`."""
+        from tether.experimental.registry.ops import apply_import
 
-        Touches only `.tether/objects/` and the workspace state; commit the
-        result with `commit` as usual.
-
-        Raises:
-            StalePlanError: The working tree's manifests changed since planning.
-        """
-        with self._writer_lock():
-            if plan.command != "import":
-                raise ConfigError(f"expected an import plan, got {plan.command!r}")
-            if (
-                verify
-                and plan.context.get("manifest_hash") != self.current_manifest_hash()
-            ):
-                raise StalePlanError(
-                    "manifests changed since the plan was made; re-run the plan"
-                )
-            report = ImportReport(plan=plan)
-            for note in plan.notes:
-                key, _, why = note.partition(": ")
-                if why == "unchanged":
-                    report.unchanged.append(key)
-            pre = {
-                "objects": self._manifest_texts(a.key for a in plan.actions),
-                "workspace": self.workspace.to_toml(),
-            }
-            for a in plan.actions:
-                if a.op == "add":
-                    self._add(
-                        a.key,
-                        a.kind,
-                        dict(a.params["locator"]),
-                        policy=Policy.from_dict(a.params["policy"]),
-                    )
-                    report.added.append(a.key)
-                elif a.op == "update":
-                    current = self.objects[a.key]
-                    updated = dataclasses.replace(
-                        current,
-                        locator=dict(a.params["locator"]),
-                        policy=Policy.from_dict(a.params["policy"]),
-                    )
-                    backend = self.backend_for(updated.kind)
-                    if backend.identity(current.locator) != backend.identity(
-                        updated.locator
-                    ):
-                        # Another system: the committed state and pin describe the
-                        # old one. The next commit reads the new one afresh.
-                        updated = dataclasses.replace(
-                            updated, state=None, pin=None, recoverable=True
-                        )
-                    write_object(self.root, updated)
-                    self.objects[a.key] = updated
-                    if dict(current.locator) != dict(updated.locator):
-                        # The working branch lives in the *old* system; keeping it
-                        # would send writes there until the next `new`. Drop the
-                        # workspace's hold (the branch itself is left for `gc`).
-                        self._forget_working_state(a.key)
-                    report.updated.append(a.key)
-                elif a.op == "remove":
-                    self._remove(a.key)
-                    report.removed.append(a.key)
-            write_workspace(self.root, self.workspace)
-            if plan.actions:
-                self._log_op("import", plan=plan, result=_report_dict(report), pre=pre)
-            return report
+        return apply_import(self, plan, verify=verify)
 
     def import_objects(
         self, rows: Iterable[Mapping[str, Any]], *, sync: bool = False
     ) -> ImportReport:
-        """Register / update / remove objects from canonical rows in one step.
+        """Register / update / remove objects from canonical rows; see
+        :func:`tether.experimental.registry.ops.import_objects`."""
+        from tether.experimental.registry.ops import import_objects
 
-        Rows carry `key`, `kind`, and any of `uri`, `locator_json`,
-        `policy_file`, `policy_pin`, `at` (see
-        `tether.experimental.registry.CANONICAL_COLUMNS`); missing policy fields take
-        `config.defaults`. Equivalent to `apply_import(plan_import(...))`.
-        """
-        # Plan and apply under one lock: planning sees the state the lock
-        # refreshed, and nothing in this checkout moves in between.
-        with self._writer_lock():
-            specs, notes = specs_from_rows(rows, self.config.defaults)
-            return self.apply_import(self.plan_import(specs, sync=sync, notes=notes))
+        return import_objects(self, rows, sync=sync)
 
     # -- diff ------------------------------------------------------------ #
     def diff(

@@ -119,6 +119,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TID", "RUF"]
 "tests/*" = ["B011"]
 # Typer's idiom requires calling Option()/Argument() in parameter defaults.
 "src/tether/cli.py" = ["B008"]
+"src/tether/experimental/cli.py" = ["B008"]
 
 [tool.ty.environment]
 python-version = "3.11"

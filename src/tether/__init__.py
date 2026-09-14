@@ -41,7 +41,6 @@ from tether.errors import (
     UnpinnedStateError,
     VcsError,
 )
-from tether.experimental.registry import ExportBundle, ImportSpec, PublishReport
 from tether.manifest import (
     ObjectManifest,
     Pin,
@@ -66,7 +65,6 @@ from tether.repo import (
     DiffEntry,
     ForgetWorkspaceReport,
     GcReport,
-    ImportReport,
     ObjectStatus,
     PromoteReport,
     PullReport,
@@ -120,6 +118,7 @@ __all__ = [
     "VcsError",
     "WorkspaceState",
     "backends",
+    "build_bundle",
     "compute_pin_id",
     "handles",
     "listing_name",
@@ -127,12 +126,42 @@ __all__ = [
     "migrations",
     "oplog",
     "ref_for_pin",
+    "specs_from_rows",
     "testing",
     "vcs",
     "working_ref_bookmark",
     "working_ref_name",
     "working_ref_workspace",
 ]
+
+# The registry layer (`export`, `publish`, `import`) is experimental and lives
+# under `tether.experimental`. Its public names stay importable from `tether`
+# -- that is the stable surface -- but are resolved on first access, so
+# `import tether` loads none of it.
+_EXPERIMENTAL_EXPORTS = {
+    "ExportBundle": "tether.experimental.registry",
+    "ImportReport": "tether.experimental.registry",
+    "ImportSpec": "tether.experimental.registry",
+    "PublishReport": "tether.experimental.registry",
+    "build_bundle": "tether.experimental.registry",
+    "specs_from_rows": "tether.experimental.registry",
+}
+
+
+def __getattr__(name: str) -> object:
+    module = _EXPERIMENTAL_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module 'tether' has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(module), name)
+    globals()[name] = value  # resolve once
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_EXPERIMENTAL_EXPORTS))
+
 
 try:
     # Single source of truth is pyproject.toml (distribution `tether-vcs`).

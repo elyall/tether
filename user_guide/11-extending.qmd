@@ -162,11 +162,19 @@ tether/experimental/registry/{export,registry}.py
 
 **What is stable.** Kind names (`tether add --kind neon`), extras
 (`tether-vcs[neon]`), CLI commands (`tether export` / `publish` / `import`),
-and the `tether.<Symbol>` re-exports (`ExportBundle`, `ImportSpec`,
-`build_bundle`, `specs_from_rows`). These do not change when something
-graduates. Module paths under `tether.experimental` are *not* API; the old
-paths (`tether.backends.neon`, `tether.export`, `tether.registry`) are shims
-that import with a `DeprecationWarning` and go away at 0.2.
+the `Repo` methods (`repo.export()`, `plan_import`, `apply_import`,
+`import_objects`), and the `tether.<Symbol>` re-exports (`ExportBundle`,
+`ImportSpec`, `ImportReport`, `PublishReport`, `build_bundle`,
+`specs_from_rows`). These do not change when something graduates. Module
+paths under `tether.experimental` are *not* API, and the alpha-era paths
+(`tether.backends.neon`, `tether.export`, `tether.registry`) are gone.
+
+**It is a real boundary.** `import tether` and `import tether.cli` load
+nothing under `tether.experimental.registry`: the `Repo` methods are thin
+delegates that import `tether.experimental.registry.ops` on first call, the
+`tether.<Symbol>` names resolve lazily (module `__getattr__`), and the three
+CLI commands are attached by `tether.experimental.cli.register(app)`. A
+reader of `repo.py` sees the core loop only.
 
 **What "experimental" means.** The backend passes the conformance suite and
 its engine lifecycle against a fake, not against the service; `tether

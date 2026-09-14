@@ -853,16 +853,28 @@ def test_cli_version_and_backends() -> None:
     assert rows["dolt"]["maturity"] == "experimental"
 
 
-def test_old_module_paths_are_shims_that_warn() -> None:
-    """The experimental move changed nothing users type or import: kinds
-    resolve to the new modules, `tether.<Symbol>` re-exports still work, and
-    the old paths import with a DeprecationWarning."""
+def test_experimental_is_an_import_boundary() -> None:
+    """`import tether` (and `tether.cli`) load nothing under
+    `tether.experimental.registry`; the public names are still importable
+    from `tether` (resolved on first access), kinds resolve to the new
+    modules, and the alpha-era module paths are gone."""
     import importlib
+    import subprocess
     import sys
-    import warnings
 
     import tether
     from tether.backends.base import build_backend, known_kinds
+
+    # A fresh interpreter: what does `import tether; import tether.cli` load?
+    code = (
+        "import sys, tether, tether.cli; "
+        "print(sorted(m for m in sys.modules if m.startswith('tether.experimental')))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert "tether.experimental.registry" not in out, out
+    assert "tether.experimental.backends" not in out, out
 
     assert {"neon", "lakefs", "dolt", "ducklake", "iceberg"} <= set(known_kinds())
     assert type(build_backend("neon", {})).__module__ == (
@@ -870,20 +882,18 @@ def test_old_module_paths_are_shims_that_warn() -> None:
     )
     assert tether.ExportBundle.__module__ == "tether.experimental.registry.export"
     assert tether.ImportSpec.__module__ == "tether.experimental.registry.registry"
-    for old in ("tether.backends.neon", "tether.export", "tether.registry"):
-        sys.modules.pop(old, None)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            mod = importlib.import_module(old)
-        assert any(
-            issubclass(w.category, DeprecationWarning) and "0.2" in str(w.message)
-            for w in caught
-        ), old
-        assert mod is not None
-    from tether.backends.neon import NeonBackend as Old
-    from tether.experimental.backends.neon import NeonBackend as New
-
-    assert Old is New
+    assert tether.ImportReport.__module__ == "tether.experimental.registry.ops"
+    assert "ExportBundle" in dir(tether) and "ExportBundle" in tether.__all__
+    with pytest.raises(AttributeError):
+        tether.NoSuchName  # noqa: B018
+    for old in (
+        "tether.backends.neon",
+        "tether.backends.iceberg",
+        "tether.export",
+        "tether.registry",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old)
 
 
 def test_open_redacts_the_neon_password_by_default(
