@@ -845,6 +845,52 @@ def test_promote_rev_checks_the_pin_it_reviewed(vcs_root: Path) -> None:
     assert store.read(system, "main") == {"v": 0}
 
 
+def test_promote_rev_of_a_removed_object_keeps_its_safety_checks(
+    vcs_root: Path,
+) -> None:
+    """A `--rev` plan can name an object that has since been removed from the
+    working tree. Its kind and locator travel in the plan, so the base-head
+    check and the scope-sibling refusal must not depend on the object still
+    being registered."""
+    from tether.errors import StalePlanError
+
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = _mem_object(repo, "left")
+    repo.add("right", "memory", {"system": system, "branch": "main"})
+    store.write(system, "main", {"v": 0})
+    repo.commit("v0")
+    repo.new(bookmark="work", eager=True)
+    branch = repo.workspace.working_refs["left"]
+    store.write(system, branch, {"v": 1})
+    c1 = repo.commit("v1").vcs_commit
+    assert c1 is not None
+
+    # `left` is gone from the working tree; c1 still has it.
+    repo.remove("left")
+    repo.commit("drop left")
+
+    # Naming the removed key alone by revision: its base branch is still
+    # `right`'s, so the subset is refused -- not silently allowed because the
+    # key is no longer registered.
+    plan = repo.plan_promote(["left"], rev=c1)
+    assert [a.op for a in plan.actions if a.key == "left"] == ["refuse"]
+    (refuse,) = [a for a in plan.actions if a.op == "refuse"]
+    assert "also right's base branch" in refuse.detail
+
+    # The whole bookmark by revision: one write for the shared base, with
+    # `right` sharing it even though `left` is not a current object.
+    plan = repo.plan_promote(rev=c1)
+    assert sorted(a.op for a in plan.actions) == ["fast-forward", "share"]
+
+    # And the base-head check holds for the removed key: main moves after the
+    # plan, and the apply refuses rather than merging onto the moved base.
+    store.write(system, "main", {"v": 5})
+    with pytest.raises(StalePlanError, match="base branch moved"):
+        repo.apply_promote(plan)
+    assert store.read(system, "main") == {"v": 5}
+
+
 def test_new_refuses_when_branches_cannot_be_listed(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -130,6 +130,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `apply_commit` turns a planned key that is no longer registered into
   `StalePlanError` (rolling back the pins it made before reaching it) rather
   than a `KeyError`.
+- `promote --rev`'s scope closure and base-head check work from the kind and
+  locator the plan captured, so an object removed from the working tree since
+  the revision still refuses an unnamed sibling and a base that moved.
 - `snapshot` and `pull` run whole under the checkout lock: which refs to read
   is decided from the workspace as it is on disk, not from the one a
   long-lived `Repo` loaded.

@@ -3890,6 +3890,19 @@ class Repo:
         self._share_scope_writes(plan, ("fast-forward", "merge"))
         return plan
 
+    def _action_scope(self, a: Action) -> tuple[str, str] | None:
+        """The branch scope of a write action, from what the *plan* captured.
+
+        A `--rev` plan may name an object that has since been removed from the
+        working tree; its kind and locator travel in the action, so the
+        checks that protect its scope siblings and its base branch must not
+        depend on `self.objects` still having it.
+        """
+        locator = a.params.get("locator")
+        if not a.kind or not isinstance(locator, dict):
+            return None
+        return (a.kind, self.backend_for(a.kind).branch_scope(dict(locator)))
+
     def _refuse_partial_scopes(
         self, plan: Plan, keys: set[str], ops: tuple[str, ...]
     ) -> None:
@@ -3898,10 +3911,9 @@ class Repo:
         for i, a in enumerate(plan.actions):
             if a.op not in ops:
                 continue
-            m = self.objects.get(a.key)
-            if m is None:
+            scope = self._action_scope(a)
+            if scope is None:
                 continue
-            scope = (m.kind, self.backend_for(m.kind).branch_scope(m.locator))
             # What a promote moves is the scope's *base* branch (`a.target`),
             # whatever the source -- a working ref, a pin, a state. Every
             # object of the scope whose base branch that is moves with it.
@@ -3947,14 +3959,10 @@ class Repo:
         for i, a in enumerate(plan.actions):
             if a.op not in ops:
                 continue
-            m = self.objects.get(a.key)
-            if m is None:
+            action_scope = self._action_scope(a)
+            if action_scope is None:
                 continue
-            scope = (
-                m.kind,
-                self.backend_for(m.kind).branch_scope(m.locator),
-                str(a.target),
-            )
+            scope = (*action_scope, str(a.target))
             first = seen.get(scope)
             if first is None:
                 seen[scope] = a.key
@@ -3996,14 +4004,15 @@ class Repo:
                     report.skipped.append(key)
             if verify:
                 for a in writes:
-                    m = self.objects.get(a.key)
+                    # Everything the check needs travels in the action: the
+                    # object may have been removed since a `--rev` plan named
+                    # it, and its base branch must still be where the plan saw
+                    # it.
                     locator = dict(a.params["locator"])
                     backend = self.backend_for(a.kind)
                     base_locator = {k: v for k, v in locator.items() if k != "at"}
                     current = backend.fingerprint(base_locator, None)
-                    if m is not None and not self._same(
-                        a.kind, current, a.params["base_state"]
-                    ):
+                    if not self._same(a.kind, current, a.params["base_state"]):
                         raise StalePlanError(
                             f"{a.key!r}: base branch moved since the plan was made "
                             f"({short_state(a.params['base_state'])} -> "
