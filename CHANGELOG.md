@@ -89,6 +89,17 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
 
 ### Changed
 
+- **`tether.repo` is a package.** The 5,500-line `repo.py` is split by
+  command family -- `_core` (state, locks, construction, backends, the op
+  log, plan verification), `_objects` (add/remove, set, pull, snapshot and
+  status, open, history, verify, diff), `_commit`, `_fork` (new, restore),
+  `_promote`, `_gc` (gc, forget-workspace, abandon), `_undo` (undo, repair),
+  and `_reports` (the result dataclasses) -- each a mixin over `RepoCore`,
+  assembled into the same public `Repo`. A pure move: the same 128 methods,
+  the same `tether.repo` exports. Along the way the four workspace-walking
+  loops became one `_iter_live_workspaces()`, and `plan_promote` reads every
+  object's base and working branch in one fan-out instead of two round
+  trips per object.
 - Round-2 review corrections: committed option tables (`storage_options`,
   `catalog`) are screened by a per-backend `SAFE_OPTION_KEYS` allowlist
   rather than a substring blocklist, so an option tether has never named is

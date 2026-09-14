@@ -174,7 +174,7 @@ nothing under `tether.experimental.registry`: the `Repo` methods are thin
 delegates that import `tether.experimental.registry.ops` on first call, the
 `tether.<Symbol>` names resolve lazily (module `__getattr__`), and the three
 CLI commands are attached by `tether.experimental.cli.register(app)`. A
-reader of `repo.py` sees the core loop only.
+reader of `tether.repo` sees the core loop only.
 
 **What "experimental" means.** The backend passes the conformance suite and
 its engine lifecycle against a fake, not against the service; `tether
