@@ -79,7 +79,7 @@ reference:
         - PromoteReport
         - UndoReport
         - RepairReport
-        - UpgradeReport
+        - upgrade.UpgradeReport
         - DiffEntry
         - TETHER_REV_ENV
     - title: Operation log
@@ -97,6 +97,7 @@ reference:
         `Plan`; `Repo.apply_*` executes one after re-checking the world matches.
       contents:
         - Plan
+        - Precondition
         - Action
     - title: Manifest model
       desc: >-
@@ -136,7 +137,7 @@ reference:
         `tether.experimental.registry`; import the public names from `tether`.
       contents:
         - experimental.registry
-        - ImportReport
+        - experimental.registry.ImportReport
     - title: VCS adapters
       desc: How tether reads and writes history through jj or git.
       contents:

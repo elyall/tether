@@ -89,6 +89,17 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
 
 ### Changed
 
+- Round-2 review corrections: committed option tables (`storage_options`,
+  `catalog`) are screened by a per-backend `SAFE_OPTION_KEYS` allowlist
+  rather than a substring blocklist, so an option tether has never named is
+  refused by name; `Repo.backend_for` reads the class contract via
+  `backend_class()` instead of building a probe instance; `tether open`
+  prints a Neon connection URL with the password redacted unless
+  `--with-password` (never under `--json`); Icechunk, Delta, and DuckLake
+  implement `validate_locator` (URI scheme, numeric `at`); Neon takes one
+  branch listing per operation and documents the `next_xid` collision
+  between sibling branches; `PromoteReport.trunk_moved` has its docstring
+  back.
 - **Plan preconditions.** What a plan saw is recorded as typed
   `Plan.preconditions` (`manifest_hash`, `workspace_id`, `vcs_head`,
   `history_digest`, `config_version`, `ref_absent`, `ref_head`, `base_state`,
