@@ -13,9 +13,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
       - run: uv sync --all-extras
@@ -27,9 +27,9 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
       - run: uv sync --all-extras
@@ -43,7 +43,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # jj has no official setup action; install the release binary so the
       # jj-parametrized tests run instead of being skipped.
       - name: Install jj
@@ -57,7 +57,7 @@ jobs:
           sudo install -m 0755 /tmp/jj /usr/local/bin/jj
           jj --version
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
       - run: uv sync --all-extras --python ${{ matrix.python-version }}
@@ -65,7 +65,7 @@ jobs:
         run: uv run pytest --cov=tether --cov-report=xml --cov-report=term-missing:skip-covered
       - name: Upload coverage
         # One upload per matrix leg; Codecov merges them into a single report.
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           flags: py${{ matrix.python-version }}

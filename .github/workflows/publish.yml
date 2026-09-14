@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install jj
         env:
           JJ_VERSION: v0.45.1
@@ -21,9 +21,9 @@ jobs:
           tar -xzf /tmp/jj.tar.gz -C /tmp ./jj
           sudo install -m 0755 /tmp/jj /usr/local/bin/jj
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        # No `enable-cache`: setup-uv v10 leaves the cache off for `release`
+        # events (a poisoned cache must not reach a published wheel).
+        uses: astral-sh/setup-uv@v10.1.0
       - run: uv sync --all-extras
       - run: uv run ruff format --check .
       - run: uv run ruff check .
@@ -37,9 +37,9 @@ jobs:
     permissions:
       id-token: write # trusted publishing; no long-lived tokens
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.1.0
       - name: Build
         run: uv build
       - name: Tag matches the package version
