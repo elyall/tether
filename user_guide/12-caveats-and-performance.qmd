@@ -91,8 +91,17 @@ the trunk bookmark, where the working ref is `main` itself. `protected` needs
 a paid plan; branch quotas vary.
 
 **Neon fingerprint cost.** The LSN moves without user writes, so it is a
-volatile (address-only) key: only `next_xid` and the branch count as change.
+volatile (address-only) key: only `next_xid` and the lineage count as change.
 A snapshot may still wake a suspended compute; a plain `status` does not fingerprint (`--snapshot`, `commit`, and `verify` do).
+
+**Neon content is `{next_xid, lineage}`.** `branch` in a Neon state is the
+*lineage* -- the object's source branch when the branch read descends from it
+-- so that a fork with no writes compares equal to the pin it was cut from.
+The price: two sibling branches of the same lineage that have consumed the
+same number of transactions compare equal too. Neon exposes no content hash
+and no history query to tell them apart, which is why the backend is
+`BRANCH_IS_STORAGE`: `gc` never judges a Neon branch by its state alone, and
+`promote` is not offered.
 
 **Files on unversioned storage** are Observed: detectably but not recoverably
 drifted. Bucket or container versioning promotes single remote objects to

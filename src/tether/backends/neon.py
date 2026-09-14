@@ -20,6 +20,7 @@ the branch tree and can only be garbage-collected leaf-first.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 from tether.backends.base import (
@@ -51,6 +52,9 @@ class _NeonApi:
             },
             timeout=30.0,
         )
+        self.generation = 0
+        """Bumped by every mutating call; a cached listing is only reused
+        while the generation it was taken at is current."""
 
     @staticmethod
     def _ok(resp: Any, *, allow: tuple[int, ...] = ()) -> Any:
@@ -72,12 +76,15 @@ class _NeonApi:
         return self._ok(resp).json()
 
     def post(self, path: str, body: dict) -> dict:
+        self.generation += 1
         return self._ok(self._client.post(path, json=body)).json()
 
     def delete(self, path: str) -> None:
+        self.generation += 1
         self._ok(self._client.delete(path), allow=(404,))
 
     def patch(self, path: str, body: dict) -> dict:
+        self.generation += 1
         return self._ok(self._client.patch(path, json=body)).json()
 
 
@@ -87,7 +94,11 @@ class NeonBackend(ObjectBackend):
     SAFE_CONFIG_KEYS = frozenset()  # api_url / api_key_env: secrets.toml only
     # The LSN advances on checkpoints and autovacuum with no user write; it is
     # where a pin branch is cut, not what identifies the data. `next_xid` is.
-    VOLATILE_KEYS = frozenset({"lsn"})
+    # `timeline` is the branch the state was read from -- needed to pin, fork,
+    # and open (an LSN is only meaningful on its own timeline) but not part of
+    # the content: an untouched fork reports its parent's `branch`, as a Lance
+    # fork reports its parent's version, so forks compare equal to the pin.
+    VOLATILE_KEYS = frozenset({"lsn", "timeline"})
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -101,6 +112,18 @@ class NeonBackend(ObjectBackend):
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
         self._api_obj: _NeonApi | None = None
+        # project id -> (api generation, branches). One protocol call needs
+        # the listing several times (`_require_branch`, `_lineage`, a pin's
+        # parent); a project with hundreds of pin branches must not pay for
+        # each. Cleared at the start of every protocol call (`_fresh`) and
+        # ignored after any mutation, so it never outlives one operation.
+        self._branch_cache: dict[str, tuple[int, list[dict]]] = {}
+
+    def _fresh(self) -> None:
+        """Forget cached listings: called on entry to every protocol method,
+        so a listing is taken at most once per operation and never reused
+        across two."""
+        self._branch_cache.clear()
 
     # -- api / helpers --------------------------------------------------- #
     @property
@@ -124,6 +147,14 @@ class NeonBackend(ObjectBackend):
         return str(locator.get("branch", "main"))
 
     def _branches(self, project_id: str) -> list[dict]:
+        cached = self._branch_cache.get(project_id)
+        if cached is not None and cached[0] == self._api.generation:
+            return cached[1]
+        out = self._list_branches(project_id)
+        self._branch_cache[project_id] = (self._api.generation, out)
+        return out
+
+    def _list_branches(self, project_id: str) -> list[dict]:
         # The branch list is paginated: follow the cursor until a page comes
         # back without one (or empty). A project with more branches than one
         # page holds -- every pin is a branch -- must not lose the tail: gc
@@ -214,6 +245,17 @@ class NeonBackend(ObjectBackend):
         return f"neon:{self._project(locator)}"
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
+        """`{lsn, next_xid, branch[, timeline]}` for the branch read.
+
+        Content is `{next_xid, branch}` where `branch` is the *lineage* (the
+        object's source branch when the branch read descends from it) and
+        `lsn`/`timeline` are volatile address keys. Two sibling branches of
+        the same lineage that have consumed the same number of transactions
+        therefore compare equal -- Neon exposes no content hash and no
+        history query to tell them apart. That is why Neon is
+        `BRANCH_IS_STORAGE`: gc never judges a branch by its state alone.
+        """
+        self._fresh()
         if locator.get("at"):
             raise BackendError(
                 "neon does not support a detached base (`at`); an LSN is only "
@@ -226,11 +268,38 @@ class NeonBackend(ObjectBackend):
         )
         uri = self._connection_uri(project_id, branch["id"], locator)
         lsn, next_xid = self._probe(uri)
-        # An LSN is only meaningful on its own timeline, so the state names the
-        # branch it was read from; pin/fork/open hang off that branch.
-        return {"lsn": lsn, "next_xid": next_xid, "branch": str(branch["name"])}
+        # `branch` is the lineage -- the object's source branch when this one
+        # descends from it -- so that a fork with no writes has the same
+        # content state as the pin it was cut from; `timeline` is the branch
+        # actually read, which pin/fork/open hang off.
+        source = self._source_branch(locator)
+        lineage = self._lineage(project_id, branch, source)
+        state: State = {"lsn": lsn, "next_xid": next_xid, "branch": lineage}
+        if str(branch["name"]) != lineage:
+            state["timeline"] = str(branch["name"])
+        return state
+
+    def _lineage(self, project_id: str, branch: dict, source: str) -> str:
+        """`source` if `branch` descends from it (or is it), else the branch's
+        own name: a branch cut from elsewhere is its own lineage."""
+        by_id = {b["id"]: b for b in self._branches(project_id)}
+        seen: set[str] = set()
+        cur: dict | None = branch
+        while cur is not None and cur["id"] not in seen:
+            if str(cur.get("name")) == source:
+                return source
+            seen.add(cur["id"])
+            parent = cur.get("parent_id")
+            cur = by_id.get(parent) if parent else None
+        return str(branch["name"])
+
+    @staticmethod
+    def _timeline(state: Mapping[str, Any]) -> str:
+        """The branch a state was read from (its LSN is meaningful there)."""
+        return str(state.get("timeline") or state["branch"])
 
     def check_quiescence(self, locator: Locator, working_ref: str | None) -> None:
+        self._fresh()
         project_id = self._project(locator)
         branch = self._require_branch(
             project_id, working_ref or self._source_branch(locator)
@@ -243,11 +312,12 @@ class NeonBackend(ObjectBackend):
             )
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
+        self._fresh()
         project_id = self._project(locator)
         ref = ref_for_pin(pin_id)
         existing = self._branch_by_name(project_id, ref)
         if existing is not None:
-            parent = self._require_branch(project_id, str(state["branch"]))
+            parent = self._require_branch(project_id, self._timeline(state))
             if existing.get("parent_id") != parent["id"] or str(
                 existing.get("parent_lsn")
             ) != str(state["lsn"]):
@@ -258,7 +328,7 @@ class NeonBackend(ObjectBackend):
                     kind="neon",
                 )
         if existing is None:
-            parent = self._require_branch(project_id, str(state["branch"]))
+            parent = self._require_branch(project_id, self._timeline(state))
             self._api.post(
                 f"/projects/{project_id}/branches",
                 {
@@ -274,6 +344,7 @@ class NeonBackend(ObjectBackend):
         return Pin(id=pin_id, ref=ref, created=existing is None)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
+        self._fresh()
         project_id = self._project(locator)
         br = self._branch_by_name(project_id, pin.ref)
         if br is None:
@@ -290,6 +361,7 @@ class NeonBackend(ObjectBackend):
             raise BackendError(f"pin {pin.ref} was not deleted", kind="neon")
 
     def list_pins(self, locator: Locator) -> set[str]:
+        self._fresh()
         project_id = self._project(locator)
         prefix = ref_for_pin("")
         out: set[str] = set()
@@ -306,6 +378,7 @@ class NeonBackend(ObjectBackend):
         pin: Pin | None,
         deep: bool,
     ) -> VerifyReport:
+        self._fresh()
         project_id = self._project(locator)
         ref = pin.ref if pin is not None else None
         if ref is None:
@@ -318,7 +391,7 @@ class NeonBackend(ObjectBackend):
                 VerifyStatus.DRIFTED,
                 f"parent_lsn {br.get('parent_lsn')} != {state['lsn']}",
             )
-        parent = self._branch_by_name(project_id, str(state["branch"]))
+        parent = self._branch_by_name(project_id, self._timeline(state))
         if parent is not None and br.get("parent_id") != parent["id"]:
             return VerifyReport(
                 VerifyStatus.DRIFTED,
@@ -340,6 +413,7 @@ class NeonBackend(ObjectBackend):
         return VerifyReport(VerifyStatus.OK)
 
     def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+        self._fresh()
         project_id = self._project(locator)
         if isinstance(source, Pin):
             parent = self._require_branch(project_id, source.ref)
@@ -347,7 +421,7 @@ class NeonBackend(ObjectBackend):
         else:
             # Recorded state (no pin branch): fork the state's branch at the
             # recorded LSN; only possible while it is inside the history window.
-            parent = self._require_branch(project_id, str(source["branch"]))
+            parent = self._require_branch(project_id, self._timeline(source))
             lsn = str(source["lsn"])
         branches = self._branches(project_id)
         existing = next((b for b in branches if b.get("name") == name), None)
@@ -420,6 +494,7 @@ class NeonBackend(ObjectBackend):
         )
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
+        self._fresh()
         project_id = self._project(locator)
         if ref == self._source_branch(locator):
             return
@@ -428,6 +503,7 @@ class NeonBackend(ObjectBackend):
             self._api.delete(f"/projects/{project_id}/branches/{br['id']}")
 
     def list_working_refs(self, locator: Locator) -> list[str]:
+        self._fresh()
         return sorted(
             str(br.get("name", ""))
             for br in self._branches(self._project(locator))
@@ -455,6 +531,7 @@ class NeonBackend(ObjectBackend):
         target: str | Pin | State | None,
         read_only: bool,
     ) -> Handle:
+        self._fresh()
         project_id = self._project(locator)
         if isinstance(target, Pin):
             br = self._require_branch(project_id, target.ref)
@@ -465,7 +542,7 @@ class NeonBackend(ObjectBackend):
             )
         if isinstance(target, dict):
             # Time-travel read on the state's branch within the history window.
-            br = self._require_branch(project_id, str(target["branch"]))
+            br = self._require_branch(project_id, self._timeline(target))
             self._ensure_endpoint(project_id, br["id"], "read_only")
             uri = self._connection_uri(project_id, br["id"], locator)
             sep = "&" if "?" in uri else "?"

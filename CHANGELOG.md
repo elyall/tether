@@ -40,6 +40,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fork point, and `promote` asks the store's own history first
   (`ancestor_of`), using the recorded fork point only where the backend has
   no DAG.
+- Neon put the branch *name* in the content state, so an untouched fork read
+  as modified, `commit` pinned a child of the working branch for no data
+  change, and `new` on the bookmark demanded `--discard`. The state's
+  `branch` is now the lineage (the object's source branch when the fork
+  descends from it) and the timeline actually read is the volatile
+  `timeline`, so a fork with no writes has the pin's content -- the Lance
+  pattern. Neon runs the shared conformance suite and a full `Repo` lifecycle
+  against the API fake; the suite's stability and fork checks compare
+  content states (up to `VOLATILE_KEYS`).
 
 ### Added
 

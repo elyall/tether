@@ -57,10 +57,16 @@ def _fingerprint_checks(h: BackendHarness, loc: Locator) -> tuple[dict, dict]:
     b = h.backend
     s1 = b.fingerprint(loc, None)
     assert isinstance(s1, dict), "fingerprint must return a dict"
-    assert b.fingerprint(loc, None) == s1, "fingerprint must be stable"
+    # Stability is a *content* property: address keys the backend declares
+    # volatile (a Neon LSN that moves on checkpoints) may differ between reads.
+    assert content_state(b, b.fingerprint(loc, None)) == content_state(b, s1), (
+        "fingerprint must be stable (up to VOLATILE_KEYS)"
+    )
     h.mutate(loc, None)
     s2 = b.fingerprint(loc, None)
-    assert s2 != s1, "fingerprint must change after a mutation"
+    assert content_state(b, s2) != content_state(b, s1), (
+        "fingerprint must change after a mutation"
+    )
     return s1, s2
 
 
@@ -129,22 +135,26 @@ def _pin_checks(h: BackendHarness, loc: Locator, state: dict) -> str:
 
 def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None:
     b = h.backend
+
+    def same(x: dict, y: dict) -> bool:  # equality up to VOLATILE_KEYS
+        return content_state(b, x) == content_state(b, y)
+
     pin = b.pin(loc, state, pid)
     name = working_ref_name(CONFORMANCE_DATASET, "conformance")
     wref = b.fork(loc, pin, name)
     assert isinstance(wref, str) and wref, "fork must return a working ref"
     forked = b.fingerprint(loc, wref)
-    assert forked == state, "a fresh fork must start at the pinned state"
+    assert same(forked, state), "a fresh fork must start at the pinned state"
     handle = b.open(loc, wref, read_only=False)
     assert isinstance(handle, Handle) and not handle.read_only
     # Writing to the fork changes only the fork.
     base_before = b.fingerprint(loc, None)
     h.mutate(loc, wref)
-    assert b.fingerprint(loc, wref) != forked, "writes to a fork must register"
-    assert b.fingerprint(loc, None) == base_before, "fork must isolate the base"
+    assert not same(b.fingerprint(loc, wref), forked), "writes to a fork must register"
+    assert same(b.fingerprint(loc, None), base_before), "fork must isolate the base"
     # Reset contract: forking onto an existing name moves it back to the source.
     again = b.fork(loc, pin, name)
-    assert b.fingerprint(loc, again) == state, (
+    assert same(b.fingerprint(loc, again), state), (
         "fork onto an existing name must reset the branch to the source"
     )
     wref = again
@@ -155,7 +165,7 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     # Pin-less fork: straight from the recorded state (policy.pin = "record").
     name2 = working_ref_name(CONFORMANCE_DATASET, "conformance-pinless")
     wref2 = b.fork(loc, state, name2)
-    assert b.fingerprint(loc, wref2) == state, "fork from state must start there"
+    assert same(b.fingerprint(loc, wref2), state), "fork from state must start there"
     b.delete_working_ref(loc, wref2)
 
 

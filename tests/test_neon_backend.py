@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
 respx = pytest.importorskip("respx")
 import httpx  # noqa: E402
 
-from tether.backends.base import VerifyStatus  # noqa: E402
+from tether.backends.base import (  # noqa: E402
+    ObjectBackend,
+    VerifyStatus,
+    content_state,
+)
 from tether.backends.neon import NeonBackend  # noqa: E402
 from tether.errors import BackendError  # noqa: E402
 from tether.handles import NeonHandle  # noqa: E402
@@ -33,6 +38,7 @@ class FakeNeon:
             }
         }
         self.endpoints: list[dict] = []
+        self.listings = 0  # how often the branch list was fetched
         self.restores: list[tuple[str, dict]] = []
         self._n = 0
 
@@ -66,6 +72,7 @@ class FakeNeon:
     PAGE = 2  # small pages, so every listing in the tests exercises pagination
 
     def _list_branches(self, request: httpx.Request) -> httpx.Response:
+        self.listings += 1
         # The real API pages: `cursor` names the last item seen, the reply
         # carries `pagination.cursor` while more follow.
         items = list(self.branches.values())
@@ -220,10 +227,26 @@ def test_pins_hang_off_the_branch_the_state_came_from(
         wref = backend.fork(LOCATOR, base_pin, "tether.ws.abcd1234.db")
         work_br = next(b for b in fake.branches.values() if b["name"] == wref)
 
-        # Writes on the fork move its LSN; the state says which branch that is.
+        # Untouched, the fork reports its parent's lineage and the same xid:
+        # the same *content* as the pin, on its own timeline.
+        untouched = backend.fingerprint(LOCATOR, wref)
+        assert untouched == {
+            "lsn": "0/16B3748",
+            "next_xid": "742",
+            "branch": "main",
+            "timeline": wref,
+        }
+        assert content_state(backend, untouched) == content_state(backend, base)
+
+        # Writes on the fork move its xid; the state says which timeline that is.
         monkeypatch.setattr(backend, "_probe", lambda uri: ("0/2000000", "900"))
         forked = backend.fingerprint(LOCATOR, wref)
-        assert forked == {"lsn": "0/2000000", "next_xid": "900", "branch": wref}
+        assert forked == {
+            "lsn": "0/2000000",
+            "next_xid": "900",
+            "branch": "main",
+            "timeline": wref,
+        }
 
         pin = backend.pin(LOCATOR, forked, "000000000002")
         pin_br = next(b for b in fake.branches.values() if b["name"] == pin.ref)
@@ -405,3 +428,149 @@ def test_working_ref_blockers_names_the_pin_children(backend: NeonBackend) -> No
         assert backend.working_ref_blockers(LOCATOR, wref) is None
         backend.delete_working_ref(LOCATOR, wref)
         assert wref not in backend.list_working_refs(LOCATOR)
+
+
+# --------------------------------------------------------------------------- #
+# Driven through the shared suite and the engine, against the fake
+# --------------------------------------------------------------------------- #
+class _Probe:
+    """A per-branch xid/LSN model behind `_probe`: a new branch inherits its
+    parent's counters at creation (its content is the parent's), writes move
+    only the branch written to, and LSNs move without writes too."""
+
+    def __init__(self, fake: FakeNeon) -> None:
+        self.fake = fake
+        self.xid: dict[str, int] = {"br-main": 742}
+        self.lsn: dict[str, int] = {"br-main": 0x16B3748}
+        # (lsn, xid) as each branch advanced: a child cut at `parent_lsn`
+        # inherits the parent's xid *at that LSN*, not its current one.
+        self.history: dict[str, list[tuple[int, int]]] = {"br-main": [(0x16B3748, 742)]}
+        self.cut: dict[str, tuple[object, ...]] = {"br-main": (None, None, None)}
+
+    def _inherit(self, bid: str) -> None:
+        meta = self.fake.branches[bid]
+        cut = (meta.get("parent_id"), meta.get("parent_lsn"), meta.get("last_reset_at"))
+        if bid in self.xid and self.cut.get(bid) == cut:
+            return
+        # First sight, or the branch was restored onto another cut point: its
+        # content is the source's at that point again.
+        self.cut[bid] = cut
+        parent = meta.get("parent_id") or "br-main"
+        self._inherit(parent)
+        at = meta.get("parent_lsn")
+        if at:
+            point = int(str(at).split("/")[1], 16)
+            xid = max(
+                (x for lsn, x in self.history[parent] if lsn <= point), default=None
+            )
+            assert xid is not None, f"{bid} cut at an LSN {parent} never had"
+            self.xid[bid], self.lsn[bid] = xid, point
+        else:
+            self.xid[bid], self.lsn[bid] = self.xid[parent], self.lsn[parent]
+        self.history[bid] = [(self.lsn[bid], self.xid[bid])]
+
+    def _advance(self, bid: str, lsn_by: int, xid_by: int) -> None:
+        self._inherit(bid)
+        self.lsn[bid] += lsn_by
+        self.xid[bid] += xid_by
+        self.history[bid].append((self.lsn[bid], self.xid[bid]))
+
+    def __call__(self, uri: str) -> tuple[str, str]:
+        bid = uri.rsplit("/", 1)[-1]
+        self._advance(bid, 0x100, 0)  # a checkpoint: LSN moves, content does not
+        return f"0/{self.lsn[bid]:X}", str(self.xid[bid])
+
+    def write(self, name: str) -> None:
+        bid = next(b["id"] for b in self.fake.branches.values() if b["name"] == name)
+        self._advance(bid, 0x1000, 1)
+
+
+class NeonHarness:
+    def __init__(self, backend: NeonBackend, probe: _Probe) -> None:
+        self.backend: ObjectBackend = backend
+        self.probe = probe
+
+    def new_object(self) -> dict:
+        return dict(LOCATOR)
+
+    def mutate(self, locator: dict, working_ref: str | None) -> None:
+        self.probe.write(working_ref or "main")
+
+
+def test_neon_conformance(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tether.testing import run_conformance
+
+    monkeypatch.setenv("NEON_API_KEY", "secret")
+    fake = FakeNeon()
+    backend = NeonBackend({"api_url": BASE})
+    probe = _Probe(fake)
+    monkeypatch.setattr(backend, "_probe", probe)
+    monkeypatch.setattr(backend, "_active_writers", lambda uri: 0)
+    with respx.mock as router:
+        fake.install(router)
+        run_conformance(NeonHarness(backend, probe))
+
+
+def test_neon_repo_lifecycle(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """new -> open -> commit -> new again -> gc, the way a user drives it. An
+    untouched fork is clean, a fork with writes pins once, and `new` on the
+    bookmark after a commit reuses the branch without --discard."""
+    from tether.repo import Repo
+
+    monkeypatch.setenv("NEON_API_KEY", "secret")
+    fake = FakeNeon()
+    probe = _Probe(fake)
+    with respx.mock as router:
+        fake.install(router)
+        repo = Repo.init(vcs_root)
+        (vcs_root / ".tether" / "secrets.toml").write_text(
+            f'[backends.neon]\napi_url = "{BASE}"\n'
+        )
+        (vcs_root / ".tether" / "secrets.toml").chmod(0o600)
+        repo = Repo.find(vcs_root)
+        backend = repo.backend_for("neon")
+        monkeypatch.setattr(backend, "_probe", probe)
+        monkeypatch.setattr(backend, "_active_writers", lambda uri: 0)
+        repo.add("db", "neon", dict(LOCATOR))
+        res = repo.commit("baseline")
+        assert res.pinned["db"] is not None
+        pins_after_baseline = len(backend.list_pins(LOCATOR))
+        # One branch listing per fingerprint: `_require_branch`, `_lineage`,
+        # and the rest share it within the call (and never across two).
+        before = fake.listings
+        backend.fingerprint(LOCATOR, None)
+        assert fake.listings == before + 1
+        backend.fingerprint(LOCATOR, None)
+        assert fake.listings == before + 2  # not reused across calls
+
+        repo.new(bookmark="work", eager=True)
+        wref = repo.workspace.working_refs["db"]
+        # Untouched: clean, and a commit has nothing to pin.
+        (db,) = repo.status(do_snapshot=True).objects
+        assert not db.changed
+        assert repo.plan_commit("nothing").is_empty
+        assert len(backend.list_pins(LOCATOR)) == pins_after_baseline
+
+        # Writes on the fork: modified, pinned once, then clean again.
+        probe.write(wref)
+        (db,) = repo.status(do_snapshot=True).objects
+        assert db.changed
+        res = repo.commit("work")
+        assert res.pinned["db"] is not None
+        assert len(backend.list_pins(LOCATOR)) == pins_after_baseline + 1
+        (db,) = repo.status(do_snapshot=True).objects
+        assert not db.changed
+
+        # `new` on the bookmark reuses the branch: no --discard needed.
+        plan = repo.plan_new("work", eager=True)
+        assert [a.op for a in plan.actions if a.key == "db"] == ["reuse"]
+        repo.new("work", eager=True)
+        assert repo.workspace.working_refs["db"] == wref
+
+        # Back on the trunk; the bookmark's branch is judged by gc.
+        repo.new("main")
+        repo.vcs.bookmark_delete("work")
+        report = repo.gc(dry_run=True, prune_bookmarks=True)
+        assert wref in report.kept_working_refs.get("db", []) or wref in (
+            report.deleted_working_refs.get("db", [])
+        )
