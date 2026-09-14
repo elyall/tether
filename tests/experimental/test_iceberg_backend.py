@@ -8,7 +8,7 @@ from pyiceberg.table.refs import SnapshotRef, SnapshotRefType
 from pyiceberg.table.snapshots import Operation, Summary
 
 from tether.backends.base import Capability, VerifyStatus
-from tether.backends.iceberg import IcebergBackend
+from tether.experimental.backends.iceberg import IcebergBackend
 from tether.handles import IcebergHandle
 from tether.manifest import Policy, ref_for_pin
 

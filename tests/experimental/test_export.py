@@ -11,7 +11,7 @@ import pytest
 
 from tether.backends.memory import default_store
 from tether.errors import ConfigError
-from tether.export import (
+from tether.experimental.registry.export import (
     SCHEMA_VERSION,
     TABLES,
     ExportBundle,

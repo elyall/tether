@@ -18,7 +18,10 @@ from tether.manifest import Locator, Pin
 from tether.testing import run_conformance
 
 duckdb = pytest.importorskip("duckdb")
-from tether.backends.ducklake import DuckLakeBackend, attach_sql  # noqa: E402
+from tether.experimental.backends.ducklake import (  # noqa: E402
+    DuckLakeBackend,
+    attach_sql,
+)
 
 try:
     _probe = duckdb.connect()

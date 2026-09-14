@@ -41,7 +41,7 @@ from tether.errors import (
     UnpinnedStateError,
     VcsError,
 )
-from tether.export import ExportBundle, PublishReport
+from tether.experimental.registry import ExportBundle, ImportSpec, PublishReport
 from tether.manifest import (
     ObjectManifest,
     Pin,
@@ -59,7 +59,6 @@ from tether.manifest import (
 from tether.migrations import UpgradeReport
 from tether.oplog import OpEntry
 from tether.plan import Action, Plan
-from tether.registry import ImportSpec
 from tether.repo import (
     TETHER_REV_ENV,
     AbandonReport,

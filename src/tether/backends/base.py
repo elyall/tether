@@ -578,14 +578,14 @@ _BUILTIN_MODULES: dict[str, str] = {
     "memory": "tether.backends.memory",
     "file": "tether.backends.file",
     "icechunk": "tether.backends.icechunk",
-    "neon": "tether.backends.neon",
+    "neon": "tether.experimental.backends.neon",
     "git": "tether.backends.git",
-    "iceberg": "tether.backends.iceberg",
+    "iceberg": "tether.experimental.backends.iceberg",
     "delta": "tether.backends.delta",
     "lance": "tether.backends.lance",
-    "lakefs": "tether.backends.lakefs",
-    "ducklake": "tether.backends.ducklake",
-    "dolt": "tether.backends.dolt",
+    "lakefs": "tether.experimental.backends.lakefs",
+    "ducklake": "tether.experimental.backends.ducklake",
+    "dolt": "tether.experimental.backends.dolt",
 }
 
 

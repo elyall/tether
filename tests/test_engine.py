@@ -2397,7 +2397,7 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
     repo.undo()
     assert repo.objects["db"] == manifest
     specs, _ = __import__(
-        "tether.registry", fromlist=["specs_from_rows"]
+        "tether.experimental.registry.registry", fromlist=["specs_from_rows"]
     ).specs_from_rows(
         [
             {

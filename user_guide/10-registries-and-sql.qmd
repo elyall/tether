@@ -4,8 +4,12 @@ title: "Registries and SQL"
 
 ::: {.callout-note title="Experimental"}
 `export`, `publish`, and `import` are tested and documented but sit outside
-tether's core loop. Their shape may change, or they may move to a separate
-package, before 0.1.0.
+tether's core loop, and the code lives under `tether.experimental.registry`.
+The commands print a one-line note saying so. The exported schema
+(`TABLES`) and the import columns (`CANONICAL_COLUMNS`) may change before
+0.2; the commands, and the `tether.ExportBundle` / `tether.ImportSpec`
+re-exports, stay. See [Extending](11-extending.qmd#experimental-and-graduation)
+for what "experimental" promises.
 :::
 
 Data registries keep pointers and metadata in SQL: one row per object saying

@@ -67,6 +67,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`tether.experimental`.** The backends tested only against fakes (Neon,
+  lakeFS, Dolt, DuckLake, Iceberg) moved to `tether.experimental.backends`,
+  and the registry layer (`export`, `publish`, `import`) to
+  `tether.experimental.registry`. Nothing users type or import changes: kind
+  names, extras, CLI commands, and the `tether.ExportBundle` /
+  `tether.ImportSpec` / `build_bundle` / `specs_from_rows` re-exports are the
+  stable surface; the old module paths are shims that warn (`DeprecationWarning`)
+  and are removed at 0.2. `export`/`publish`/`import` print the experimental
+  note `add` already printed for experimental kinds. Graduating a backend is
+  a file move plus `MATURITY = "stable"` (documented in Extending).
 - **One migration.** `tether upgrade` brings any alpha dataset to the
   current version in a single step whose parts run on what the dataset shows
   (old-format pins, `write =` or mtime file states, misplaced manifests or

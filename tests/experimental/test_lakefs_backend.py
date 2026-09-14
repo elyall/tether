@@ -22,7 +22,7 @@ from tether.testing import run_conformance
 lakefs = pytest.importorskip("lakefs")
 from lakefs.exceptions import ConflictException, NotFoundException  # noqa: E402
 
-from tether.backends.lakefs import LakeFSBackend  # noqa: E402
+from tether.experimental.backends.lakefs import LakeFSBackend  # noqa: E402
 
 
 @dataclass

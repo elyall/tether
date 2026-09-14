@@ -1,3 +1,4 @@
+note: export/publish/import are experimental (tether.experimental.registry): the schema may change before 0.2
 exported 10 file(s) to ~/history (parquet)
   tether_meta            5 row(s)
   commits               10 row(s)

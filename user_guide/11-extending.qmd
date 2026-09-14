@@ -149,6 +149,39 @@ work well). The engine stores it under `.tether/listings/` at commit, commits
 it, and hands both sides back in `listings=(text_a, text_b)` at diff time --
 so make `diff` degrade gracefully (a summary line) when either is `None`.
 
+## Experimental and graduation
+
+Backends that have been driven only through fakes of their service (Neon,
+lakeFS, Dolt, DuckLake, Iceberg) and the registry layer (`export`,
+`publish`, `import`) live under `tether.experimental`:
+
+```
+tether/experimental/backends/{neon,lakefs,dolt,ducklake,iceberg}.py
+tether/experimental/registry/{export,registry}.py
+```
+
+**What is stable.** Kind names (`tether add --kind neon`), extras
+(`tether-vcs[neon]`), CLI commands (`tether export` / `publish` / `import`),
+and the `tether.<Symbol>` re-exports (`ExportBundle`, `ImportSpec`,
+`build_bundle`, `specs_from_rows`). These do not change when something
+graduates. Module paths under `tether.experimental` are *not* API; the old
+paths (`tether.backends.neon`, `tether.export`, `tether.registry`) are shims
+that import with a `DeprecationWarning` and go away at 0.2.
+
+**What "experimental" means.** The backend passes the conformance suite and
+its engine lifecycle against a fake, not against the service; `tether
+backends` reports `experimental`, and `tether add` prints a note. Behaviour
+that only a live run can confirm (rate limits, eventual consistency, what a
+protected branch costs) is what remains to be seen.
+
+**Graduation is a file move.** `build_backend` resolves a kind through
+`_BUILTIN_MODULES` (kind -> module path) and the class's `MATURITY` attribute
+drives the label. To graduate a backend: move its file to `tether/backends/`,
+point its `_BUILTIN_MODULES` entry there, set `MATURITY = "stable"`, and update
+the maturity table in [Backends](09-backends.qmd). Nothing users type or
+import changes, because none of it named the module path. The registry layer
+graduates the same way: move the two modules up, keep the `tether` re-exports.
+
 ## Conformance suite
 
 `tether.testing.run_conformance` runs the tier-appropriate checks against any

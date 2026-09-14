@@ -1,3 +1,4 @@
+note: export/publish/import are experimental (tether.experimental.registry): the schema may change before 0.2
 published 111 row(s) to schema 'tether' (0 commit(s) already present)
   tether_meta            5 row(s)
   commits               10 row(s)

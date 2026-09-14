@@ -11,9 +11,14 @@ import pytest
 
 from tether.backends.memory import default_store
 from tether.errors import ConfigError, StalePlanError
+from tether.experimental.registry.registry import (
+    CANONICAL_COLUMNS,
+    ImportSpec,
+    read_source,
+    specs_from_rows,
+)
 from tether.manifest import Policy
 from tether.plan import Plan
-from tether.registry import CANONICAL_COLUMNS, ImportSpec, read_source, specs_from_rows
 from tether.repo import Repo
 
 

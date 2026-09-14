@@ -13,8 +13,8 @@ from tether.backends.base import (  # noqa: E402
     VerifyStatus,
     content_state,
 )
-from tether.backends.neon import NeonBackend  # noqa: E402
 from tether.errors import BackendError  # noqa: E402
+from tether.experimental.backends.neon import NeonBackend  # noqa: E402
 from tether.handles import NeonHandle  # noqa: E402
 from tether.manifest import ref_for_pin  # noqa: E402
 

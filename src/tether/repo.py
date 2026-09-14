@@ -56,7 +56,12 @@ from tether.errors import (
     UnpinnedStateError,
     VcsError,
 )
-from tether.export import ExportBundle, build_bundle
+from tether.experimental.registry import (
+    ExportBundle,
+    ImportSpec,
+    build_bundle,
+    specs_from_rows,
+)
 from tether.handles import Handle
 from tether.manifest import (
     CONFIG_VERSION,
@@ -95,7 +100,6 @@ from tether.manifest import (
 from tether.migrations import UpgradeReport, pending
 from tether.oplog import OpEntry, append_op, mark_done, mark_progress, read_ops
 from tether.plan import Action, Plan
-from tether.registry import ImportSpec, specs_from_rows
 from tether.vcs import VcsAdapter, detect_vcs
 
 TETHER_REV_ENV = "TETHER_REV"
@@ -5442,7 +5446,7 @@ class Repo:
         The tables (`commits`, `commit_parents`, `refs`, `objects`,
         `object_states`, optional `listings` / `listing_entries` and
         `workspace`) are what `tether export` writes and `tether publish`
-        upserts; see `tether.export.TABLES`.
+        upserts; see `tether.experimental.registry.export.TABLES`.
 
         Args:
             revs: Revisions to include (jj revsets / git revisions). `None`
@@ -5611,7 +5615,7 @@ class Repo:
 
         Rows carry `key`, `kind`, and any of `uri`, `locator_json`,
         `policy_file`, `policy_pin`, `at` (see
-        `tether.registry.CANONICAL_COLUMNS`); missing policy fields take
+        `tether.experimental.registry.CANONICAL_COLUMNS`); missing policy fields take
         `config.defaults`. Equivalent to `apply_import(plan_import(...))`.
         """
         # Plan and apply under one lock: planning sees the state the lock

@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 import pytest
 
 from tether.backends.base import Capability, ObjectBackend, VerifyStatus
-from tether.backends.dolt import DoltBackend, SqlDoltClient
 from tether.errors import BackendError
+from tether.experimental.backends.dolt import DoltBackend, SqlDoltClient
 from tether.handles import DoltHandle
 from tether.manifest import Locator, compute_pin_id, ref_for_pin
 from tether.testing import run_conformance

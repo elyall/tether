@@ -122,6 +122,11 @@ def _age(iso: str | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def _experimental_note(what: str) -> None:
+    """The one-line caveat every experimental surface prints, on stderr."""
+    typer.secho(f"note: {what}", fg=typer.colors.YELLOW, err=True)
+
+
 def _handle_address(handle: Handle, *, with_password: bool = False) -> str:
     if isinstance(handle, FileHandle):
         return handle.uri + (f"#{handle.version_id}" if handle.version_id else "")
@@ -299,12 +304,10 @@ def add(
     suffix = f" at {loc['at']}" if "at" in loc else ""
     typer.echo(f"added {key} ({kind}){suffix}")
     if repo.backend_for(kind).MATURITY != "stable":
-        typer.secho(
-            f"note: the {kind} backend is {repo.backend_for(kind).MATURITY}: tested "
+        _experimental_note(
+            f"the {kind} backend is {repo.backend_for(kind).MATURITY}: tested "
             "against a fake of the service, not the service itself (`tether "
-            "backends`)",
-            fg=typer.colors.YELLOW,
-            err=True,
+            "backends`)"
         )
 
 
@@ -1663,6 +1666,10 @@ def promote(
 # --------------------------------------------------------------------------- #
 # Registries: export / publish / import
 # --------------------------------------------------------------------------- #
+_REGISTRY_NOTE = (
+    "export/publish/import are experimental (tether.experimental.registry): the "
+    "schema may change before 0.2"
+)
 _EXPORT_FORMATS = ("sqlite", "parquet", "csv", "jsonl")
 
 
@@ -1713,6 +1720,8 @@ def export(
     """
     if fmt not in _EXPORT_FORMATS:
         _fail(TetherError(f"--format must be one of {', '.join(_EXPORT_FORMATS)}"))
+    if not json_out:  # machine consumers get JSON alone
+        _experimental_note(_REGISTRY_NOTE)
     if not rev and not all_history:
         rev = ["@"] if _repo().vcs.kind == "jj" else ["HEAD"]
     repo = _repo()
@@ -1767,6 +1776,8 @@ def publish(
     """
     if not to:
         _fail(TetherError("a Postgres DSN is required: --to or $TETHER_PUBLISH_DSN"))
+    if not json_out:  # machine consumers get JSON alone
+        _experimental_note(_REGISTRY_NOTE)
     repo = _repo()
     try:
         bundle = repo.export(rev or None, listings=listings)
@@ -1842,8 +1853,10 @@ def import_(
     `tether commit` afterwards to record states. `--sync` removes objects the
     source no longer lists.
     """
-    from tether.registry import read_source, specs_from_rows
+    from tether.experimental.registry import read_source, specs_from_rows
 
+    if not json_out:  # machine consumers get JSON alone
+        _experimental_note(_REGISTRY_NOTE)
     repo = _repo()
     try:
         if from_plan is not None:

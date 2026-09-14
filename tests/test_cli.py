@@ -882,6 +882,39 @@ def test_cli_version_and_backends() -> None:
     assert rows["dolt"]["maturity"] == "experimental"
 
 
+def test_old_module_paths_are_shims_that_warn() -> None:
+    """The experimental move changed nothing users type or import: kinds
+    resolve to the new modules, `tether.<Symbol>` re-exports still work, and
+    the old paths import with a DeprecationWarning."""
+    import importlib
+    import sys
+    import warnings
+
+    import tether
+    from tether.backends.base import build_backend, known_kinds
+
+    assert {"neon", "lakefs", "dolt", "ducklake", "iceberg"} <= set(known_kinds())
+    assert type(build_backend("neon", {})).__module__ == (
+        "tether.experimental.backends.neon"
+    )
+    assert tether.ExportBundle.__module__ == "tether.experimental.registry.export"
+    assert tether.ImportSpec.__module__ == "tether.experimental.registry.registry"
+    for old in ("tether.backends.neon", "tether.export", "tether.registry"):
+        sys.modules.pop(old, None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mod = importlib.import_module(old)
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "0.2" in str(w.message)
+            for w in caught
+        ), old
+        assert mod is not None
+    from tether.backends.neon import NeonBackend as Old
+    from tether.experimental.backends.neon import NeonBackend as New
+
+    assert Old is New
+
+
 def test_open_redacts_the_neon_password_by_default(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
