@@ -64,10 +64,12 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.oplog import (
+    CreatedStore,
     OpEntry,
     append_op,
     mark_done,
     mark_progress,
+    read_created,
     read_ops,
 )
 from tether.plan import Plan, Precondition
@@ -572,6 +574,11 @@ class RepoCore:
         """Whether this workspace works on the trunk bookmark (`config.trunk`),
         where every object's working ref is its upstream branch."""
         return self.workspace.bookmark == self.config.trunk
+
+    def created_stores(self) -> list[CreatedStore]:
+        """Stores this dataset created (`add --create`) and has not yet removed,
+        from the repository-wide index in the shared VCS store."""
+        return read_created(self.vcs.shared_dir(), self.config.dataset_id)
 
     def _iter_live_workspaces(self) -> Iterator[tuple[Path, WorkspaceState]]:
         """Every live checkout of this dataset that has run tether: its dataset

@@ -330,12 +330,18 @@ class ObjectManifest:
     pin: Pin | None = None
     captured_at: str | None = None
     recoverable: bool = True
+    origin: Literal["adopted", "created"] = "adopted"
+    """`created` when `add --create` made the store. Informational -- shown by
+    `status`, never consulted by `gc`: a committed manifest is untrusted, and
+    only the owner marker in the store itself says whose the store is."""
 
     def to_toml(self) -> str:
         doc = tomlkit.document()
         doc["key"] = self.key
         doc["kind"] = self.kind
         doc["recoverable"] = self.recoverable
+        if self.origin != "adopted":
+            doc["origin"] = self.origin
         if self.captured_at is not None:
             doc["captured_at"] = self.captured_at
         doc["locator"] = _drop_nulls(self.locator)
@@ -365,6 +371,7 @@ class ObjectManifest:
             pin=Pin.from_dict(dict(pin)) if pin is not None else None,
             captured_at=(str(data["captured_at"]) if "captured_at" in data else None),
             recoverable=bool(data.get("recoverable", True)),
+            origin="created" if data.get("origin") == "created" else "adopted",
         )
 
     def canonical(self) -> bytes:

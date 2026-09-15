@@ -631,6 +631,31 @@ class ForkOps(RepoCore):
                     errors,
                 )
 
+    def _adopt_into_bookmark(self: Repo, key: str, initial: State) -> str | None:
+        """Give a just-created store its working branch on the current
+        bookmark, so the first writable `open` needs no `new`.
+
+        On the trunk there is nothing to do: a Forkable object's working ref
+        *is* its base branch. Elsewhere the branch `new` would have planned is
+        forked now from the store's initial state (a `new` cannot plan it: the
+        object has no committed state to fork from yet), and the fork point
+        recorded, so `promote` later sees a clean fast-forward.
+        """
+        bookmark = self.workspace.bookmark
+        if not bookmark or self.on_trunk():
+            return None
+        m = self.objects[key]
+        backend = self.backend_for(m.kind)
+        if Capability.FORK not in effective_capabilities(backend, m.locator, m.policy):
+            return None
+        name = working_ref_name(self.config.dataset_id, bookmark)
+        ref = backend.fork(m.locator, dict(initial), name)
+        self.workspace.working_refs[key] = ref
+        self.workspace.pending_forks.pop(key, None)
+        self.workspace.fork_points[key] = dict(initial)
+        write_workspace(self.root, self.workspace)
+        return ref
+
     def _fork_from_manifest(self: Repo, m: ObjectManifest, name: str) -> str:
         """Create working branch `name` from a manifest's pin (or recorded state)."""
         backend = self.backend_for(m.kind)

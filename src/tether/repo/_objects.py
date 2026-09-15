@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -44,6 +44,7 @@ from tether.manifest import (
     Pin,
     Policy,
     State,
+    _now,
     remove_object,
     write_object,
     write_workspace,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
 
+from tether.oplog import CreatedStore, append_created
 from tether.repo._core import TETHER_REV_ENV, RepoCore
 from tether.repo._reports import (
     DiffEntry,
@@ -74,17 +76,19 @@ class ObjectOps(RepoCore):
 
     # -- add / remove ---------------------------------------------------------- #
     def add(
-        self,
+        self: Repo,
         key: str,
         kind: str,
         locator: dict,
         *,
         policy: Policy | None = None,
+        create: bool = False,
     ) -> ObjectManifest:
         """Register an object in the working copy.
 
         Writes a manifest with no state yet; the external system is not
-        contacted until the next `snapshot`, `status`, or `commit`.
+        contacted until the next `snapshot`, `status`, or `commit` -- unless
+        `create`, which makes the store first.
 
         Args:
             key: Free-form, path-like object key (`"zarr/imaging"`).
@@ -92,18 +96,103 @@ class ObjectOps(RepoCore):
             locator: Backend-specific fields naming the object (`uri`, `branch`,
                 `project_id`, ...); see the backends guide.
             policy: Per-object `Policy`; defaults to `config.defaults`.
+            create: Make an empty store at the locator (`CREATE` backends), mark
+                it as this dataset's, and record it in the repository-wide
+                index so `gc` can remove it once nothing references it. Refused
+                if anything already exists there. On a non-trunk bookmark the
+                new store's working branch is forked right away, so the first
+                writable `open` needs no `new`.
 
         Returns:
             The new manifest.
 
         Raises:
             ConfigError: If `key` exists, is unsafe, or `kind` cannot be built.
+            CapabilityError: `create` for a kind without `CREATE`.
+            BackendError: `create` where a store already exists.
         """
         with self._writer_lock():
             pre = {"objects": {key: None}, "workspace": self.workspace.to_toml()}
-            manifest = self._add(key, kind, locator, policy=policy)
-            self._log_op("add", result={"key": key}, pre=pre)
+            if key in self.objects:
+                raise ConfigError(f"object already exists: {key}")
+            result: dict[str, Any] = {"key": key}
+            if not create:
+                manifest = self._add(key, kind, locator, policy=policy)
+                self._log_op("add", result=result, pre=pre)
+                return manifest
+            backend = self.backend_for(kind)
+            resolved = absolutize_locator(backend, dict(locator), Path.cwd())
+            backend.validate_locator(resolved)
+            eff = effective_capabilities(
+                backend, resolved, policy or self.config.defaults
+            )
+            if Capability.CREATE not in eff:
+                raise CapabilityError(
+                    f"{kind!r} cannot create a store at this locator; register an "
+                    "existing one instead",
+                    key=key,
+                    kind=kind,
+                )
+            # A store write follows: journal first, like every other command
+            # that writes to a store, so a crash leaves a started entry.
+            op = self._begin_op("add", pre=pre)
+            initial = backend.create(resolved, owner=self.config.dataset_id)
+            identity = dict(backend.identity(resolved))
+            append_created(
+                self.vcs.shared_dir(),
+                CreatedStore(
+                    dataset_id=self.config.dataset_id,
+                    kind=kind,
+                    identity=identity,
+                    locator=dict(resolved),
+                    key=key,
+                    at=_now(),
+                    bookmark=self.workspace.bookmark,
+                ),
+            )
+            result["created"] = {
+                "kind": kind,
+                "identity": identity,
+                "locator": dict(resolved),
+            }
+            manifest = self._add(key, kind, resolved, policy=policy, origin="created")
+            ref = self._adopt_into_bookmark(key, initial)
+            if ref is not None:
+                result["fork"] = ref
+            self._end_op(op, result=result)
             return manifest
+
+    def create(
+        self: Repo,
+        key: str,
+        kind: str,
+        locator: dict,
+        *,
+        policy: Policy | None = None,
+    ) -> Handle:
+        """Make a store, register it as `key`, and open it: one verb for a
+        throwaway environment.
+
+        `add(key, kind, locator, create=True)` followed by `open(key)`. The
+        store is created empty with this dataset's owner marker and recorded in
+        the repository-wide index, so `gc --delete-stores` can remove it once
+        nothing references it; on a non-trunk bookmark its working branch is
+        forked at once, so the handle is writable without a `new`.
+
+        Args:
+            key: Object key to register.
+            kind: Backend kind with the `CREATE` capability.
+            locator: Where to make the store (backend-specific; nothing may
+                exist there yet).
+            policy: Per-object `Policy`; defaults to `config.defaults`.
+
+        Raises:
+            ConfigError: `key` is already registered.
+            CapabilityError: `kind` cannot create a store at this locator.
+            BackendError: Something already exists at the locator.
+        """
+        self.add(key, kind, locator, policy=policy, create=True)
+        return self.open(key)
 
     def _add(
         self,
@@ -112,6 +201,7 @@ class ObjectOps(RepoCore):
         locator: dict,
         *,
         policy: Policy | None = None,
+        origin: Literal["adopted", "created"] = "adopted",
     ) -> ObjectManifest:
         if key in self.objects:
             raise ConfigError(f"object already exists: {key}")
@@ -126,6 +216,7 @@ class ObjectOps(RepoCore):
             kind=kind,
             locator=resolved,
             policy=policy or self.config.defaults,
+            origin=origin,
         )
         write_object(self.root, manifest)
         self.objects[key] = manifest
@@ -487,6 +578,7 @@ class ObjectOps(RepoCore):
                     recoverable=m.recoverable,
                     changed=changed,
                     behind=behind,
+                    origin=m.origin,
                     current_state=current,
                     verify=report,
                 )

@@ -33,6 +33,8 @@ class ObjectStatus:
     """Whether the current state differs from the committed one."""
     current_state: State | None
     """The fingerprint taken by this status (or the cached one)."""
+    origin: str = "adopted"
+    """`created` when `add --create` made the store (`ObjectManifest.origin`)."""
     verify: VerifyReport | None = None
     """Cheap verify result when `RepoConfig.verify_on_status` is set."""
     error: str | None = None

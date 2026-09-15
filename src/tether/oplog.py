@@ -293,6 +293,104 @@ def read_ops(root: Path) -> list[OpEntry]:
 
 _APPEND_LOCK = threading.Lock()
 
+CREATED_FILENAME = "tether-created.jsonl"
+"""Repository-wide index of stores tether *created*, kept next to the
+repository lock in the shared VCS store (`VcsAdapter.shared_dir()`): one clone
+of the dataset, every checkout, never committed. History cannot hold this --
+an abandoned fork takes the manifest that named the store with it -- and a
+workspace's own log dies with `forget-workspace`. This survives both.
+"""
+
+
+@dataclass(frozen=True)
+class CreatedStore:
+    """One store tether made (`add --create`); `gc` may remove it once nothing
+    references it and the store confirms the owner marker."""
+
+    dataset_id: str
+    kind: str
+    identity: dict[str, Any]
+    """`ObjectBackend.identity(locator)`: what a manifest reference is matched on."""
+    locator: dict[str, Any]
+    key: str
+    """The key it was registered under at creation (informational)."""
+    at: str
+    bookmark: str | None = None
+    """The bookmark the store was created on. Its `tether.ws.*` branch is the
+    one this clone can account for when `gc` judges the store; a same-dataset
+    branch of a bookmark this clone never had may be another actor's."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dataset_id": self.dataset_id,
+            "kind": self.kind,
+            "identity": dict(self.identity),
+            "locator": dict(self.locator),
+            "key": self.key,
+            "at": self.at,
+            "bookmark": self.bookmark,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CreatedStore:
+        return cls(
+            dataset_id=str(data["dataset_id"]),
+            kind=str(data["kind"]),
+            identity=dict(data.get("identity") or {}),
+            locator=dict(data.get("locator") or {}),
+            key=str(data.get("key", "")),
+            at=str(data.get("at", "")),
+            bookmark=str(data["bookmark"]) if data.get("bookmark") else None,
+        )
+
+
+def created_path(shared_dir: Path) -> Path:
+    return shared_dir / CREATED_FILENAME
+
+
+def append_created(shared_dir: Path, entry: CreatedStore) -> None:
+    """Record a store tether just created (journal-style, synced)."""
+    path = created_path(shared_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _APPEND_LOCK, path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry.to_dict(), default=str) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def read_created(shared_dir: Path, dataset_id: str | None = None) -> list[CreatedStore]:
+    """Every created store on record (optionally one dataset's), oldest first."""
+    path = created_path(shared_dir)
+    if not path.is_file():
+        return []
+    out: list[CreatedStore] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = CreatedStore.from_dict(json.loads(line))
+        if dataset_id is None or entry.dataset_id == dataset_id:
+            out.append(entry)
+    return out
+
+
+def remove_created(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) -> None:
+    """Forget a store (deleted by `gc`, or by `undo add`)."""
+    path = created_path(shared_dir)
+    if not path.is_file():
+        return
+    keep = [
+        e
+        for e in read_created(shared_dir)
+        if not (e.dataset_id == dataset_id and e.identity == identity)
+    ]
+    tmp = path.with_suffix(".tmp")
+    with _APPEND_LOCK:
+        tmp.write_text(
+            "".join(json.dumps(e.to_dict(), default=str) + "\n" for e in keep),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
 
 def _append_line(root: Path, obj: dict[str, Any]) -> None:
     """Append one JSON line and sync it: the log is a journal, and a started

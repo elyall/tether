@@ -30,6 +30,7 @@ from tether.manifest import (
 )
 from tether.oplog import (
     OpEntry,
+    remove_created,
     report_dict,
 )
 from tether.plan import Action, Plan
@@ -49,12 +50,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.repo import Repo
 
 
+def _where(locator: dict) -> str:
+    """The locator field that names the store, for messages."""
+    for k in ("uri", "path", "system", "project_id", "table"):
+        if locator.get(k):
+            return str(locator[k])
+    return str(locator)
+
+
 class UndoOps(RepoCore):
     """`undo` and `repair`: reversing an operation, and rebuilding what the
     manifests promise."""
 
     # -- undo ------------------------------------------------------------------ #
-    def undo(self, op_id: str | None = None, *, discard: bool = False) -> UndoReport:
+    def undo(
+        self: Repo, op_id: str | None = None, *, discard: bool = False
+    ) -> UndoReport:
         """Reverse an operation from the op log, where the stores still allow it.
 
         Defaults to the newest entry that can be undone (not an `undo` or
@@ -123,7 +134,7 @@ class UndoOps(RepoCore):
                 "gc": self._undo_gc,
                 "promote": self._undo_promote,
                 "import": self._undo_manifests,
-                "add": self._undo_manifests,
+                "add": self._undo_add,
                 "remove": self._undo_manifests,
                 "pull": self._undo_commit,
                 "set": self._undo_manifests,
@@ -375,6 +386,46 @@ class UndoOps(RepoCore):
     ) -> None:
         self._restore_manifests(entry.pre.get("objects") or {}, report)
         self._restore_workspace(entry, report)
+
+    def _undo_add(
+        self: Repo, entry: OpEntry, report: UndoReport, discard: bool
+    ) -> None:
+        """`add --create` made a store: take it away again while it is still
+        empty (its own working branch, if `add` forked one, does not count);
+        a store that has been written to stays, and `gc` decides later."""
+        self._undo_manifests(entry, report, discard)
+        created = entry.result.get("created")
+        if not created:
+            return
+        key = str(entry.result.get("key", ""))
+        kind = str(created["kind"])
+        locator = dict(created["locator"])
+        backend = self.backend_for(kind)
+        fork = entry.result.get("fork")
+        ignoring = {str(fork)} if fork else set()
+        try:
+            if backend.owner(locator) != self.config.dataset_id:
+                report.irreversible.append(
+                    f"{key}: the store at {_where(locator)} no longer carries this "
+                    "dataset's owner marker; left alone"
+                )
+                return
+            if backend.is_ref_empty(locator, ignoring=ignoring) is not True:
+                report.irreversible.append(
+                    f"{key}: the store at {_where(locator)} holds writes; left for "
+                    "`gc` to reclaim once nothing references it"
+                )
+                return
+            if fork:
+                backend.delete_working_ref(locator, str(fork))
+            backend.delete_store(locator)
+        except TetherError as exc:
+            report.irreversible.append(f"{key}: could not remove the store: {exc}")
+            return
+        remove_created(
+            self.vcs.shared_dir(), self.config.dataset_id, dict(created["identity"])
+        )
+        report.restored.append(f"{key}: removed the store it created")
 
     # -- repair ---------------------------------------------------------------- #
     def plan_repair(self: Repo, *, all_history: bool = False) -> Plan:

@@ -176,6 +176,7 @@ def _status_payload(report: StatusReport) -> dict:
                 "state": o.state_label,
                 "pinned": o.pinned,
                 "recoverable": o.recoverable,
+                "origin": o.origin,
                 "verify": o.verify.status.value if o.verify else None,
             }
             for o in report.objects
@@ -257,6 +258,14 @@ def add(
         "instead of the branch head: the first commit pins it; a later `pull` on "
         "the trunk moves on.",
     ),
+    create: bool = typer.Option(
+        False,
+        "--create",
+        help="Make an empty store at the locator first (backends with CREATE) and "
+        "mark it as this dataset's; `gc --delete-stores` removes it again once "
+        "nothing references it. Refused if anything already exists there. On a "
+        "bookmark the store's working branch is forked at once (no `new` needed).",
+    ),
     pick: bool = typer.Option(
         False,
         "--pick",
@@ -298,11 +307,12 @@ def add(
         loc["at"] = chosen.id
     try:
         policy = Policy.from_dict({"file": file, "pin": pin})
-        repo.add(key, kind, loc, policy=policy)
+        repo.add(key, kind, loc, policy=policy, create=create)
     except TetherError as exc:
         _fail(exc)
     suffix = f" at {loc['at']}" if "at" in loc else ""
-    typer.echo(f"added {key} ({kind}){suffix}")
+    made = ", created" if create else ""
+    typer.echo(f"added {key} ({kind}{made}){suffix}")
     if repo.backend_for(kind).MATURITY != "stable":
         _experimental_note(
             f"the {kind} backend is {repo.backend_for(kind).MATURITY}: tested "
@@ -596,7 +606,10 @@ def status(
     for o in report.objects:
         v = f" verify={o.verify.status.value}" if o.verify else ""
         rec = "" if o.recoverable else " unrecoverable"
-        typer.echo(f"  {o.state_label:>9}  {o.key}  [{o.kind}/{o.tier.value}]{rec}{v}")
+        made = " (created)" if o.origin == "created" else ""
+        typer.echo(
+            f"  {o.state_label:>9}  {o.key}  [{o.kind}/{o.tier.value}]{made}{rec}{v}"
+        )
 
 
 @app.command()
@@ -836,7 +849,10 @@ def new(
     verb = "kept working refs" if plan.context.get("keep") else "working refs set up"
     typer.echo(f"on {where}bookmark {repo.workspace.bookmark}; {verb}")
     for key, ref in sorted(repo.workspace.working_refs.items()):
-        typer.echo(f"  {key} -> {ref}")
+        if key in repo.objects:
+            typer.echo(f"  {key} -> {ref}")
+        else:
+            typer.echo(f"  {key} -> {ref}  (not at this revision; branch kept for gc)")
     for key, ref in sorted(repo.workspace.pending_forks.items()):
         typer.echo(f"  {key} -> {ref}  (created on first writable open)")
 
