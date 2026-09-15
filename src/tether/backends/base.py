@@ -66,7 +66,10 @@ class Capability(Flag):
     CREATE = auto()
     """Can make an empty store at a locator, mark it as tether's, tell when
     nothing but tether's own refs remain in it, and remove it
-    (`ObjectBackend.create` / `owner` / `is_ref_empty` / `delete_store`)."""
+    (`ObjectBackend.create` / `owner` / `is_ref_empty` / `delete_store`).
+    **Experimental**: the feature built on it (`add --create`,
+    `gc --delete-stores`; `tether.experimental.lifecycle`) is the one tether
+    operation with no `repair`, and has not yet run against real resources."""
 
 
 class Tier(Enum):

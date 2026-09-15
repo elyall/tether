@@ -138,6 +138,14 @@ reference:
       contents:
         - experimental.registry
         - experimental.registry.ImportReport
+    - title: Store lifecycle (experimental)
+      desc: >-
+        `add --create` / `Repo.create` make a store tether owns; `gc
+        --delete-stores` removes it once nothing references it. The created-
+        and touched-store indexes, the planning rules, and the graduation
+        criteria live in `tether.experimental.lifecycle`.
+      contents:
+        - experimental.lifecycle
     - title: VCS adapters
       desc: How tether reads and writes history through jj or git.
       contents:

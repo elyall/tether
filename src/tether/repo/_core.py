@@ -64,16 +64,13 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.oplog import (
-    CreatedStore,
     OpEntry,
     TouchedStore,
     append_op,
     append_touched,
     mark_done,
     mark_progress,
-    read_created,
     read_ops,
-    read_touched,
 )
 from tether.plan import Plan, Precondition
 from tether.repo._reports import (
@@ -83,6 +80,7 @@ from tether.repo._reports import (
 from tether.vcs import VcsAdapter, detect_vcs
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tether.experimental.lifecycle import CreatedStore
     from tether.experimental.registry import ExportBundle, ImportReport, ImportSpec
     from tether.repo import Repo
     from tether.upgrade import UpgradeReport
@@ -170,7 +168,8 @@ class RepoCore:
             )
         self._backends: dict[str, ObjectBackend] = {}
         self._touched: set[str] | None = None
-        """Identities this clone is known to have written refs into (lazy)."""
+        """Identities this `Repo` has already recorded in the touched journal."""
+        self._touched_warned = False
         self._objects_gen = 0
         """Bumped by every in-place change to `objects` (add, remove, set); a
         reload replaces the dict. Together they date the per-object secret
@@ -606,42 +605,56 @@ class RepoCore:
         where every object's working ref is its upstream branch."""
         return self.workspace.bookmark == self.config.trunk
 
-    def created_stores(self) -> list[CreatedStore]:
-        """Stores this dataset created (`add --create`) and has not yet removed,
-        from the repository-wide index in the shared VCS store."""
-        return read_created(self.vcs.shared_dir(), self.config.dataset_id)
+    def created_stores(self: Repo) -> list[CreatedStore]:
+        """Stores this dataset created (`add --create`) and has not yet removed;
+        see :mod:`tether.experimental.lifecycle` (experimental)."""
+        from tether.experimental.lifecycle import created_stores
 
-    def touched_stores(self) -> list[TouchedStore]:
-        """Stores this clone has forked or pinned in (see `tether.oplog`)."""
-        return read_touched(self.vcs.shared_dir(), self.config.dataset_id)
+        return created_stores(self)
+
+    def touched_stores(self: Repo) -> list[TouchedStore]:
+        """Stores this clone has forked or pinned in; see
+        :mod:`tether.experimental.lifecycle` (experimental)."""
+        from tether.experimental.lifecycle import touched_stores
+
+        return touched_stores(self)
 
     def _note_touched(self, key: str, kind: str, locator: Locator) -> None:
-        """Remember that this clone wrote a ref into `locator`'s store, so `gc`
-        releases its own dead refs there even after every manifest naming the
-        store is gone (an abandoned bookmark). Idempotent and cheap: one
-        in-memory set per `Repo`, one line per new store on disk."""
-        backend = self.backend_for(kind)
-        identity = dict(backend.identity(locator))
-        tag = f"{kind}|{_m.canonical_bytes(identity).decode()}"
-        if self._touched is None:
-            self._touched = {
-                f"{e.kind}|{_m.canonical_bytes(e.identity).decode()}"
-                for e in self.touched_stores()
-            }
-        if tag in self._touched:
-            return
-        append_touched(
-            self.vcs.shared_dir(),
-            TouchedStore(
-                dataset_id=self.config.dataset_id,
-                kind=kind,
-                identity=identity,
-                locator=dict(locator),
-                key=key,
-                at=_m._now(),
-            ),
-        )
-        self._touched.add(tag)
+        """Record that this clone wrote a ref into `locator`'s store, in the
+        core-owned touched journal (`tether-touched.jsonl` beside the
+        repository lock), so a later `gc --delete-stores` can release the dead
+        refs this clone leaves behind. Best effort: an index miss costs a
+        later gc a store it must then be told about with `--store`, never
+        data, so nothing here may fail the pin or fork that called it.
+        Idempotent and cheap: one in-memory set per `Repo`, one appended line
+        per new store."""
+        try:
+            backend = self.backend_for(kind)
+            identity = dict(backend.identity(locator))
+            tag = f"{kind}|{_m.canonical_bytes(identity).decode()}"
+            if self._touched is None:
+                self._touched = set()
+            if tag in self._touched:
+                return
+            append_touched(
+                self.vcs.shared_dir(),
+                TouchedStore(
+                    dataset_id=self.config.dataset_id,
+                    kind=kind,
+                    identity=identity,
+                    locator=dict(locator),
+                    key=key,
+                    at=_m._now(),
+                ),
+            )
+            self._touched.add(tag)
+        except Exception as exc:
+            if not self._touched_warned:
+                self._touched_warned = True
+                warnings.warn(
+                    f"could not record {key} in the touched-store index: {exc}",
+                    stacklevel=2,
+                )
 
     def _iter_live_workspaces(self) -> Iterator[tuple[Path, WorkspaceState]]:
         """Every live checkout of this dataset that has run tether: its dataset

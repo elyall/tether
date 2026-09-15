@@ -145,7 +145,7 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `BRANCH_IS_STORAGE` | never delete a stray working branch in `gc --prune-bookmarks` without `--force-prune` (deleting reclaims the data, as in Neon) |
 | `PROMOTE` | call `promote` in `tether promote` when the base is unchanged since the fork point |
 | `MERGE` | call `merge` in `tether promote` when the base moved (or `--strategy merge`) |
-| `CREATE` | call `create` for `add --create` / `Repo.create`; `owner`, `is_ref_empty`, and `delete_store` in `gc --delete-stores` for a created store nothing references any more |
+| `CREATE` | *(experimental)* call `create` for `add --create` / `Repo.create`; `owner`, `is_ref_empty`, and `delete_store` in `gc --delete-stores` for a created store nothing references any more (`tether.experimental.lifecycle`) |
 
 ## Content diffs and listings
 

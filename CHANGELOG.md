@@ -191,6 +191,14 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
   section, then the environment -- an object with no entry behaves as before.
   tether warns when the file is readable by other users and never prints its
   contents. `ObjectBackend.configure_secrets`/`secrets_for` are the hooks.
+
+### Experimental
+
+The store lifecycle below lives in `tether.experimental.lifecycle`: the one
+operation with no `repair` path, not yet run against real resources (an S3
+prefix, a second clone). `add --create` and `gc --delete-stores` say so.
+Graduation criteria are in the module docstring.
+
 - **Store lifecycle: create and reclaim.** `tether add KEY LOCATOR --kind KIND
   --create` (`Repo.add(..., create=True)`) has the backend make an empty store,
   write an owner marker *in the store* naming the dataset, and record it in a

@@ -1,3 +1,3 @@
 29739c9a980b  2026-09-01T09:00:02+00:00  new      forked code, features, qc/focus, scratch/embeddings, zarr/imaging
 e0ff80f46ab8  2026-09-01T09:00:01+00:00  gc       unpinned 1, deleted 1 branch(es), deleted 1 store(s)
-b1b678f8dc80  2026-09-01T09:00:00+00:00  abandon  abandoned d4756b6b8e3d; 1 pin(s) freed
+b1b678f8dc80  2026-09-01T09:00:00+00:00  abandon  abandoned d4756b6b8e3d; 0 pin(s) freed

@@ -44,6 +44,12 @@ what changed inside the object. **History**: `tether log` lists the object's
 own snapshots/versions/commits. The full matrix -- state fields, flags,
 per-backend caveats -- is in the
 [backends guide](https://evanlyall.com/tether/user-guide/backends.html).
+*Experimental* 🧪: `tether add --create` makes a store tether then owns
+(Icechunk, git, a local directory) and `tether gc --delete-stores` removes it
+once nothing references it -- see
+[reclaiming storage](https://evanlyall.com/tether/user-guide/reclaiming-storage.html).
+What graduates, what is tested against real services, and what goes before
+0.1.0 is in [ROADMAP.md](https://github.com/elyall/tether/blob/main/ROADMAP.md).
 
 Documentation: <https://evanlyall.com/tether/> --
 [getting started](https://evanlyall.com/tether/user-guide/getting-started.html),

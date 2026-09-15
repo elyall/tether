@@ -277,6 +277,17 @@ tag still points at; tether leaves it and moves on.)
 
 ### Stores tether created
 
+::: {.callout-warning title="Experimental"}
+Everything in this section -- `add --create`, `Repo.create`,
+`gc --delete-stores`, `--store` -- lives in `tether.experimental.lifecycle`.
+It is the one operation in tether with no `repair` path (a deleted pin can be
+recreated from a manifest; a deleted store cannot), and it has not yet run
+against the resources it was written for: an S3 prefix, a second clone with a
+real remote. The rules below err toward keeping; the commands say so when you
+use them. What has to be true before it graduates is listed in the module's
+docstring.
+:::
+
 Everything above releases *refs* inside stores that existed before tether
 saw them, and tether never deletes such a store. A store made with
 `tether add KEY LOCATOR --kind KIND --create` (or `repo.add(..., create=True)`;
@@ -307,15 +318,16 @@ only when all five hold:
    index -- `forget-store`);
 2. no manifest in visible history, in this working tree, or in any live
    checkout's working tree names it;
-3. every `tether.ws.*` branch of *this dataset* in it belongs to a bookmark
-   this clone can account for: the bookmark the store was created on (the
-   index remembers it), a live bookmark, or one that a `new` in any live
-   checkout of this clone made. A same-dataset branch of a bookmark this
-   clone never had may be another clone or environment that fetched the
-   probe and is working in the store -- its commits are not in your history,
-   so nothing else would protect it. The plan then touches *nothing* in that
-   store, your own pins included (same-dataset commits share
-   content-addressed pins), and says so;
+3. every ref of *this dataset* in it is one this clone can account for: a
+   `tether.ws.*` branch of the bookmark the store was created on (the index
+   remembers it), of a live bookmark, or of one that a `new` in any live
+   checkout of this clone made; and a pin that some `commit` or `repair` in a
+   live checkout recorded. Anything else -- a branch of a bookmark this clone
+   never had, a pin no commit of this clone made -- may be another clone or
+   environment that fetched the probe and is working in the store, on the
+   same bookmark or its own; its commits are not in your history, so nothing
+   else would protect it. The plan then touches *nothing* in that store, your
+   own pins included, and says so;
 4. everything of tether's in it is released by the same plan -- its pins are
    unpinned, and its accounted-for branches are deleted under the
    `--prune-bookmarks` rules above (without `--prune-bookmarks` a branch
@@ -347,13 +359,14 @@ Two more indexes and one escape hatch round this out:
 
 - **Stores this clone touched.** Every store a checkout of this clone forks a
   branch in or pins is recorded in `tether-touched.jsonl` beside the created
-  index. A plain `gc` releases this dataset's dead refs in those stores even
-  when no manifest names them any more -- which is exactly the state an
-  abandoned bookmark leaves behind. So when another actor writes ephemeral
-  refs into *your* created store and then abandons them, *their* next `gc`
-  cleans their refs out (their `gc` respects rule 3 the same way: a branch of
-  a bookmark their clone never had stops them), and your next
-  `--delete-stores` finds the store empty and finishes. An entry is dropped
+  index (always, so the record is complete by the time the feature
+  graduates). `gc --delete-stores` releases this dataset's dead refs in those
+  stores even when no manifest names them any more -- which is exactly the
+  state an abandoned bookmark leaves behind. So when another actor writes
+  ephemeral refs into *your* created store and then abandons them, *their*
+  next `gc --delete-stores` cleans their refs out (their `gc` respects rule 3
+  the same way: a branch or pin their clone cannot account for stops them),
+  and your next one finds the store empty and finishes. An entry is dropped
   (`forget-touched`) once nothing of the dataset's is left in the store.
 - **A store whose creator is gone.** An ephemeral environment's clone can die
   with its created index. Any clone of the dataset can still reclaim such a

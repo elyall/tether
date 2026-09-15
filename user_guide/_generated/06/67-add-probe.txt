@@ -1,1 +1,2 @@
 added scratch/probe (icechunk, created)
+note: the store lifecycle (`--create`, `gc --delete-stores`) is experimental: deleting a store has no `repair`; see the reclaiming-storage guide

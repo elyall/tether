@@ -313,6 +313,11 @@ def add(
     suffix = f" at {loc['at']}" if "at" in loc else ""
     made = ", created" if create else ""
     typer.echo(f"added {key} ({kind}{made}){suffix}")
+    if create:
+        _experimental_note(
+            "the store lifecycle (`--create`, `gc --delete-stores`) is experimental: "
+            "deleting a store has no `repair`; see the reclaiming-storage guide"
+        )
     if repo.backend_for(kind).MATURITY != "stable":
         _experimental_note(
             f"the {kind} backend is {repo.backend_for(kind).MATURITY}: tested "
@@ -1470,6 +1475,11 @@ def gc(
         if not sep or not kind_ or not where:
             _fail(TetherError(f"--store expects KIND=LOCATOR, got {item!r}"))
         claimed.append((kind_, {"uri": where}))
+    if (delete_stores or claimed) and not json_out:
+        _experimental_note(
+            "reclaiming created stores is experimental: `delete-store` has no "
+            "`repair`; fetch every bookmark first, and read the plan"
+        )
     repo = _repo()
     try:
         if from_plan is not None:

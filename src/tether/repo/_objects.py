@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -44,7 +44,6 @@ from tether.manifest import (
     Pin,
     Policy,
     State,
-    _now,
     remove_object,
     write_object,
     write_workspace,
@@ -56,7 +55,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
 
-from tether.oplog import CreatedStore, append_created
 from tether.repo._core import TETHER_REV_ENV, RepoCore
 from tether.repo._reports import (
     DiffEntry,
@@ -115,52 +113,15 @@ class ObjectOps(RepoCore):
             pre = {"objects": {key: None}, "workspace": self.workspace.to_toml()}
             if key in self.objects:
                 raise ConfigError(f"object already exists: {key}")
-            result: dict[str, Any] = {"key": key}
             if not create:
                 manifest = self._add(key, kind, locator, policy=policy)
-                self._log_op("add", result=result, pre=pre)
+                self._log_op("add", result={"key": key}, pre=pre)
                 return manifest
-            backend = self.backend_for(kind)
-            resolved = absolutize_locator(backend, dict(locator), Path.cwd())
-            backend.validate_locator(resolved)
-            eff = effective_capabilities(
-                backend, resolved, policy or self.config.defaults
-            )
-            if Capability.CREATE not in eff:
-                raise CapabilityError(
-                    f"{kind!r} cannot create a store at this locator; register an "
-                    "existing one instead",
-                    key=key,
-                    kind=kind,
-                )
-            # A store write follows: journal first, like every other command
-            # that writes to a store, so a crash leaves a started entry.
-            op = self._begin_op("add", pre=pre)
-            initial = backend.create(resolved, owner=self.config.dataset_id)
-            identity = dict(backend.identity(resolved))
-            append_created(
-                self.vcs.shared_dir(),
-                CreatedStore(
-                    dataset_id=self.config.dataset_id,
-                    kind=kind,
-                    identity=identity,
-                    locator=dict(resolved),
-                    key=key,
-                    at=_now(),
-                    bookmark=self.workspace.bookmark,
-                ),
-            )
-            result["created"] = {
-                "kind": kind,
-                "identity": identity,
-                "locator": dict(resolved),
-            }
-            manifest = self._add(key, kind, resolved, policy=policy, origin="created")
-            ref = self._adopt_into_bookmark(key, initial)
-            if ref is not None:
-                result["fork"] = ref
-            self._end_op(op, result=result)
-            return manifest
+            # Experimental: the store lifecycle lives behind the same seam as
+            # the registry and is imported only when asked for.
+            from tether.experimental.lifecycle import create_store
+
+            return create_store(self, key, kind, locator, policy=policy, pre=pre)
 
     def create(
         self: Repo,

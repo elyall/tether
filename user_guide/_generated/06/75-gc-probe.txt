@@ -1,3 +1,4 @@
+note: reclaiming created stores is experimental: `delete-store` has no `repair`; fetch every bookmark first, and read the plan
 unpinned 1 pin(s)
   icechunk: 0a1b2c3d.569de089097300d2
 deleted 1 working branch(es)

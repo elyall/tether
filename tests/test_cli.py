@@ -850,6 +850,33 @@ def test_experimental_is_an_import_boundary() -> None:
     ).stdout
     assert "tether.experimental.registry" not in out, out
     assert "tether.experimental.backends" not in out, out
+    assert "tether.experimental.lifecycle" not in out, out
+    # ...and neither does a stable lifecycle of a memory object: init, add,
+    # commit (a pin), new, open (a fork), commit. The touched journal those
+    # write is core-owned; only `gc --delete-stores` reads it.
+    code = (
+        "import sys, subprocess, tempfile, pathlib\n"
+        "root = pathlib.Path(tempfile.mkdtemp())\n"
+        "subprocess.run(['git', 'init', '-q', '-b', 'main', str(root)], check=True)\n"
+        "subprocess.run(['git', '-C', str(root), 'commit', '-q', '--allow-empty', "
+        "'-m', 'root'], check=True, env={'GIT_AUTHOR_NAME': 'x', 'GIT_AUTHOR_EMAIL': "
+        "'x@y', 'GIT_COMMITTER_NAME': 'x', 'GIT_COMMITTER_EMAIL': 'x@y', "
+        "'PATH': __import__('os').environ['PATH']})\n"
+        "from tether import Repo\n"
+        "from tether.backends.memory import default_store\n"
+        "default_store().system('s')\n"
+        "repo = Repo.init(root)\n"
+        "repo.add('db', 'memory', {'system': 's'})\n"
+        "repo.commit('v1')\n"
+        "repo.new(bookmark='w')\n"
+        "repo.open('db').write({'x': 1})\n"
+        "repo.commit('v2')\n"
+        "print(sorted(m for m in sys.modules if m.startswith('tether.experimental')))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert "tether.experimental.lifecycle" not in out, out
 
     assert {"neon", "lakefs", "dolt", "ducklake", "iceberg"} <= set(known_kinds())
     assert type(build_backend("neon", {})).__module__ == (

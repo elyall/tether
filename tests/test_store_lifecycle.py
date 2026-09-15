@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import uuid
+import warnings
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,9 @@ from typer import testing as typer_testing
 from tether.backends.memory import default_store
 from tether.cli import app
 from tether.errors import BackendError, CapabilityError, ConfigError
+from tether.experimental.lifecycle import read_created
 from tether.handles import MemoryHandle
 from tether.manifest import ObjectManifest, read_objects
-from tether.oplog import read_created
 from tether.repo import Repo
 
 runner = typer_testing.CliRunner()
@@ -392,31 +393,29 @@ def test_gc_reclaims_a_created_store_once_its_fork_is_abandoned(vcs_root: Path) 
 
 
 def test_gc_leaves_created_stores_alone_unless_asked(vcs_root: Path) -> None:
-    """Opt-in: a deleted store has no `repair`, and gc only knows what this
-    clone has fetched. Without `delete_stores` our dead refs in the store are
-    still released (it is a store this clone touched), but the store stays."""
+    """Opt-in, and experimental: a deleted store has no `repair`, and gc only
+    knows what this clone has fetched. Without `delete_stores` a plain gc
+    plans nothing for the store -- not even the unpins inside it (the
+    touched-store step is part of the same experimental feature)."""
     repo, _db = _baseline(vcs_root)
     system, fork, commit = _probe_with_created_store(repo)
     repo = _drop_bookmark(repo, vcs_root, "probe", commit)
     plan = repo.plan_gc(prune_bookmarks=True)
-    ops = [
-        a.op
+    assert not [
+        a
         for a in plan.actions
         if a.key == "scratch/probe" and a.op != "forget-working-ref"
     ]
-    assert ops == ["unpin", "delete-branch"]  # touched-store step; no store verdict
     assert plan.context["delete_stores"] is False
     report = repo.gc(dry_run=False, prune_bookmarks=True)
     assert not report.deleted_stores and not report.kept_stores
     sys_ = default_store().system(system)
-    assert system in default_store().systems and fork not in sys_.branches
+    assert system in default_store().systems and fork in sys_.branches
     assert [c.key for c in repo.created_stores()] == ["scratch/probe"]
-    # Now empty: `--delete-stores` finishes the job.
+    # Asked: unpin, delete the fork, delete the store; the indexes forget it.
     report = repo.gc(dry_run=False, prune_bookmarks=True, delete_stores=True)
     assert report.deleted_stores == {"scratch/probe": system}
-    assert [t.key for t in repo.touched_stores()] == [
-        "db"
-    ]  # the deleted one is forgotten
+    assert [t.key for t in repo.touched_stores()] == ["db"]
 
 
 def test_gc_touches_nothing_in_a_store_where_another_actor_may_be_alive(
@@ -715,7 +714,7 @@ def test_gc_releases_dead_refs_in_a_touched_store_no_manifest_names(
     repo = _drop_bookmark(repo, vcs_root, "probe", commit2)
     repo = _drop_bookmark(repo, vcs_root, "probe", commit)
     assert "shared/emb" not in repo.objects
-    plan = repo.plan_gc(prune_bookmarks=True)
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
     ours = [
         a
         for a in plan.actions
@@ -727,7 +726,7 @@ def test_gc_releases_dead_refs_in_a_touched_store_no_manifest_names(
     assert fork not in sys_.branches and not sys_.tags
     assert shared in default_store().systems  # not ours to delete
     # Nothing of ours is left: the next plan forgets the store.
-    again = repo.plan_gc(prune_bookmarks=True)
+    again = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
     (forget,) = [a for a in again.actions if a.key == "shared/emb"]
     assert forget.op == "forget-touched"
     repo.apply_gc(again)
@@ -743,7 +742,8 @@ def test_gc_leaves_a_touched_store_where_another_actor_may_be_alive(
     sys_ = default_store().system(system)
     theirs = f"tether.ws.{repo.config.dataset_id}.their-probe"
     sys_.branches[theirs] = sys_.branches["main"]
-    plan = repo.plan_gc(prune_bookmarks=True)  # touched step only
+    (repo.vcs.shared_dir() / "tether-created.jsonl").unlink()  # touched step only
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
     assert not [a for a in plan.actions if a.op in ("unpin", "delete-branch")]
     assert any("never had" in n and theirs in n for n in plan.notes)
     assert fork in sys_.branches and sys_.tags
@@ -916,3 +916,72 @@ def test_two_clones_the_creator_never_deletes_the_other_clones_work(
         if x.key == "scratch/probe" and x.op != "forget-working-ref"
     ]
     assert any("still referenced" in n for n in plan.notes)
+
+
+# ----------------------------------------------------------------------------- #
+# the journals are memory aids: never a reason for a stable command to fail
+# ----------------------------------------------------------------------------- #
+
+
+def test_a_torn_line_in_the_touched_journal_breaks_nothing(
+    vcs_root: Path,
+) -> None:
+    """An interrupted append leaves half a line. Every reader skips it, as
+    `read_ops` does; `open`, `commit`, and `gc --delete-stores` proceed; and
+    the next append lands after it."""
+    from tether.oplog import read_touched
+
+    repo, _db = _baseline(vcs_root)
+    journal = repo.vcs.shared_dir() / "tether-touched.jsonl"
+    assert journal.is_file()
+    with journal.open("a", encoding="utf-8") as fh:
+        fh.write('{"dataset_id": "0a1b2c3d", "kind": "memory", "ide')  # torn
+    system, fork, commit = _probe_with_created_store(repo)  # forks and pins
+    assert fork and commit
+    keys = sorted(t.key for t in read_touched(repo.vcs.shared_dir()))
+    assert keys == ["db", "scratch/probe"]
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    report = repo.gc(dry_run=False, prune_bookmarks=True, delete_stores=True)
+    assert report.deleted_stores == {"scratch/probe": system}
+    # The torn line is dropped when the file is rewritten.
+    text = journal.read_text(encoding="utf-8")
+    assert '"kind": "memory", "ide\n' not in text and text.endswith("\n")
+    assert all(json.loads(line) for line in text.splitlines())
+
+
+def test_a_torn_line_in_the_created_index_breaks_nothing(vcs_root: Path) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    index = repo.vcs.shared_dir() / "tether-created.jsonl"
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write("{not json")
+    assert [c.key for c in repo.created_stores()] == ["scratch/probe"]
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    report = repo.gc(dry_run=False, prune_bookmarks=True, delete_stores=True)
+    assert report.deleted_stores == {"scratch/probe": system}
+
+
+def test_recording_a_touch_is_best_effort(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal cannot be written (here: its directory is a file). The pin
+    and the fork still happen; one warning says what was not recorded."""
+    import tether.repo._core as core
+
+    repo = Repo.init(vcs_root)
+    system = _fresh_system()
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system})
+
+    def boom(*args: object, **kwargs: object) -> bool:
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(core, "append_touched", boom)
+    with pytest.warns(UserWarning, match="touched-store index"):
+        result = repo.commit("v1")
+    assert result.pinned["db"] is not None  # the pin landed
+    repo.new(bookmark="w")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # warned once per Repo, not per call
+        handle = _mem(repo, "db")
+    assert not handle.read_only

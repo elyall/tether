@@ -88,7 +88,7 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
 | `--at ID` / `--pick` | `at` | initial position: snapshot id / version / commit / tag (all but file, neon) that the first commit pins instead of the branch head; `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
-| `--create` | -- | make an empty store at the locator first (`CREATE` backends: icechunk, git, a local `file` directory; the memory backend), mark it as this dataset's, and index it so `gc --delete-stores` can delete it once nothing references it. Refused if anything already exists there. On a bookmark the store's working branch is forked at once; no `new` needed before the first write. From Python, `repo.create(key, kind, locator)` does this and opens the handle. |
+| `--create` | -- | **experimental**: make an empty store at the locator first (`CREATE` backends: icechunk, git, a local `file` directory; the memory backend), mark it as this dataset's, and index it so `gc --delete-stores` can delete it once nothing references it. Refused if anything already exists there. On a bookmark the store's working branch is forked at once; no `new` needed before the first write. From Python, `repo.create(key, kind, locator)` does this and opens the handle. |
 
 `tether set KEY... --file|--pin` changes a registered object's policy in
 place (`--all` for every object): manifest-only, logged, undoable. Commit to
@@ -266,15 +266,16 @@ Both sweeps stay inside this dataset's namespace: pins and branches whose
 name carries another dataset's id are counted in the plan's notes (`N pin(s)
 of other datasets left alone`) and never touched, `--force-prune` included.
 
-`--delete-stores` (opt-in) adds a last step for stores this dataset *created*
-(`add --create`) that no manifest in history or in any live checkout's working
-tree names any more. Their pins are unpinned and their branches judged by the
-table above (without `--prune-bookmarks` a branch blocks the store), and then:
+`--delete-stores` (opt-in, **experimental** -- the command says so) adds a
+last step for stores this dataset *created* (`add --create`) that no manifest
+in history or in any live checkout's working tree names any more. Their pins
+are unpinned and their branches judged by the table above (without
+`--prune-bookmarks` a branch blocks the store), and then:
 
 | The store | Verdict |
 | --- | --- |
 | owner marker names this dataset; every branch belongs to a bookmark this clone had; nothing left but the base branch at its initial state, the refs this plan deletes, and no uncommitted files | `delete-store` (always the last action; `store_empty` precondition) |
-| a same-dataset branch of a bookmark this clone never had (another actor may be working there) | `keep-store`; nothing in the store is touched (`--force-prune` overrides) |
+| a same-dataset branch of a bookmark this clone never had, or a same-dataset pin no commit of this clone made (another actor may be working there) | `keep-store`; nothing in the store is touched (`--force-prune` overrides) |
 | a branch or pin of another dataset, writes on the base branch, a branch of ours that is kept, or a backend that cannot tell | `keep-store: <what remains>` |
 | marker names another dataset | note; left alone |
 | no marker (removed by hand, or taken over) | `forget-store`: dropped from the index |
@@ -283,13 +284,13 @@ table above (without `--prune-bookmarks` a branch blocks the store), and then:
 this clone's index does not have it -- the creator's clone is gone -- under the
 same rules; it implies `--delete-stores`.
 
-Always, and without any flag, `gc` also looks inside the stores this clone has
+Under the same flag, `gc` also looks inside the stores this clone has
 *touched* (forked a branch in, or pinned -- `tether-touched.jsonl`) that no
 manifest names any more, and releases this dataset's dead refs there
 (`unpin`, `delete-branch` under the table above, "touched by this clone" in
 the detail). A store with nothing of the dataset's left is dropped from that
-index (`forget-touched`). A same-dataset branch of a bookmark this clone never
-had is left alone, with a note.
+index (`forget-touched`). A same-dataset ref this clone cannot account for is
+left alone, with a note.
 
 `undo gc` reports a deleted store as irreversible. See
 [Reclaiming Storage](05-reclaiming-storage.qmd#stores-tether-created).

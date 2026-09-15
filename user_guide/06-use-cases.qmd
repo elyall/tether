@@ -514,11 +514,15 @@ Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
 retention show up in `tether verify --all-history` as missing -- that is the
 trade you made with `--pin record`, stated back to you.
 
-**A store that should not outlive its probe.** So far every store existed
-before tether saw it, and tether never deletes what it merely adopted. A
-probe often needs a store of its own -- a second embeddings table to compare
-against -- and that store has no reason to exist once the probe is thrown
-away. `add --create` has tether make the store, on a bookmark of its own:
+**A store that should not outlive its probe** *(experimental)*. So far every
+store existed before tether saw it, and tether never deletes what it merely
+adopted. A probe often needs a store of its own -- a second embeddings table
+to compare against -- and that store has no reason to exist once the probe is
+thrown away. `add --create` has tether make the store, on a bookmark of its
+own. (This is the one tether operation with no `repair` path, and it has not
+yet run against real S3 or a real second clone; the commands say so, and
+[Reclaiming Storage](05-reclaiming-storage.qmd#stores-tether-created) has the
+rules and the graduation criteria.)
 
 {{< include _generated/06/65-ls-before.sh >}}
 
@@ -558,14 +562,14 @@ The probe did not pan out. Leave the bookmark, drop its commit, delete the
 bookmark: the same three steps as for `relabel-v3` in section 2. Back on
 `sweep`, `new` still lists the probe's working ref -- for an object that does
 not exist at this revision, kept so `gc` can find the branch -- and `abandon`
-shows the gc plan it does not yet apply. No manifest names the store any more,
-yet the plan still finds the probe's pin in it: tether remembers every store
-this clone forked or pinned in (`tether-touched.jsonl`, next to the created
-index) and releases its own dead refs there. The plan says nothing about the
-store *itself*: reclaiming a created store is opt-in (`gc --delete-stores`),
-because a deleted store has no `repair` and `gc` only knows the history this
-clone has fetched. Its branch, too, is only ever deleted under
-`--prune-bookmarks`:
+shows the gc plan it does not yet apply. That plan says nothing about the
+store: no manifest names it any more, and everything about created stores --
+their pins, their branches, the store itself -- is opt-in (`gc
+--delete-stores`), because a deleted store has no `repair` and `gc` only knows
+the history this clone has fetched. tether does remember every store this
+clone forked or pinned in (`tether-touched.jsonl`, next to the created index),
+which is how the opt-in step finds the probe's pin. Its branch is only ever
+deleted under `--prune-bookmarks`:
 
 {{< include _generated/06/72-new-sweep-again.sh >}}
 
