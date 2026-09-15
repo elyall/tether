@@ -1425,6 +1425,22 @@ def gc(
         "unpinned writes, a pin-less recorded state, or are the storage itself "
         "(Neon). Data on them is lost.",
     ),
+    delete_stores: bool = typer.Option(
+        False,
+        "--delete-stores",
+        help="Also reclaim stores this dataset created (`add --create`) that "
+        "nothing references any more: their pins and branches are released and, "
+        "when only tether's own refs remained, the store is deleted. Irreversible; "
+        "fetch every bookmark first.",
+    ),
+    store: list[str] = typer.Option(
+        [],
+        "--store",
+        help="KIND=LOCATOR (repeatable): a created store to consider even when this "
+        "clone's index does not have it -- its creator's clone is gone. Same rules "
+        "(the owner marker in the store must name this dataset); implies "
+        "--delete-stores.",
+    ),
     plan_out: Path | None = typer.Option(
         None, "--plan", help="Write the plan to FILE (implies --dry-run)."
     ),
@@ -1441,10 +1457,19 @@ def gc(
     or a live checkout works on are kept), legacy per-workspace branches, and
     this bookmark's unused ones: a branch is deleted only if its head is pinned
     or equals the base head, otherwise kept -- `--force-prune` deletes those
-    too. Dry-run by default: pass `--no-dry-run` (or `--from-plan`) to release.
+    too. `--delete-stores` also reclaims stores this dataset created
+    (`add --create`) that nothing references any more, once only tether's own
+    refs remain in them (`delete-store`). Dry-run by default: pass
+    `--no-dry-run` (or `--from-plan`) to release.
     """
     if force_prune and not prune_bookmarks:
         _fail(TetherError("--force-prune requires --prune-bookmarks"))
+    claimed: list[tuple[str, dict]] = []
+    for item in store:
+        kind_, sep, where = item.partition("=")
+        if not sep or not kind_ or not where:
+            _fail(TetherError(f"--store expects KIND=LOCATOR, got {item!r}"))
+        claimed.append((kind_, {"uri": where}))
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1455,6 +1480,8 @@ def gc(
                 prune_bookmarks=prune_bookmarks,
                 keep_bookmarks=set(keep_bookmark) or None,
                 force_prune=force_prune,
+                delete_stores=delete_stores,
+                stores=claimed,
             )
             if dry_run or plan_out is not None:
                 _save_plan(plan, plan_out)
@@ -1472,6 +1499,9 @@ def gc(
                 "kept_working_refs": report.kept_working_refs,
                 "forgotten_working_refs": report.forgotten_working_refs,
                 "deleted_listings": report.deleted_listings,
+                "deleted_stores": report.deleted_stores,
+                "kept_stores": report.kept_stores,
+                "forgotten_stores": report.forgotten_stores,
             },
             as_json=True,
         )
@@ -1506,6 +1536,22 @@ def _print_gc_report(report: GcReport) -> None:
         typer.echo(f"forgot {forgotten} working ref(s) of removed object(s)")
     if report.deleted_listings:
         typer.echo(f"deleted {len(report.deleted_listings)} orphan listing(s)")
+    if report.deleted_stores:
+        typer.echo(f"deleted {len(report.deleted_stores)} created store(s)")
+        for key, where in report.deleted_stores.items():
+            typer.echo(f"  {key}: {where}")
+    if report.kept_stores:
+        typer.secho(
+            f"kept {len(report.kept_stores)} unreferenced created store(s)",
+            fg=typer.colors.YELLOW,
+        )
+        for key, why in report.kept_stores.items():
+            typer.echo(f"  {key}: {why}")
+    if report.forgotten_stores:
+        typer.echo(
+            f"forgot {len(report.forgotten_stores)} store(s) with nothing of "
+            "tether's left in them"
+        )
 
 
 @app.command()

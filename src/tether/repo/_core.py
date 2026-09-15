@@ -66,11 +66,14 @@ from tether.manifest import (
 from tether.oplog import (
     CreatedStore,
     OpEntry,
+    TouchedStore,
     append_op,
+    append_touched,
     mark_done,
     mark_progress,
     read_created,
     read_ops,
+    read_touched,
 )
 from tether.plan import Plan, Precondition
 from tether.repo._reports import (
@@ -166,6 +169,8 @@ class RepoCore:
                 stacklevel=2,
             )
         self._backends: dict[str, ObjectBackend] = {}
+        self._touched: set[str] | None = None
+        """Identities this clone is known to have written refs into (lazy)."""
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
@@ -579,6 +584,38 @@ class RepoCore:
         """Stores this dataset created (`add --create`) and has not yet removed,
         from the repository-wide index in the shared VCS store."""
         return read_created(self.vcs.shared_dir(), self.config.dataset_id)
+
+    def touched_stores(self) -> list[TouchedStore]:
+        """Stores this clone has forked or pinned in (see `tether.oplog`)."""
+        return read_touched(self.vcs.shared_dir(), self.config.dataset_id)
+
+    def _note_touched(self, key: str, kind: str, locator: Locator) -> None:
+        """Remember that this clone wrote a ref into `locator`'s store, so `gc`
+        releases its own dead refs there even after every manifest naming the
+        store is gone (an abandoned bookmark). Idempotent and cheap: one
+        in-memory set per `Repo`, one line per new store on disk."""
+        backend = self.backend_for(kind)
+        identity = dict(backend.identity(locator))
+        tag = f"{kind}|{_m.canonical_bytes(identity).decode()}"
+        if self._touched is None:
+            self._touched = {
+                f"{e.kind}|{_m.canonical_bytes(e.identity).decode()}"
+                for e in self.touched_stores()
+            }
+        if tag in self._touched:
+            return
+        append_touched(
+            self.vcs.shared_dir(),
+            TouchedStore(
+                dataset_id=self.config.dataset_id,
+                kind=kind,
+                identity=identity,
+                locator=dict(locator),
+                key=key,
+                at=_m._now(),
+            ),
+        )
+        self._touched.add(tag)
 
     def _iter_live_workspaces(self) -> Iterator[tuple[Path, WorkspaceState]]:
         """Every live checkout of this dataset that has run tether: its dataset
@@ -1067,6 +1104,17 @@ class RepoCore:
             holders = self.bookmark_holders(str(params["bookmark"]))
             if holders:
                 fail(", ".join(holders))
+        elif kind == "store_empty":
+            # A created store gc is about to remove: nothing may remain in it
+            # but tether's own refs the same plan deletes first (`ignoring`).
+            # `apply_gc` asks once more, with nothing ignored, right before
+            # the delete.
+            backend = self.backend_for(str(params["backend"]))
+            observed = backend.is_ref_empty(
+                dict(params["locator"]), ignoring=set(params.get("ignoring") or ())
+            )
+            if observed is not True:
+                fail("cannot tell" if observed is None else "not empty")
         else:  # pragma: no cover - PRECONDITION_KINDS guards the constructor
             raise ConfigError(f"unknown plan precondition {kind!r}")
 

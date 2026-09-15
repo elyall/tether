@@ -355,6 +355,11 @@ class UndoOps(RepoCore):
                 f"{n_pins} pin(s) deleted; if a manifest references them again, "
                 "`tether repair` recreates them while the state is still reachable"
             )
+        for key, where in sorted((r.get("deleted_stores") or {}).items()):
+            report.irreversible.append(
+                f"{key}: the created store at {where} was deleted; nothing "
+                "referenced it and it held only tether's own refs"
+            )
         for name in r.get("deleted_listings") or []:
             rel = self._listing_relpath(name)
             text = self.vcs.read_file_at("@-" if self.vcs.kind == "jj" else "HEAD", rel)
@@ -555,6 +560,7 @@ class UndoOps(RepoCore):
                             dict(a.params["state"]),
                             str(a.params["pin_id"]),
                         )
+                        self._note_touched(a.key, a.kind, dict(a.params["locator"]))
                         report.repinned[a.key] = str(a.params["pin_id"])
                         self._progress(op, "repin", key=a.key, target=a.target)
                     elif a.op == "refork":

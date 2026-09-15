@@ -29,8 +29,6 @@ from tether.manifest import (
     Locator,
     Pin,
     State,
-    owner_from_ref,
-    owner_ref,
     ref_for_pin,
 )
 
@@ -265,8 +263,7 @@ class MemoryBackend(ObjectBackend):
             raise BackendError(f"system {name!r} already exists", kind="memory")
         self.store.deleted.discard(name)
         sys = self.store.system(name)
-        sys.owner = owner
-        sys.tags[owner_ref(owner)] = sys.branches["main"]
+        sys.owner = owner  # the marker: system metadata, not a ref
         return self.fingerprint(locator, None)
 
     def owner(self, locator: Locator) -> str | None:
@@ -287,9 +284,7 @@ class MemoryBackend(ObjectBackend):
         stray = [
             b for b, sid in sys.branches.items() if b not in ignoring and b != base
         ]
-        stray += [
-            t for t in sys.tags if t not in ignoring and owner_from_ref(t) is None
-        ]
+        stray += [t for t in sys.tags if t not in ignoring]
         return not stray and sys.branches.get(base) == initial
 
     def delete_store(self, locator: Locator) -> None:

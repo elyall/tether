@@ -187,6 +187,15 @@ class GcReport:
     """Object key -> refs dropped from the workspace state (object removed)."""
     deleted_listings: list[str] = field(default_factory=list)
     """`.tether/listings/` files no manifest references."""
+    deleted_stores: dict[str, str] = field(default_factory=dict)
+    """Object key (at creation) -> the store `add --create` made, removed now
+    that nothing references it and only tether's refs remained."""
+    kept_stores: dict[str, str] = field(default_factory=dict)
+    """Object key -> why an unreferenced created store was left in place."""
+    forgotten_stores: list[str] = field(default_factory=list)
+    """Index entries dropped: a created store already gone (`forget-store`), or
+    a touched store with nothing of this dataset's left in it
+    (`forget-touched`)."""
     dry_run: bool = True
     """Whether anything was actually released."""
     plan: Plan | None = None

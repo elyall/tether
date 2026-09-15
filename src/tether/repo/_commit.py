@@ -275,6 +275,7 @@ class CommitOps(RepoCore):
                     state = dict(a.params["state"])
                     if a.op == "pin":
                         pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
+                        self._note_touched(a.key, m.kind, m.locator)
                         # Roll back only what this commit created: a pin the
                         # backend found already carrying the state belongs to
                         # the commit (or the sibling key) that made it.

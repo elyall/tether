@@ -650,6 +650,7 @@ class ForkOps(RepoCore):
             return None
         name = working_ref_name(self.config.dataset_id, bookmark)
         ref = backend.fork(m.locator, dict(initial), name)
+        self._note_touched(key, m.kind, m.locator)
         self.workspace.working_refs[key] = ref
         self.workspace.pending_forks.pop(key, None)
         self.workspace.fork_points[key] = dict(initial)
@@ -663,14 +664,18 @@ class ForkOps(RepoCore):
         eff = effective_capabilities(backend, m.locator, m.policy)
         source = self._pinned_source(m, backend, eff)
         if isinstance(source, Pin):
-            return backend.fork(m.locator, source, name)
+            ref = backend.fork(m.locator, source, name)
+            self._note_touched(m.key, m.kind, m.locator)
+            return ref
         # No usable pin: the recorded state is the fork point while the store
         # still has it (between a deletion and `repair`, or a record-only pin).
         report = backend.verify(m.locator, m.state, None, deep=True)
         if report.status is VerifyStatus.MISSING:
             gone = "" if m.pin is None else "pin missing and "
             raise TetherError(f"{gone}recorded state is gone: {report.message}")
-        return backend.fork(m.locator, source, name)
+        ref = backend.fork(m.locator, source, name)
+        self._note_touched(m.key, m.kind, m.locator)
+        return ref
 
     def _forget_working_state(self, key: str) -> None:
         """Drop everything this workspace knows about `key`'s working branch."""

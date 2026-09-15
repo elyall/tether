@@ -33,6 +33,7 @@ PRECONDITION_KINDS = frozenset(
         "base_state",
         "pin_state",
         "no_new_holders",
+        "store_empty",
     }
 )
 """What a plan may require of the world before it is applied. Each is one

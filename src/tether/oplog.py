@@ -375,21 +375,117 @@ def read_created(shared_dir: Path, dataset_id: str | None = None) -> list[Create
 
 def remove_created(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) -> None:
     """Forget a store (deleted by `gc`, or by `undo add`)."""
-    path = created_path(shared_dir)
+    _remove_entry(created_path(shared_dir), dataset_id, identity)
+
+
+def _remove_entry(path: Path, dataset_id: str, identity: dict[str, Any]) -> None:
     if not path.is_file():
         return
-    keep = [
-        e
-        for e in read_created(shared_dir)
-        if not (e.dataset_id == dataset_id and e.identity == identity)
-    ]
-    tmp = path.with_suffix(".tmp")
     with _APPEND_LOCK:
-        tmp.write_text(
-            "".join(json.dumps(e.to_dict(), default=str) + "\n" for e in keep),
-            encoding="utf-8",
-        )
+        keep = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            and not (
+                (d := json.loads(line)).get("dataset_id") == dataset_id
+                and dict(d.get("identity") or {}) == identity
+            )
+        ]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(line + "\n" for line in keep), encoding="utf-8")
         tmp.replace(path)
+
+
+TOUCHED_FILENAME = "tether-touched.jsonl"
+"""Repository-wide index of stores this clone has *written refs into* -- forked
+a working branch or created a pin -- kept beside `tether-created.jsonl`. The
+ordinary `gc` only looks inside stores some manifest in history names; a
+store this clone forked into on a bookmark it then abandoned is named by no
+manifest any more, and its dead refs would stay forever (and keep the store's
+creator from reclaiming it). This index tells `gc` where else to look.
+"""
+
+
+@dataclass(frozen=True)
+class TouchedStore:
+    """One store this clone forked or pinned in (`gc` releases its own dead
+    refs there even when no manifest names the store any more)."""
+
+    dataset_id: str
+    kind: str
+    identity: dict[str, Any]
+    locator: dict[str, Any]
+    key: str
+    """The key the object had when the store was touched (informational)."""
+    at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dataset_id": self.dataset_id,
+            "kind": self.kind,
+            "identity": dict(self.identity),
+            "locator": dict(self.locator),
+            "key": self.key,
+            "at": self.at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TouchedStore:
+        return cls(
+            dataset_id=str(data["dataset_id"]),
+            kind=str(data["kind"]),
+            identity=dict(data.get("identity") or {}),
+            locator=dict(data.get("locator") or {}),
+            key=str(data.get("key", "")),
+            at=str(data.get("at", "")),
+        )
+
+
+def touched_path(shared_dir: Path) -> Path:
+    return shared_dir / TOUCHED_FILENAME
+
+
+def append_touched(shared_dir: Path, entry: TouchedStore) -> bool:
+    """Record a store this clone just wrote a ref into; a set, so an identity
+    already on record is not written again. Returns whether it was new."""
+    path = touched_path(shared_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _APPEND_LOCK:
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                if (
+                    d.get("dataset_id") == entry.dataset_id
+                    and dict(d.get("identity") or {}) == entry.identity
+                ):
+                    return False
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry.to_dict(), default=str) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    return True
+
+
+def read_touched(shared_dir: Path, dataset_id: str | None = None) -> list[TouchedStore]:
+    """Every touched store on record (optionally one dataset's), oldest first."""
+    path = touched_path(shared_dir)
+    if not path.is_file():
+        return []
+    out: list[TouchedStore] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = TouchedStore.from_dict(json.loads(line))
+        if dataset_id is None or entry.dataset_id == dataset_id:
+            out.append(entry)
+    return out
+
+
+def remove_touched(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) -> None:
+    """Forget a store (nothing of this dataset's is left in it)."""
+    _remove_entry(touched_path(shared_dir), dataset_id, identity)
 
 
 def _append_line(root: Path, obj: dict[str, Any]) -> None:

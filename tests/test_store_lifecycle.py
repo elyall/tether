@@ -288,3 +288,631 @@ def test_cli_add_create_and_status_show_the_origin(
     repo = Repo.find(vcs_root)
     assert "again" not in read_objects(repo.root)
     assert len(read_created(repo.vcs.shared_dir())) == 1
+
+
+# ----------------------------------------------------------------------------- #
+# gc: reclaiming created stores
+# ----------------------------------------------------------------------------- #
+
+
+def _baseline(vcs_root: Path) -> tuple[Repo, str]:
+    """A dataset with one adopted object committed on the trunk."""
+    repo = Repo.init(vcs_root)
+    system = _fresh_system()
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    return repo, system
+
+
+def _probe_with_created_store(repo: Repo) -> tuple[str, str, str]:
+    """On bookmark `probe`: create a store, write, commit. Returns the store's
+    system, its fork branch, and the probe commit."""
+    repo.new(bookmark="probe")
+    system = _fresh_system()
+    repo.add(
+        "scratch/probe", "memory", {"system": system, "branch": "main"}, create=True
+    )
+    fork = repo.workspace.working_refs["scratch/probe"]
+    _mem(repo, "scratch/probe").write({"x": 1})
+    commit = repo.commit("probe write").vcs_commit
+    assert commit is not None
+    return system, fork, commit
+
+
+def _drop_bookmark(repo: Repo, root: Path, name: str, commit: str) -> Repo:
+    """Leave the bookmark for the trunk and make its commit invisible, as a
+    user abandoning an experiment would."""
+    import subprocess
+
+    repo.new("main")
+    if repo.vcs.kind == "jj":
+        subprocess.run(
+            ["jj", "abandon", commit], cwd=root, check=True, capture_output=True
+        )
+    if name in repo.vcs.bookmarks():
+        repo.vcs.bookmark_delete(name)
+    return Repo.find(root)
+
+
+def test_gc_reclaims_a_created_store_once_its_fork_is_abandoned(vcs_root: Path) -> None:
+    """The story: a probe bookmark creates a store, writes, commits; the
+    bookmark is abandoned; `gc --prune-bookmarks` unpins, deletes the fork,
+    then deletes the store -- and the world matches the pre-fork listing."""
+    repo, _db = _baseline(vcs_root)
+    before = set(default_store().systems)
+    system, fork, commit = _probe_with_created_store(repo)
+    backend = repo.backend_for("memory")
+    locator = {"system": system, "branch": "main"}
+    pins = {p for p in backend.list_pins(locator)}
+    assert len(pins) == 1 and fork in default_store().system(system).branches
+
+    # Referenced (the probe commit names it): nothing about the store is planned.
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert not [a for a in plan.actions if a.key == "scratch/probe"]
+    assert any("still referenced" in n for n in plan.notes)
+
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    assert "scratch/probe" not in repo.objects
+    # Without --prune-bookmarks the fork blocks the store: kept, with the reason.
+    plan = repo.plan_gc(delete_stores=True)
+    ops = [(a.op, a.target) for a in plan.actions if a.key == "scratch/probe"]
+    assert ("keep-store", system) in ops
+    assert any(a.op == "unpin" for a in plan.actions if a.key == "scratch/probe")
+    (kept,) = [a for a in plan.actions if a.op == "keep-store"]
+    assert fork in kept.detail and "--prune-bookmarks" in kept.detail
+    assert not [a for a in plan.actions if a.op == "delete-store"]
+
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    # (`new main` left this checkout's working ref behind: forgotten as usual.)
+    ops = [
+        a.op
+        for a in plan.actions
+        if a.key == "scratch/probe" and a.op != "forget-working-ref"
+    ]
+    assert ops == ["unpin", "delete-branch", "delete-store"]
+    assert plan.actions[-1].op == "delete-store"
+    (pre,) = [p for p in plan.preconditions if p.kind == "store_empty"]
+    assert set(pre.params["ignoring"]) == {fork, *(f"tether.{p}" for p in pins)}
+    delete_branch = next(a for a in plan.actions if a.op == "delete-branch")
+    assert "head is pinned" in delete_branch.detail
+
+    report = repo.apply_gc(plan)
+    assert report.deleted_stores == {"scratch/probe": system}
+    assert not report.kept_stores
+    assert set(default_store().systems) == before  # the world as it was
+    assert not repo.created_stores()
+    with pytest.raises(BackendError, match="deleted"):
+        backend.fingerprint(locator, None)
+
+    undo = repo.undo()
+    assert not undo.complete
+    assert any("created store" in line and system in line for line in undo.irreversible)
+    assert system not in default_store().systems  # honestly gone
+
+
+def test_gc_leaves_created_stores_alone_unless_asked(vcs_root: Path) -> None:
+    """Opt-in: a deleted store has no `repair`, and gc only knows what this
+    clone has fetched. Without `delete_stores` our dead refs in the store are
+    still released (it is a store this clone touched), but the store stays."""
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    plan = repo.plan_gc(prune_bookmarks=True)
+    ops = [
+        a.op
+        for a in plan.actions
+        if a.key == "scratch/probe" and a.op != "forget-working-ref"
+    ]
+    assert ops == ["unpin", "delete-branch"]  # touched-store step; no store verdict
+    assert plan.context["delete_stores"] is False
+    report = repo.gc(dry_run=False, prune_bookmarks=True)
+    assert not report.deleted_stores and not report.kept_stores
+    sys_ = default_store().system(system)
+    assert system in default_store().systems and fork not in sys_.branches
+    assert [c.key for c in repo.created_stores()] == ["scratch/probe"]
+    # Now empty: `--delete-stores` finishes the job.
+    report = repo.gc(dry_run=False, prune_bookmarks=True, delete_stores=True)
+    assert report.deleted_stores == {"scratch/probe": system}
+    assert [t.key for t in repo.touched_stores()] == [
+        "db"
+    ]  # the deleted one is forgotten
+
+
+def test_gc_touches_nothing_in_a_store_where_another_actor_may_be_alive(
+    vcs_root: Path,
+) -> None:
+    """A same-dataset branch of a bookmark this clone never had: another
+    clone or environment may have fetched the probe and be working in the
+    store. Its commits are not in our history, so nothing else protects it --
+    the plan leaves the store whole, our own pins included, until it is
+    fetched or `--force-prune` says otherwise."""
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    sys_ = default_store().system(system)
+    theirs = f"tether.ws.{repo.config.dataset_id}.their-probe"
+    sys_.branches[theirs] = sys_.branches["main"]  # same dataset id, unknown bookmark
+
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [a for a in plan.actions if a.op == "keep-store"]
+    assert theirs in kept.detail and "never had" in kept.detail
+    assert not [
+        a for a in plan.actions if a.op in ("unpin", "delete-branch", "delete-store")
+    ]
+    repo.apply_gc(plan)
+    assert set(sys_.tags) and fork in sys_.branches  # our pin and fork untouched
+
+    # --force-prune is the explicit override: everything goes, marked FORCED.
+    forced = repo.plan_gc(prune_bookmarks=True, force_prune=True, delete_stores=True)
+    ops = [(a.op, a.target) for a in forced.actions if a.key == "scratch/probe"]
+    assert ("delete-branch", theirs) in ops and ("delete-store", system) in ops
+    theirs_action = next(a for a in forced.actions if a.target == theirs)
+    assert "FORCED" in theirs_action.detail and "never had" in theirs_action.detail
+    repo.apply_gc(forced)
+    assert system not in default_store().systems
+
+
+def test_gc_accounts_for_bookmarks_another_live_checkout_of_this_clone_made(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """A branch of a bookmark some checkout of *this* clone created (its op
+    log says so) is ours to judge under the prune rules, even after the
+    bookmark itself is gone."""
+    import subprocess
+
+    repo, _db = _baseline(vcs_root)
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    other = Repo.find(other_root)
+    other.new(bookmark="side")  # logged in the other checkout's ops.jsonl
+    other.new(bookmark="side-2")  # ...and left behind for another
+    other.vcs.bookmark_delete("side")
+
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    sys_ = default_store().system(system)
+    side = f"tether.ws.{repo.config.dataset_id}.side"
+    sys_.branches[side] = sys_.branches["main"]  # at the base: nothing written
+
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    side_action = next(a for a in plan.actions if a.target == side)
+    assert side_action.op == "delete-branch" and "equals the base" in side_action.detail
+    assert plan.actions[-1].op == "delete-store"
+
+
+def test_gc_keeps_a_created_store_with_a_foreign_branch(vcs_root: Path) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    sys_ = default_store().system(system)
+    sys_.branches["tether.ws.ffffffff.theirs"] = sys_.branches["main"]
+
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [a for a in plan.actions if a.op == "keep-store"]
+    assert "1 working branch(es) of other datasets" in kept.detail
+    assert not [a for a in plan.actions if a.op == "delete-store"]
+    # tether's own garbage in it still goes; the store itself stays.
+    report = repo.apply_gc(plan)
+    assert report.kept_stores["scratch/probe"] == kept.detail
+    assert system in default_store().systems
+    assert "tether.ws.ffffffff.theirs" in sys_.branches
+    assert [c.key for c in repo.created_stores()] == ["scratch/probe"]
+
+
+def test_gc_keeps_a_created_store_another_live_workspace_still_uses(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """An uncommitted `add --create` in another checkout's working tree is a
+    reference too: nothing in history names the store, but the store is in
+    use."""
+    import subprocess
+
+    repo, _db = _baseline(vcs_root)
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    other = Repo.find(other_root)
+    system = _fresh_system()
+    other.add(
+        "scratch/theirs", "memory", {"system": system}, create=True
+    )  # uncommitted
+
+    repo = Repo.find(vcs_root)
+    assert [c.key for c in repo.created_stores()] == ["scratch/theirs"]  # shared index
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert not [a for a in plan.actions if a.key == "scratch/theirs"]
+    assert any("still referenced" in n for n in plan.notes)
+    assert system in default_store().systems
+
+
+def test_gc_never_trusts_a_manifest_that_claims_creation(vcs_root: Path) -> None:
+    """A clone can say `origin = "created"` about anything. Without the owner
+    marker *and* the index entry, gc plans nothing for the store."""
+    repo, _db = _baseline(vcs_root)
+    system = _fresh_system()
+    default_store().system(system)
+    m = repo.add("claimed", "memory", {"system": system})
+    forged = ObjectManifest(
+        key=m.key, kind=m.kind, locator=m.locator, policy=m.policy, origin="created"
+    )
+    path = vcs_root / ".tether" / "objects" / "claimed.toml"
+    path.write_text(forged.to_toml(), encoding="utf-8")
+    repo = Repo.find(vcs_root)
+    assert repo.objects["claimed"].origin == "created"
+    repo.commit("claims")
+    repo.objects.pop("claimed")
+    path.unlink()
+    repo = Repo.find(vcs_root)
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert not [a for a in plan.actions if a.op in ("delete-store", "keep-store")]
+    assert system in default_store().systems
+
+
+def test_gc_leaves_a_created_store_whose_marker_is_someone_elses(
+    vcs_root: Path,
+) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    default_store().system(system).owner = "cafecafe"
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert not [
+        a
+        for a in plan.actions
+        if a.key == "scratch/probe" and a.op != "forget-working-ref"
+    ]
+    assert any("cafecafe" in n and "left alone" in n for n in plan.notes)
+    assert [c.key for c in repo.created_stores()] == ["scratch/probe"]  # not forgotten
+
+
+def test_gc_forgets_a_created_store_that_is_already_gone(vcs_root: Path) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    default_store().systems.pop(system)  # removed by hand
+    plan = repo.plan_gc(delete_stores=True)
+    (forget,) = [
+        a
+        for a in plan.actions
+        if a.key == "scratch/probe" and a.op != "forget-working-ref"
+    ]
+    assert forget.op == "forget-store"
+    report = repo.apply_gc(plan)
+    assert report.forgotten_stores == ["scratch/probe"]
+    assert not repo.created_stores()
+
+
+def test_gc_store_empty_precondition_stops_a_stale_plan(vcs_root: Path) -> None:
+    """Between plan and apply someone tagged the store: the plan's `ignoring`
+    set no longer covers what is there, so nothing in the plan runs."""
+    from tether.errors import StalePlanError
+
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert plan.actions[-1].op == "delete-store"
+    sys_ = default_store().system(system)
+    sys_.tags["release-1"] = sys_.branches["main"]
+    with pytest.raises(StalePlanError, match="no longer empty"):
+        repo.apply_gc(plan)
+    assert system in default_store().systems and fork in sys_.branches  # nothing ran
+    # A fresh plan sees the tag and keeps the store.
+    fresh = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [a for a in fresh.actions if a.op == "keep-store"]
+    assert "not tether's own" in kept.detail
+
+
+def test_gc_keeps_a_created_store_whose_fork_holds_unpinned_writes(
+    vcs_root: Path,
+) -> None:
+    """The prune rules apply inside a created store too: a fork with writes
+    nothing pinned is kept (and so is the store) unless --force-prune."""
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    default_store().write(system, fork, {"x": 2})  # after the commit: unpinned
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [a for a in plan.actions if a.op == "keep-store"]
+    assert "unpinned writes" in kept.detail and "--force-prune" in kept.detail
+    forced = repo.plan_gc(prune_bookmarks=True, force_prune=True, delete_stores=True)
+    assert [
+        a.op
+        for a in forced.actions
+        if a.key == "scratch/probe" and a.op != "forget-working-ref"
+    ] == ["unpin", "delete-branch", "delete-store"]
+    report = repo.apply_gc(forced)
+    assert report.deleted_stores == {"scratch/probe": system}
+
+
+def test_cli_gc_reports_stores(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    monkeypatch.chdir(vcs_root)
+    r = runner.invoke(app, ["gc", "--prune-bookmarks"])
+    assert r.exit_code == 0, r.output
+    assert "delete-store" not in r.output
+    r = runner.invoke(app, ["gc", "--prune-bookmarks", "--delete-stores"])
+    assert r.exit_code == 0, r.output
+    assert "delete-store" in r.output and system in r.output
+    r = runner.invoke(
+        app, ["gc", "--prune-bookmarks", "--delete-stores", "--no-dry-run", "--json"]
+    )
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["deleted_stores"] == {"scratch/probe": system}
+    assert system not in default_store().systems
+
+
+# ----------------------------------------------------------------------------- #
+# stores this clone touched
+# ----------------------------------------------------------------------------- #
+
+
+def test_touched_index_remembers_where_this_clone_forked_and_pinned(
+    vcs_root: Path,
+) -> None:
+    repo = Repo.init(vcs_root)
+    system = _fresh_system()
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    assert not repo.touched_stores()
+    repo.commit("baseline")  # a pin
+    (entry,) = repo.touched_stores()
+    assert entry.kind == "memory" and entry.key == "db"
+    assert entry.identity == dict(
+        repo.backend_for("memory").identity({"system": system})
+    )
+    repo.new(bookmark="work")
+    _mem(repo, "db")  # a fork: same store, no second entry
+    assert len(repo.touched_stores()) == 1
+    index = repo.vcs.shared_dir() / "tether-touched.jsonl"
+    assert (
+        index.is_file()
+        and index.parent == (repo.vcs.shared_dir() / "tether.lock").parent
+    )
+
+
+def test_gc_releases_dead_refs_in_a_touched_store_no_manifest_names(
+    vcs_root: Path,
+) -> None:
+    """The second actor's side of the orphan: B forks and pins in a store it
+    did not create, abandons its bookmark, and B's plain `gc` still finds and
+    releases B's own refs there -- so the creator can reclaim the store."""
+    repo = Repo.init(vcs_root)
+    home = _fresh_system()
+    default_store().system(home)
+    repo.add("db", "memory", {"system": home})
+    repo.commit("baseline")
+    # An existing store, registered only on a bookmark: its manifest lives
+    # in the probe commit alone.
+    repo.new(bookmark="probe")
+    shared = _fresh_system()
+    default_store().system(shared)
+    repo.add("shared/emb", "memory", {"system": shared, "branch": "main"})
+    commit = repo.commit("register shared").vcs_commit
+    assert commit is not None
+    repo.new("probe")  # re-plan on the bookmark: the object now has a state to fork
+    handle = _mem(repo, "shared/emb")
+    fork = handle.ref
+    handle.write({"x": 1})
+    commit2 = repo.commit("probe write").vcs_commit
+    assert commit2 is not None
+    sys_ = default_store().system(shared)
+    assert fork in sys_.branches and len(sys_.tags) == 2
+
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit2)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    assert "shared/emb" not in repo.objects
+    plan = repo.plan_gc(prune_bookmarks=True)
+    ours = [
+        a
+        for a in plan.actions
+        if a.key == "shared/emb" and a.op != "forget-working-ref"
+    ]
+    assert sorted(a.op for a in ours) == ["delete-branch", "unpin", "unpin"]
+    assert all("touched by this clone" in a.detail for a in ours)
+    repo.apply_gc(plan)
+    assert fork not in sys_.branches and not sys_.tags
+    assert shared in default_store().systems  # not ours to delete
+    # Nothing of ours is left: the next plan forgets the store.
+    again = repo.plan_gc(prune_bookmarks=True)
+    (forget,) = [a for a in again.actions if a.key == "shared/emb"]
+    assert forget.op == "forget-touched"
+    repo.apply_gc(again)
+    assert not [t for t in repo.touched_stores() if t.key == "shared/emb"]
+
+
+def test_gc_leaves_a_touched_store_where_another_actor_may_be_alive(
+    vcs_root: Path,
+) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    sys_ = default_store().system(system)
+    theirs = f"tether.ws.{repo.config.dataset_id}.their-probe"
+    sys_.branches[theirs] = sys_.branches["main"]
+    plan = repo.plan_gc(prune_bookmarks=True)  # touched step only
+    assert not [a for a in plan.actions if a.op in ("unpin", "delete-branch")]
+    assert any("never had" in n and theirs in n for n in plan.notes)
+    assert fork in sys_.branches and sys_.tags
+
+
+def test_gc_can_reclaim_a_created_store_by_locator(vcs_root: Path) -> None:
+    """The creator's clone is gone with its index; any clone of the dataset
+    can still reclaim the store by naming it -- under the same rules, the
+    marker in the store being the authority."""
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    (repo.vcs.shared_dir() / "tether-created.jsonl").unlink()  # the index is lost
+    assert not repo.created_stores()
+
+    plan = repo.plan_gc(prune_bookmarks=True)
+    assert not [a for a in plan.actions if a.op == "delete-store"]
+    plan = repo.plan_gc(prune_bookmarks=True, stores=[("memory", {"system": system})])
+    assert plan.context["delete_stores"] is True
+    assert plan.context["stores"] == [["memory", {"system": system}]]
+    assert plan.actions[-1].op == "delete-store"
+    report = repo.apply_gc(plan)
+    assert report.deleted_stores == {system: system}
+    assert system not in default_store().systems
+
+    # A store nobody marked is not tether's to remove, index or not.
+    other = _fresh_system()
+    default_store().system(other)
+    plan = repo.plan_gc(stores=[("memory", {"system": other})])
+    assert not [a for a in plan.actions if a.op in ("delete-store", "forget-store")]
+    assert any("no owner marker" in n for n in plan.notes)
+    assert other in default_store().systems
+
+
+def test_cli_gc_store_option(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, _db = _baseline(vcs_root)
+    system, _fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    (repo.vcs.shared_dir() / "tether-created.jsonl").unlink()
+    monkeypatch.chdir(vcs_root)
+    r = runner.invoke(
+        app,
+        [
+            "gc",
+            "--prune-bookmarks",
+            "--store",
+            f"memory={system}",
+            "--no-dry-run",
+            "--json",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["deleted_stores"] == {system: system}
+    r = runner.invoke(app, ["gc", "--store", "nonsense"])
+    assert r.exit_code != 0 and "KIND=LOCATOR" in r.output
+
+
+def test_gc_leaves_a_store_holding_a_pin_no_commit_of_this_clone_made(
+    vcs_root: Path,
+) -> None:
+    """The same-bookmark case: another actor fetched the probe and commits on
+    it, so its pins carry our dataset id under a bookmark we *did* have. The
+    only trace is that no `commit` in any checkout of this clone recorded
+    those pin ids -- and that is enough to leave the store whole."""
+    repo, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(repo)
+    repo = _drop_bookmark(repo, vcs_root, "probe", commit)
+    sys_ = default_store().system(system)
+    theirs = f"{repo.config.dataset_id}.00000000deadbeef"
+    sys_.tags[f"tether.{theirs}"] = sys_.branches[fork]
+
+    plan = repo.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [a for a in plan.actions if a.op == "keep-store"]
+    assert "no commit of this clone made" in kept.detail and theirs in kept.detail
+    assert not [a for a in plan.actions if a.op in ("unpin", "delete-branch")]
+    forced = repo.plan_gc(prune_bookmarks=True, force_prune=True, delete_stores=True)
+    assert forced.actions[-1].op == "delete-store"
+
+
+def _clone(vcs_root: Path, other_root: Path, kind: str) -> None:
+    import subprocess
+
+    if kind == "jj":
+        subprocess.run(
+            ["jj", "git", "clone", "--colocate", str(vcs_root), str(other_root)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["jj", "bookmark", "track", "main@origin", "probe@origin"],
+            cwd=other_root,
+            check=True,
+            capture_output=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "clone", "-q", str(vcs_root), str(other_root)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "switch", "-q", "probe"],
+            cwd=other_root,
+            check=True,
+            capture_output=True,
+        )
+
+
+def _push_probe(other_root: Path, kind: str, commit: str) -> None:
+    """B publishes `probe`. A deleted its copy meanwhile, so jj's safe push
+    wants a fetch first and the bookmark set again where B has it."""
+    import subprocess
+
+    steps = (
+        [
+            ["jj", "git", "fetch"],
+            ["jj", "bookmark", "set", "probe", "-r", commit],
+            ["jj", "git", "push", "-b", "probe"],
+        ]
+        if kind == "jj"
+        else [["git", "push", "-q", "origin", "probe"]]
+    )
+    for argv in steps:
+        proc = subprocess.run(argv, cwd=other_root, capture_output=True, text=True)
+        assert proc.returncode == 0, f"{argv}: {proc.stdout}{proc.stderr}"
+
+
+def test_two_clones_the_creator_never_deletes_the_other_clones_work(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """Clone A creates a store on `probe`; clone B fetches `probe`, forks the
+    same branch, writes, commits. A abandons the bookmark without fetching
+    B's commit and runs `gc --delete-stores`: the store must stay -- B's pin
+    is one no commit of A made. Once B's work reaches A, the store is simply
+    referenced again."""
+    a, _db = _baseline(vcs_root)
+    system, fork, commit = _probe_with_created_store(a)
+    other_root = tmp_path / "clone-b"
+    _clone(vcs_root, other_root, a.vcs.kind)
+
+    b = Repo.find(other_root)
+    assert b.config.dataset_id == a.config.dataset_id
+    b.new("probe")
+    handle = _mem(b, "scratch/probe")
+    assert handle.ref == fork  # the same branch: the bookmark's
+    handle.write({"x": 2})
+    b_commit = b.commit("b writes")
+    b_pin = b_commit.pinned["scratch/probe"]
+    assert b_pin is not None
+
+    a = _drop_bookmark(a, vcs_root, "probe", commit)
+    plan = a.plan_gc(prune_bookmarks=True, delete_stores=True)
+    (kept,) = [x for x in plan.actions if x.op == "keep-store"]
+    assert b_pin.id in kept.detail and "no commit of this clone made" in kept.detail
+    assert not [
+        x for x in plan.actions if x.op in ("unpin", "delete-branch", "delete-store")
+    ]
+    a.apply_gc(plan)
+    sys_ = default_store().system(system)
+    assert fork in sys_.branches and b_pin.ref in sys_.tags
+
+    # B's work arrives: the bookmark is back and its manifest names the store.
+    assert b_commit.vcs_commit is not None
+    _push_probe(other_root, a.vcs.kind, b_commit.vcs_commit)
+    a = Repo.find(vcs_root)
+    plan = a.plan_gc(prune_bookmarks=True, delete_stores=True)
+    assert not [
+        x
+        for x in plan.actions
+        if x.key == "scratch/probe" and x.op != "forget-working-ref"
+    ]
+    assert any("still referenced" in n for n in plan.notes)
