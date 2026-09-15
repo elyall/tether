@@ -6,15 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0b1] - 2026-09-14
+## [0.1.0b1] - 2026-09-15
 
-The alpha-exit release. Two security fixes, the engine bugs an external
-review found, a hardened backend contract, one migration for every alpha
-format, an `experimental` package with a seamless graduation path, and a
-narrower `undo` that reverses only what an operation created. Upgrade with
-`tether upgrade`; move `[vcs] git_path`/`jj_path`, `[backends.neon]`,
-`[backends.ducklake] init_sql`, `[backends.lakefs]`, and any endpoint or
-credential option out of `tether.toml` into `.tether/secrets.toml`.
+The alpha-exit release, and the first beta. Two security fixes, the engine
+bugs an external review found, a hardened backend contract, one migration
+for every alpha format (removed at 0.1.0 -- see Deprecated), an
+`experimental` package that is an import boundary with a seamless graduation
+path, a narrower `undo` that reverses only what an operation created,
+`tether.repo` as a package of one module per command family, and -- as an
+experimental feature -- a store lifecycle: `add --create` makes a store
+tether owns and `gc --delete-stores` reclaims it. What still has to run
+against real services, and what graduates or goes before 0.1.0, is in
+`ROADMAP.md`.
+
+Upgrade with `tether upgrade`; move `[vcs] git_path`/`jj_path`,
+`[backends.neon]`, `[backends.ducklake] init_sql`, `[backends.lakefs]`, and
+any endpoint or credential option out of `tether.toml` into
+`.tether/secrets.toml`.
 
 ### Security
 
