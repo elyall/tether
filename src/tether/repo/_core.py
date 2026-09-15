@@ -171,6 +171,11 @@ class RepoCore:
         self._backends: dict[str, ObjectBackend] = {}
         self._touched: set[str] | None = None
         """Identities this clone is known to have written refs into (lazy)."""
+        self._objects_gen = 0
+        """Bumped by every in-place change to `objects` (add, remove, set); a
+        reload replaces the dict. Together they date the per-object secret
+        rules a backend holds (see `backend_for`)."""
+        self._secret_stamp: dict[str, tuple[object, int]] = {}
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
@@ -404,7 +409,15 @@ class RepoCore:
     def backend_for(self, kind: str) -> ObjectBackend:
         """Return the (cached) backend instance for `kind`.
 
-        Built with `config.backends[kind]` on first use.
+        Built with `config.backends[kind]` on first use. Its per-object
+        credential rules follow the objects: an `[objects."<key>"]` entry in
+        `secrets.toml` names a key, and which store that key means is known
+        only once the object is registered -- so the rules are recomputed when
+        `objects` has changed since they were last pushed (a reload replaces
+        the dict; `add`/`remove`/`set` bump `_objects_gen`), and an object
+        added after the backend was first built gets its credentials too. On
+        the hot paths (a fingerprint fan-out, a history walk) nothing is
+        recomputed.
 
         Raises:
             ConfigError: If the kind is unknown or its optional extra is missing.
@@ -425,6 +438,19 @@ class RepoCore:
                 {**committed, **local}, self._secret_rules_for(kind, backend)
             )
             self._backends[kind] = backend
+        elif self.secrets.objects:
+            # The stamp keeps a reference to the dict it saw, so a reloaded
+            # `objects` (a new dict) always misses; the counter catches
+            # in-place changes.
+            stamp = (self.objects, self._objects_gen)
+            seen = self._secret_stamp.get(kind)
+            if seen is None or seen[0] is not stamp[0] or seen[1] != stamp[1]:
+                rules = self._secret_rules_for(kind, backend)
+                if rules != getattr(backend, "_secret_rules", None):
+                    committed = dict(self.config.backends.get(kind, {}))
+                    local = dict(self.secrets.backends.get(kind, {}))
+                    backend.configure_secrets({**committed, **local}, rules)
+                self._secret_stamp[kind] = stamp
         return backend
 
     def _secret_rules_for(

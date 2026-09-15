@@ -220,6 +220,7 @@ class ObjectOps(RepoCore):
         )
         write_object(self.root, manifest)
         self.objects[key] = manifest
+        self._objects_gen += 1
         # A re-registered key starts without a working ref; any branch left by
         # its previous incarnation is found by `gc --prune-bookmarks`.
         self.workspace.working_refs.pop(key, None)
@@ -254,6 +255,7 @@ class ObjectOps(RepoCore):
             raise ConfigError(f"no such object: {key}")
         remove_object(self.root, key)
         del self.objects[key]
+        self._objects_gen += 1
         self.workspace.last_snapshot.pop(key, None)
         self.workspace.pending_forks.pop(key, None)  # never created; nothing to gc
         self.workspace.pending_resets.pop(key, None)
@@ -317,6 +319,7 @@ class ObjectOps(RepoCore):
             for key, updated in updates.items():
                 write_object(self.root, updated)
                 self.objects[key] = updated
+            self._objects_gen += 1
             self._log_op(
                 "set",
                 result={

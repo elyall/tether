@@ -154,6 +154,73 @@ def test_two_icechunk_objects_two_credential_sets(
         assert set(found.objects[key].locator) == {"uri"}
 
 
+def test_per_object_secrets_follow_objects_added_after_the_backend_was_built(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[objects."<key>"]` names a key; which store that key means is known
+    only once the object exists. A backend built before the `add` -- the
+    common case inside one process: `add` then `commit`, or `Repo.create`
+    -- must still see the entry for the new object."""
+    import icechunk as ic
+
+    Repo.init(vcs_root)
+    secrets = vcs_root / ".tether" / SECRETS_FILENAME
+    secrets.write_text(
+        '[objects."b"]\naccess_key_id = "AKIA_B"\nsecret_access_key = "sk-b"\n'
+    )
+    secrets.chmod(0o600)
+    calls: list[dict] = []
+    monkeypatch.setattr(ic, "s3_storage", lambda **kw: calls.append(kw) or object())
+    repo = Repo.find(vcs_root)
+    repo.add("a", "icechunk", {"uri": "s3://bucket-a/repo"})
+    backend = cast(Any, repo.backend_for("icechunk"))  # built: `b` not registered
+    repo.add("b", "icechunk", {"uri": "s3://bucket-b/repo"})
+    assert repo.backend_for("icechunk") is backend  # same instance, fresh rules
+    backend._storage(repo.objects["b"].locator)
+    (b,) = calls
+    assert b["access_key_id"] == "AKIA_B" and "from_env" not in b
+    # Removing the object drops its rule again; `a` never had one.
+    repo.remove("b")
+    repo.backend_for("icechunk")
+    assert "s3://bucket-b/repo" not in backend._secret_rules
+    backend._storage(repo.objects["a"].locator)
+    assert calls[-1].get("from_env") is True
+
+
+def test_secret_rules_are_recomputed_only_when_the_objects_change(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`backend_for` runs in fingerprint fan-outs and history walks; the
+    per-object rules are rebuilt on a change to `objects`, not per call."""
+    Repo.init(vcs_root)
+    secrets = vcs_root / ".tether" / SECRETS_FILENAME
+    secrets.write_text('[objects."a"]\naccess_key_id = "AKIA_A"\n')
+    secrets.chmod(0o600)
+    repo = Repo.find(vcs_root)
+    calls = 0
+    real = repo._secret_rules_for
+
+    def counting(kind: str, backend: Any) -> dict:
+        nonlocal calls
+        calls += 1
+        return real(kind, backend)
+
+    monkeypatch.setattr(repo, "_secret_rules_for", counting)
+    repo.backend_for("icechunk")  # first build
+    for _ in range(50):
+        repo.backend_for("icechunk")
+    assert calls == 2  # the build, then one check for the unchanged objects
+    # `add` reloads `objects` under the writer lock and then changes it: two
+    # real changes, at most two recomputes -- and then none again.
+    repo.add("a", "icechunk", {"uri": "s3://bucket-a/repo"})
+    b = cast(Any, repo.backend_for("icechunk"))
+    assert calls <= 4 and "s3://bucket-a/repo" in b._secret_rules
+    after = calls
+    for _ in range(50):
+        repo.backend_for("icechunk")
+    assert calls == after
+
+
 def test_lax_permissions_on_the_secrets_file_warn(vcs_root: Path) -> None:
     Repo.init(vcs_root)
     secrets = vcs_root / ".tether" / SECRETS_FILENAME
