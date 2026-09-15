@@ -31,6 +31,7 @@ import json
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Collection
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -256,6 +257,12 @@ def _walk_files(root: Path) -> list[tuple[str, int, int]]:
     return [(rel, st.st_size, st.st_mtime_ns) for rel, st in _walk_stats(root)]
 
 
+OWNER_MARKER = ".tether-owner"
+"""File at the root of a directory tether *created* (`create`), naming the
+owning dataset. Not content: the directory walk skips it, so a created
+directory fingerprints as empty until something is written into it."""
+
+
 def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
     out: list[tuple[str, os.stat_result]] = []
     stack = [root]
@@ -267,6 +274,8 @@ def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
                     stack.append(Path(entry.path))
                 elif entry.is_file():
                     rel = Path(entry.path).relative_to(root).as_posix()
+                    if rel == OWNER_MARKER:
+                        continue
                     out.append((rel, entry.stat()))
     return out
 
@@ -293,6 +302,7 @@ class FileBackend(ObjectBackend):
         | Capability.ADDRESSABLE
         | Capability.CHEAP_FINGERPRINT
         | Capability.DIFF
+        | Capability.CREATE
     )
     _LISTING_CACHE = 16  # recent directory/prefix listings kept, by digest
 
@@ -325,11 +335,14 @@ class FileBackend(ObjectBackend):
         carries `version_id`; `open` and `verify` refuse a state without one.
         """
         base = Capability.FINGERPRINT | Capability.CHEAP_FINGERPRINT | Capability.DIFF
-        if getattr(policy, "file", "immutable") != "versioned":
-            return base
         try:
             scheme, _root, key = _parse(self._uri(locator))
         except BackendError:
+            return base
+        if scheme == "local":
+            # tether can make (and remove) a local directory; not a remote prefix.
+            base |= Capability.CREATE
+        if getattr(policy, "file", "immutable") != "versioned":
             return base
         if scheme == "local" or not key or key.endswith("/"):
             return base
@@ -398,6 +411,59 @@ class FileBackend(ObjectBackend):
             store = self._open_store(root, locator)
             self._stores[root] = store
         return store
+
+    # -- store lifecycle (local directories) ----------------------------- #
+    def _local_dir(self, locator: Locator, what: str) -> Path:
+        scheme, _root, _key = _parse(self._uri(locator))
+        if scheme != "local":
+            raise BackendError(
+                f"file {what}: only a local directory can be created or removed by "
+                "tether; a remote prefix is managed by its bucket",
+                kind="file",
+            )
+        return Path(self._uri(locator))
+
+    def create(self, locator: Locator, *, owner: str) -> State:
+        path = self._local_dir(locator, "create")
+        if path.exists():
+            raise BackendError(
+                f"{path} already exists; `create` never adopts it", kind="file"
+            )
+        path.mkdir(parents=True)
+        (path / OWNER_MARKER).write_text(owner + "\n", encoding="utf-8")
+        return self.fingerprint(locator, None)
+
+    def owner(self, locator: Locator) -> str | None:
+        path = self._local_dir(locator, "owner") / OWNER_MARKER
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8").strip() or None
+
+    def is_ref_empty(
+        self, locator: Locator, *, ignoring: Collection[str] = ()
+    ) -> bool | None:
+        path = self._local_dir(locator, "is_ref_empty")
+        if not path.is_dir():
+            return None
+        # No branches to ignore here: a directory is empty when only the
+        # marker is in it.
+        return all(entry.name == OWNER_MARKER for entry in path.iterdir())
+
+    def delete_store(self, locator: Locator) -> None:
+        path = self._local_dir(locator, "delete_store")
+        if self.is_ref_empty(locator) is not True:
+            raise BackendError(f"{path} is not empty; not removing it", kind="file")
+        marker = path / OWNER_MARKER
+        owner = marker.read_text(encoding="utf-8") if marker.is_file() else None
+        marker.unlink(missing_ok=True)
+        try:
+            path.rmdir()  # refuses anything but an empty directory
+        except OSError:
+            # A file appeared in between: put the marker back so the store
+            # stays ours to reclaim next time, rather than an unowned leftover.
+            if owner is not None:
+                marker.write_text(owner, encoding="utf-8")
+            raise
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:

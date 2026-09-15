@@ -25,6 +25,9 @@ class MemoryHarness:
         branch = working_ref or locator.get("branch", "main")
         self.store.write(locator["system"], branch, {"n": self._n})
 
+    def fresh_locator(self) -> Locator:
+        return {"system": f"sys-{uuid.uuid4().hex[:8]}", "branch": "main"}
+
 
 class LocalFileHarness:
     capabilities = Capability.FINGERPRINT | Capability.CHEAP_FINGERPRINT
@@ -43,7 +46,14 @@ class LocalFileHarness:
 
     def mutate(self, locator: Locator, working_ref: str | None) -> None:
         self._n += 1
-        Path(locator["uri"]).write_text(f"v{self._n}" * (self._n + 1), encoding="utf-8")
+        target = Path(locator["uri"])
+        if target.is_dir():  # a created directory: add a file to it
+            (target / f"part-{self._n}.txt").write_text("x" * self._n, encoding="utf-8")
+            return
+        target.write_text(f"v{self._n}" * (self._n + 1), encoding="utf-8")
+
+    def fresh_locator(self) -> Locator:
+        return {"uri": str(self.tmp / f"dir-{uuid.uuid4().hex[:8]}")}
 
 
 def test_memory_backend_conformance() -> None:

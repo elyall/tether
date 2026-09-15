@@ -50,6 +50,115 @@ class IcechunkHarness:
         self._n += 1
         _commit(locator["uri"], working_ref or "main", self._n)
 
+    def fresh_locator(self) -> Locator:
+        return {
+            "uri": str(self.tmp / f"fresh-{uuid.uuid4().hex[:8]}"),
+            "branch": "main",
+        }
+
+
+def test_icechunk_created_store_is_empty_when_only_a_later_pin_generation_remains(
+    tmp_path: Path,
+) -> None:
+    """A gc plan names the pin it unpins as `tether.<id>`; when that tag name
+    was burnt by an earlier deletion the live tag is `tether.<id>.2`.
+    `is_ref_empty` must match the ignored pin by id, not by tag name --
+    otherwise the store is kept for a ref the same plan is releasing."""
+    from tether.backends.icechunk import IcechunkBackend
+    from tether.manifest import ref_for_pin
+
+    backend = IcechunkBackend()
+    loc = {"uri": str(tmp_path / "made"), "branch": "main"}
+    initial = backend.create(loc, owner="0a1b2c3d")
+    pid = "0a1b2c3d.0123456789abcdef"
+    first = backend.pin(loc, initial, pid)
+    backend.unpin(loc, first)  # burns the tag name
+    again = backend.pin(loc, initial, pid)
+    assert again.ref == f"{ref_for_pin(pid)}.2" and again.id == pid
+
+    assert backend.is_ref_empty(loc) is False  # the pin is a ref of ours
+    assert backend.is_ref_empty(loc, ignoring={ref_for_pin(pid)}) is True
+    assert backend.is_ref_empty(loc, ignoring={again.ref}) is True
+    # A pin the plan does not release still keeps the store.
+    other = backend.pin(loc, initial, "0a1b2c3d.fedcba9876543210")
+    assert backend.is_ref_empty(loc, ignoring={ref_for_pin(pid)}) is False
+    backend.unpin(loc, other)
+    backend.unpin(loc, again)
+    assert backend.is_ref_empty(loc) is True
+
+
+def test_icechunk_create_refuses_anything_already_there_and_delete_stays_inside(
+    tmp_path: Path,
+) -> None:
+    """`create` refuses a path that exists at all (not only one that already
+    holds a repository), and `delete_store` removes an Icechunk layout only:
+    a stranger's file under the prefix keeps the store."""
+    from tether.backends.icechunk import IcechunkBackend
+
+    backend = IcechunkBackend()
+    taken = tmp_path / "taken"
+    taken.mkdir()
+    (taken / "notes.txt").write_text("mine", encoding="utf-8")
+    with pytest.raises(BackendError, match="already exists"):
+        backend.create({"uri": str(taken), "branch": "main"}, owner="0a1b2c3d")
+    assert (taken / "notes.txt").exists()
+
+    loc = {"uri": str(tmp_path / "made"), "branch": "main"}
+    backend.create(loc, owner="0a1b2c3d")
+    (tmp_path / "made" / "co-located.parquet").write_bytes(b"PAR1")
+    assert backend.is_ref_empty(loc) is True  # refs say empty...
+    with pytest.raises(BackendError, match=r"co-located\.parquet"):
+        backend.delete_store(loc)  # ...but the delete stays inside the layout
+    assert (tmp_path / "made" / "co-located.parquet").exists()
+    (tmp_path / "made" / "co-located.parquet").unlink()
+    backend.delete_store(loc)
+    assert not (tmp_path / "made").exists()
+
+
+def test_icechunk_s3_delete_removes_only_the_repository_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The S3 arm of `delete_store` (`_prefix_keys` -> `_foreign_keys` ->
+    `obs.delete`) against an obstore in-memory store standing in for the
+    bucket: a stranger's object under the prefix refuses the delete and
+    keeps everything; without it, every key of the layout goes."""
+    import obstore as obs
+    from obstore.store import MemoryStore
+
+    from tether.backends.icechunk import IcechunkBackend
+
+    backend = IcechunkBackend()
+    loc = {"uri": "s3://bucket/probes/emb.icechunk", "branch": "main"}
+    bucket = MemoryStore()
+    for key in (
+        "repo",
+        "snapshots/1CECHNKREP0F1RSTCMT0",
+        "transactions/1CECHNKREP0F1RSTCMT0",
+        "manifests/08T65T4WE8K1BMG8XFEG",
+        "chunks/abc",
+        "overwritten/repo.1.X",
+        "refs/branch.main/ZZZ.json",  # a 1.x-layout name is layout too
+    ):
+        obs.put(bucket, key, b"x")
+
+    def keys() -> list[str]:
+        return sorted(str(m["path"]) for page in obs.list(bucket) for m in page)
+
+    # The repository half is what the earlier checks establish; stand it in.
+    monkeypatch.setattr(backend, "owner", lambda locator: "0a1b2c3d")
+    monkeypatch.setattr(backend, "is_ref_empty", lambda locator, ignoring=(): True)
+    monkeypatch.setattr(backend, "_prefix_store", lambda locator: bucket)
+
+    obs.put(bucket, "co-located.parquet", b"PAR1")
+    with pytest.raises(BackendError, match=r"co-located\.parquet"):
+        backend.delete_store(loc)
+    assert len(keys()) == 8  # nothing was touched
+    obs.delete(bucket, "co-located.parquet")
+
+    obs.put(bucket, ".DS_Store", b"")  # tolerated, removed with the store
+    backend.delete_store(loc)
+    assert keys() == []
+
 
 def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))

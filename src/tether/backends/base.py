@@ -63,6 +63,10 @@ class Capability(Flag):
     MERGE = auto()
     """Can three-way merge a working branch into the base branch
     (`ObjectBackend.merge`), raising `MergeConflict` when it cannot."""
+    CREATE = auto()
+    """Can make an empty store at a locator, mark it as tether's, tell when
+    nothing but tether's own refs remain in it, and remove it
+    (`ObjectBackend.create` / `owner` / `is_ref_empty` / `delete_store`)."""
 
 
 class Tier(Enum):
@@ -419,6 +423,54 @@ class ObjectBackend(Protocol):
         """Delete a working ref created by :meth:`fork`. Requires ``FORK``."""
         raise NotImplementedError(f"{self.kind} backend does not fork")
 
+    # -- store lifecycle (CREATE) ---------------------------------------- #
+    # A store tether made is a store tether may remove once nothing refers to
+    # it. Ownership is asserted by a marker *in the store*, never by a
+    # manifest: manifests arrive with clones and are untrusted input.
+    def create(self, locator: Locator, *, owner: str) -> State:
+        """Make an empty store at `locator` and write the owner marker for
+        `owner` (a dataset id); return its initial state. Requires ``CREATE``.
+
+        Raises:
+            BackendError: Anything already exists there -- `create` never
+                adopts a store someone else made.
+        """
+        raise CapabilityError(
+            f"{self.kind} backend cannot create stores", kind=self.kind
+        )
+
+    def owner(self, locator: Locator) -> str | None:
+        """The dataset id in the store's owner marker, or `None` when tether
+        never wrote one (or the store is gone). Requires ``CREATE``."""
+        raise CapabilityError(
+            f"{self.kind} backend cannot create stores", kind=self.kind
+        )
+
+    def is_ref_empty(
+        self, locator: Locator, *, ignoring: Collection[str] = ()
+    ) -> bool | None:
+        """Whether nothing remains in the store but its base branch at the
+        initial state, the owner marker, and the refs in `ignoring` (the ones a
+        gc plan is about to delete). A store with a working area (a git
+        checkout, a directory) must also hold no uncommitted content: files
+        are data whether or not a ref names them. Requires ``CREATE``.
+
+        `None` means the backend cannot tell -- and `None` means *keep*: a
+        store is only ever removed on a definite `True`.
+        """
+        raise CapabilityError(
+            f"{self.kind} backend cannot create stores", kind=self.kind
+        )
+
+    def delete_store(self, locator: Locator) -> None:
+        """Remove the store. Called only after :meth:`is_ref_empty` returned
+        `True` for it, and only for a store whose :meth:`owner` is the caller's
+        dataset -- and expected to check both again itself, right before the
+        irreversible step. Requires ``CREATE``."""
+        raise CapabilityError(
+            f"{self.kind} backend cannot create stores", kind=self.kind
+        )
+
     def base_branch(self, locator: Locator) -> str:
         """The upstream branch a locator names: what the trunk bookmark stands
         for, `promote` moves, and a trunk working copy writes to. Default
@@ -720,6 +772,10 @@ def content_state(backend: ObjectBackend, state: State | None) -> State | None:
 _B = TypeVar("_B")
 
 _GUARDED_METHODS = (
+    "create",
+    "owner",
+    "is_ref_empty",
+    "delete_store",
     "fingerprint",
     "pin",
     "unpin",

@@ -122,6 +122,21 @@ def ref_for_pin(pin_id: str) -> str:
     return f"{REF_PREFIX}{pin_id}"
 
 
+OWNER_REF_PREFIX = f"{REF_PREFIX}owner."
+
+
+def owner_ref(dataset_id: str) -> str:
+    """The marker a backend writes into a store tether *created*: a ref (tag,
+    config key, file) named for the dataset that owns it. `gc` removes a
+    created store only when this marker names the dataset asking."""
+    return f"{OWNER_REF_PREFIX}{dataset_id}"
+
+
+def owner_from_ref(ref: str) -> str | None:
+    """The dataset id an owner marker names, if `ref` is one."""
+    return ref[len(OWNER_REF_PREFIX) :] if ref.startswith(OWNER_REF_PREFIX) else None
+
+
 def listing_name(kind: str, identity: Locator, state: State) -> str:
     """Content-addressed file name for a state's listing.
 

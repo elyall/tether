@@ -8,6 +8,7 @@ without any external system.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 from tether.backends.base import (
@@ -23,7 +24,15 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError, MergeConflict
 from tether.handles import Handle, MemoryHandle
-from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
+from tether.manifest import (
+    WORKING_REF_PREFIX,
+    Locator,
+    Pin,
+    State,
+    owner_from_ref,
+    owner_ref,
+    ref_for_pin,
+)
 
 
 @dataclass
@@ -33,6 +42,8 @@ class _System:
     tags: dict[str, str] = field(default_factory=dict)
     parents: dict[str, list[str]] = field(default_factory=dict)
     counter: int = 0
+    owner: str | None = None
+    """Dataset id written by `create`; the store's owner marker."""
 
 
 class MemoryStore:
@@ -40,8 +51,13 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self.systems: dict[str, _System] = {}
+        self.deleted: set[str] = set()
+        """Systems `delete_store` removed: reading one is an error, not a
+        silent re-creation, until `create` makes it again."""
 
     def system(self, name: str) -> _System:
+        if name in self.deleted:
+            raise BackendError(f"system {name!r} was deleted", kind="memory")
         sys = self.systems.get(name)
         if sys is None:
             sys = _System()
@@ -112,6 +128,7 @@ class MemoryBackend(ObjectBackend):
         | Capability.HISTORY
         | Capability.PROMOTE
         | Capability.MERGE
+        | Capability.CREATE
     )
 
     def __init__(self, store: MemoryStore | None = None) -> None:
@@ -119,7 +136,11 @@ class MemoryBackend(ObjectBackend):
 
     # -- helpers --------------------------------------------------------- #
     def _system(self, locator: Locator) -> str:
-        return str(locator["system"])
+        # `system`, or the CLI's positional locator (`uri`), as other kinds do.
+        name = locator.get("system") or locator.get("uri")
+        if not name:
+            raise BackendError("memory locator needs 'system'", kind="memory")
+        return str(name)
 
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
@@ -236,6 +257,45 @@ class MemoryBackend(ObjectBackend):
     def list_working_refs(self, locator: Locator) -> list[str]:
         sys = self.store.system(self._system(locator))
         return sorted(b for b in sys.branches if b.startswith(WORKING_REF_PREFIX))
+
+    # -- store lifecycle ------------------------------------------------- #
+    def create(self, locator: Locator, *, owner: str) -> State:
+        name = self._system(locator)
+        if name in self.store.systems:
+            raise BackendError(f"system {name!r} already exists", kind="memory")
+        self.store.deleted.discard(name)
+        sys = self.store.system(name)
+        sys.owner = owner
+        sys.tags[owner_ref(owner)] = sys.branches["main"]
+        return self.fingerprint(locator, None)
+
+    def owner(self, locator: Locator) -> str | None:
+        name = self._system(locator)
+        if name in self.store.deleted or name not in self.store.systems:
+            return None
+        return self.store.systems[name].owner
+
+    def is_ref_empty(
+        self, locator: Locator, *, ignoring: Collection[str] = ()
+    ) -> bool | None:
+        name = self._system(locator)
+        if name not in self.store.systems:
+            return None
+        sys = self.store.systems[name]
+        initial = f"{name}:s0"
+        base = self._base_branch(locator)
+        stray = [
+            b for b, sid in sys.branches.items() if b not in ignoring and b != base
+        ]
+        stray += [
+            t for t in sys.tags if t not in ignoring and owner_from_ref(t) is None
+        ]
+        return not stray and sys.branches.get(base) == initial
+
+    def delete_store(self, locator: Locator) -> None:
+        name = self._system(locator)
+        self.store.systems.pop(name, None)
+        self.store.deleted.add(name)
 
     def _source_sid(self, name: str, source: str | Pin | State) -> str:
         sys = self.store.system(name)

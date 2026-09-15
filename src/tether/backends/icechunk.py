@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import contextlib
 import re
-from collections.abc import Iterator
+import shutil
+from collections.abc import Collection, Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -27,9 +29,16 @@ from tether.backends.base import (
     register_backend,
     wrap_library_errors,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, CapabilityError
 from tether.handles import Handle, IcechunkHandle
-from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
+from tether.manifest import (
+    WORKING_REF_PREFIX,
+    Locator,
+    Pin,
+    Policy,
+    State,
+    ref_for_pin,
+)
 
 
 @wrap_library_errors
@@ -46,7 +55,10 @@ class IcechunkBackend(ObjectBackend):
         | Capability.DIFF
         | Capability.HISTORY
         | Capability.PROMOTE
+        | Capability.CREATE
     )
+    _OWNER_KEY = "tether.owner"
+    """Repository metadata key holding the owning dataset id (`create`)."""
 
     @staticmethod
     def _library_errors() -> tuple[type[BaseException], ...]:
@@ -366,6 +378,197 @@ class IcechunkBackend(ObjectBackend):
     def list_working_refs(self, locator: Locator) -> list[str]:
         branches = self._repo(locator).list_branches()
         return sorted(b for b in branches if b.startswith(WORKING_REF_PREFIX))
+
+    # -- store lifecycle ------------------------------------------------- #
+    LAYOUT = frozenset(
+        {
+            # icechunk 1.x
+            "config.yaml",
+            "refs",
+            # 2.x
+            "repo",
+            "overwritten",
+            # both
+            "snapshots",
+            "transactions",
+            "manifests",
+            "chunks",
+        }
+    )
+    """Top-level names an Icechunk repository writes under its prefix (1.x and
+    2.x layouts). `delete_store` removes nothing else: a key outside this set
+    means something other than this repository lives under the prefix."""
+
+    @staticmethod
+    def _lifecycle_api() -> str | None:
+        """Why this icechunk cannot do CREATE, or `None` when it can."""
+        import icechunk as ic
+
+        missing = [
+            name
+            for name in ("exists", "create", "metadata", "update_metadata")
+            if not hasattr(ic.Repository, name)
+        ]
+        if missing:
+            return (
+                "this icechunk lacks Repository."
+                + ", Repository.".join(missing)
+                + " (2.2.0 is known to work); upgrade to create stores"
+            )
+        return None
+
+    def effective_capabilities(self, locator: Locator, policy: Policy) -> Capability:
+        caps = self.capabilities
+        if self._lifecycle_api() is not None:
+            caps &= ~Capability.CREATE
+        return caps
+
+    def _require_lifecycle_api(self) -> None:
+        why = self._lifecycle_api()
+        if why is not None:
+            raise CapabilityError(why, kind="icechunk")
+
+    def _prefix_store(self, locator: Locator) -> Any:
+        """An obstore store rooted at an `s3://` URI, with the object's credentials."""
+        from obstore.store import from_url
+
+        from tether.credentials import storage_options
+
+        options: dict[str, Any] = dict(storage_options(self.secrets_for(locator)))
+        return from_url(self._uri(locator), **options)
+
+    def _prefix_keys(self, locator: Locator) -> list[str]:
+        """Every key under the URI's prefix (`s3://`), relative to it."""
+        import obstore as obs
+
+        store = self._prefix_store(locator)
+        return [str(meta["path"]) for page in obs.list(store) for meta in page]
+
+    def create(self, locator: Locator, *, owner: str) -> State:
+        import icechunk as ic
+
+        self._require_lifecycle_api()
+        uri = self._uri(locator)
+        parsed = urlparse(uri)
+        # "Anything there" is the refusal, not just "a repository there": a
+        # directory with files or a prefix with objects is someone's data, and
+        # `delete_store` would later take the whole prefix.
+        if parsed.scheme in ("", "file") and Path(parsed.path or uri).exists():
+            raise BackendError(
+                f"{parsed.path or uri} already exists; `create` never adopts it",
+                kind="icechunk",
+            )
+        if parsed.scheme == "s3" and self._prefix_keys(locator):
+            raise BackendError(
+                f"objects already exist under {uri}; `create` never adopts them",
+                kind="icechunk",
+            )
+        storage = self._storage(locator)
+        if ic.Repository.exists(storage):  # pragma: no cover - covered above
+            raise BackendError(
+                f"an icechunk repository already exists at {uri}; `create` never "
+                "adopts one",
+                kind="icechunk",
+            )
+        repo = ic.Repository.create(storage)
+        # The marker lives in the repository's own metadata: only a tether that
+        # made the store writes it, and a clone's manifest cannot forge it.
+        repo.update_metadata({self._OWNER_KEY: owner})
+        self._repos[uri] = repo
+        return self.fingerprint(locator, None)
+
+    def owner(self, locator: Locator) -> str | None:
+        import icechunk as ic
+
+        self._require_lifecycle_api()
+        if not ic.Repository.exists(self._storage(locator)):
+            return None
+        value = self._repo(locator).metadata.get(self._OWNER_KEY)
+        return str(value) if value else None
+
+    def is_ref_empty(
+        self, locator: Locator, *, ignoring: Collection[str] = ()
+    ) -> bool | None:
+        import icechunk as ic
+
+        self._require_lifecycle_api()
+        if not ic.Repository.exists(self._storage(locator)):
+            return None
+        repo = self._repo(locator)
+        base = self._base_branch(locator)
+        stray = [b for b in repo.list_branches() if b not in ignoring and b != base]
+        # A plan names a pin as `tether.<id>`; the live tag may be a later
+        # generation (`tether.<id>.2`) if that name was burnt. Match on the
+        # pin id, as `unpin` does.
+        ignored_pins = {self._pin_id_of(r) for r in ignoring}
+        stray += [
+            t
+            for t in repo.list_tags()
+            if t not in ignoring and self._pin_id_of(t) not in ignored_pins
+        ]
+        if stray:
+            return False
+        # The base branch still at the repository's first snapshot: nothing
+        # was ever committed to it.
+        return len(list(repo.ancestry(branch=base))) == 1
+
+    _TOLERATED = frozenset({".DS_Store"})
+    """Names that are not Icechunk's but not anyone's data either (a Finder
+    visit); removed with the store rather than keeping it forever."""
+
+    def _foreign_keys(self, names: Collection[str]) -> list[str]:
+        """Top-level names under the prefix that are not Icechunk's."""
+        return sorted(
+            {
+                n
+                for n in names
+                if n.split("/", 1)[0] not in self.LAYOUT
+                and n.split("/", 1)[0] not in self._TOLERATED
+            }
+        )
+
+    def delete_store(self, locator: Locator) -> None:
+        uri = self._uri(locator)
+        parsed = urlparse(uri)
+        # The caller checked; check again here, where the delete is.
+        if self.owner(locator) is None or self.is_ref_empty(locator) is not True:
+            raise BackendError(
+                f"{uri} is not an empty repository tether created; not removing it",
+                kind="icechunk",
+            )
+        if parsed.scheme in ("", "file"):
+            root = Path(parsed.path or uri)
+            foreign = self._foreign_keys([p.name for p in root.iterdir()])
+            if foreign:
+                raise BackendError(
+                    f"{uri} holds more than an icechunk repository "
+                    f"({', '.join(foreign)}); not removing it",
+                    kind="icechunk",
+                )
+            self._repos.pop(uri, None)
+            shutil.rmtree(root)
+            return
+        if parsed.scheme == "s3":
+            # Icechunk has no "delete repository"; remove the repository's
+            # objects under the prefix through obstore -- and only those. A
+            # nested or co-located store under the same prefix stops this.
+            import obstore as obs
+
+            keys = self._prefix_keys(locator)
+            foreign = self._foreign_keys(keys)
+            if foreign:
+                raise BackendError(
+                    f"{uri} holds objects that are not this repository's "
+                    f"({', '.join(foreign[:5])}); not removing it",
+                    kind="icechunk",
+                )
+            self._repos.pop(uri, None)
+            if keys:
+                obs.delete(self._prefix_store(locator), keys)
+            return
+        raise BackendError(
+            f"unsupported icechunk storage scheme: {parsed.scheme!r}", kind="icechunk"
+        )
 
     PROMOTE_HINT = (
         "Icechunk has no merge; re-apply the writes on a fresh fork of the base "

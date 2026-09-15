@@ -9,10 +9,13 @@ clone; otherwise they are durable only locally (documented).
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
+from types import MappingProxyType
 
 from tether.backends.base import (
     Capability,
@@ -37,7 +40,11 @@ class GitBackend(ObjectBackend):
     SAFE_CONFIG_KEYS = frozenset()  # git_path / jj_path: secrets.toml only
     # A change id is derived from the sha (and only present with jj); the same
     # sha must pin identically with or without jj installed.
-    VOLATILE_KEYS = frozenset({"change_id"})
+    VOLATILE_KEYS = frozenset({"change_id", "dirty"})
+    """`change_id` is jj's view of the same commit; `dirty` is the checkout's
+    condition, not the commit's -- two branches at one sha are the same state
+    whether or not one of them is checked out with stray files. `pin` still
+    reads the full state and refuses a dirty tree."""
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -47,6 +54,7 @@ class GitBackend(ObjectBackend):
         | Capability.ATOMIC_REF
         | Capability.DIFF
         | Capability.HISTORY
+        | Capability.CREATE
         | Capability.PROMOTE
         | Capability.MERGE
     )
@@ -80,11 +88,18 @@ class GitBackend(ObjectBackend):
         if path is not None:
             _guard(str(path), "path")
 
-    def _run(self, locator: Locator, *args: str, check: bool = True) -> str:
+    def _run(
+        self,
+        locator: Locator,
+        *args: str,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> str:
         proc = subprocess.run(
             [self._git, "-C", str(self._path(locator)), *args],
             capture_output=True,
             text=True,
+            env={**os.environ, **env} if env else None,
         )
         if check and proc.returncode != 0:
             raise BackendError(
@@ -325,6 +340,122 @@ class GitBackend(ObjectBackend):
             f"refs/heads/{WORKING_REF_PREFIX}*",
         )
         return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+    # -- store lifecycle ------------------------------------------------- #
+    _OWNER_KEY = "tether.owner"
+    """`git config` key holding the owning dataset id (`create`)."""
+
+    def create(self, locator: Locator, *, owner: str) -> State:
+        path = self._path(locator)
+        if path.exists():
+            raise BackendError(
+                f"{path} already exists; `create` never adopts it", kind="git"
+            )
+        base = str(locator.get("ref", "main"))
+        _guard(base, "ref")
+        path.mkdir(parents=True)
+        # One empty root commit so the base branch exists and can be pinned,
+        # forked, and fingerprinted; a repository with an unborn HEAD cannot.
+        # Author, dates, and tree are fixed, so every store tether creates
+        # has the *same* root sha (`EMPTY_ROOT_SHA`): `is_ref_empty` compares
+        # the base to it, and two creates fingerprint identically.
+        self._run(locator, "init", "-q", "-b", base)
+        self._run(locator, "config", self._OWNER_KEY, owner)
+        root = self._run(
+            locator,
+            "commit-tree",
+            self.EMPTY_TREE,
+            "-m",
+            "tether: created store",
+            env=dict(self._ROOT_ENV),
+        )
+        if root != self.EMPTY_ROOT_SHA:  # pragma: no cover - git would have to change
+            raise BackendError(
+                f"unexpected root commit {root} (expected {self.EMPTY_ROOT_SHA})",
+                kind="git",
+            )
+        self._run(locator, "update-ref", f"refs/heads/{base}", root)
+        self._run(locator, "reset", "-q", "--hard", root)
+        return self.fingerprint(locator, None)
+
+    EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    """git's well-known empty tree object."""
+    _ROOT_ENV = MappingProxyType(
+        {
+            "GIT_AUTHOR_NAME": "tether",
+            "GIT_AUTHOR_EMAIL": "tether@localhost",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_NAME": "tether",
+            "GIT_COMMITTER_EMAIL": "tether@localhost",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+        }
+    )
+    EMPTY_ROOT_SHA = "5a2cfa770badaceb6c6de5171fdf82c871fa40de"
+    """The root commit `create` makes: empty tree, fixed author and dates.
+    Verified against git at create time; the value is a constant so a
+    reviewer can check a created store by eye."""
+
+    def owner(self, locator: Locator) -> str | None:
+        path = self._path(locator)
+        if not (path / ".git").exists():
+            return None
+        value = self._run(locator, "config", "--get", self._OWNER_KEY, check=False)
+        return value or None
+
+    def is_ref_empty(
+        self, locator: Locator, *, ignoring: Collection[str] = ()
+    ) -> bool | None:
+        path = self._path(locator)
+        if not (path / ".git").exists():
+            return None
+        base = str(locator.get("ref", "main"))
+        refs = self._run(
+            locator,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/",
+            "refs/tags/",
+        ).splitlines()
+        stray = [r.strip() for r in refs if r.strip() and r.strip() not in ignoring]
+        if stray != [base]:
+            return False
+        # The base branch still *at* the root commit `create` made -- the same
+        # sha, not merely one commit deep: an amended root with files in it
+        # is one commit too.
+        head = self._run(
+            locator,
+            "rev-parse",
+            "--verify",
+            "-q",
+            "--end-of-options",
+            f"{_guard(base, 'ref')}^{{commit}}",
+            check=False,
+        )
+        if head != self.EMPTY_ROOT_SHA:
+            return False
+        # Refs are not the whole repository: files someone put in the working
+        # tree -- untracked, staged, even ignored -- are data too, and
+        # `delete_store` would take them with the directory.
+        dirty = self._run(
+            locator, "status", "--porcelain", "--ignored", "--untracked-files=all"
+        )
+        return not dirty.strip()
+
+    def delete_store(self, locator: Locator) -> None:
+        path = self._path(locator)
+        if not (path / ".git").exists() or self.owner(locator) is None:
+            raise BackendError(
+                f"{path} is not a repository tether created; not removing it",
+                kind="git",
+            )
+        # The caller checked; check again here, where the rmtree is.
+        if self.is_ref_empty(locator) is not True:
+            raise BackendError(
+                f"{path} is not empty (refs, commits, or files in the working "
+                "tree); not removing it",
+                kind="git",
+            )
+        shutil.rmtree(path)
 
     # -- promote / merge ------------------------------------------------- #
     def _checked_out(self, locator: Locator) -> str | None:

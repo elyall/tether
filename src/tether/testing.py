@@ -45,6 +45,9 @@ class BackendHarness(Protocol):
     def mutate(self, locator: Locator, working_ref: str | None) -> None:
         """Cause the state at ``working_ref`` (or the base) to change."""
 
+    # A ``CREATE`` backend's harness also provides
+    # ``fresh_locator(self) -> Locator``: a locator where no store exists yet.
+
 
 def _content_checks(h: BackendHarness, loc: Locator, s1: dict, s2: dict) -> None:
     """Volatile keys must never be the only thing that changed."""
@@ -213,6 +216,57 @@ def _fork_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> None
     b.delete_working_ref(loc, wref2)
 
 
+def _create_checks(h: BackendHarness) -> None:
+    """The store lifecycle: create -> own -> empty -> not empty -> empty again
+    -> delete -> gone -> create again."""
+    b = h.backend
+    fresh = getattr(h, "fresh_locator", None)
+    assert callable(fresh), (
+        f"{b.kind} declares CREATE: its harness must provide fresh_locator()"
+    )
+    loc = fresh()
+    owner = "0a1b2c3d"
+    state = b.create(loc, owner=owner)
+    assert isinstance(state, dict), "create must return the initial state"
+    assert b.owner(loc) == owner, "owner marker must name the creator"
+    assert b.is_ref_empty(loc) is True, "a fresh store is ref-empty"
+    assert content_state(b, b.fingerprint(loc, None)) == content_state(b, state)
+    try:
+        b.create(loc, owner="ffffffff")
+    except BackendError:
+        pass
+    else:
+        raise AssertionError("create must refuse a store that already exists")
+    assert b.owner(loc) == owner, "a refused create must not re-own the store"
+    if Capability.FORK in b.capabilities:
+        # Writes on a fork make it not empty; deleting the fork makes it empty
+        # again -- and the plan can say so ahead of time with `ignoring`.
+        name = working_ref_name(CONFORMANCE_DATASET, "create-probe")
+        wref = b.fork(loc, state, name)
+        h.mutate(loc, wref)
+        assert b.is_ref_empty(loc) is False, "a written fork means not empty"
+        assert b.is_ref_empty(loc, ignoring={wref}) is True, (
+            "ignoring the fork the plan deletes, the store is empty"
+        )
+        b.delete_working_ref(loc, wref)
+        assert b.is_ref_empty(loc) is True
+    else:
+        h.mutate(loc, None)
+        assert b.is_ref_empty(loc) is False, "a written base means not empty"
+    if b.is_ref_empty(loc):
+        b.delete_store(loc)
+        assert b.owner(loc) is None, "a deleted store has no owner"
+        try:
+            b.fingerprint(loc, None)
+        except BackendError:
+            pass
+        else:
+            raise AssertionError("fingerprint of a deleted store must raise")
+        again = b.create(loc, owner=owner)  # the name is free again
+        assert content_state(b, again) == content_state(b, state)
+        b.delete_store(loc)
+
+
 def _addressable_checks(h: BackendHarness, loc: Locator, state: dict) -> None:
     b = h.backend
     assert b.verify(loc, state, None, deep=False).status in (
@@ -263,3 +317,6 @@ def run_conformance(harness: BackendHarness) -> None:
         if Capability.FORK in caps:
             _fork_checks(harness, loc, state, pid)
         _unpin_checks(harness, loc, state, pid)
+
+    if Capability.CREATE in caps:
+        _create_checks(harness)

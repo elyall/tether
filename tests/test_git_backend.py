@@ -64,9 +64,88 @@ class GitHarness:
         # branch (`branch -f`), which is what a fork reset does.
         _git(path, "checkout", "-q", locator["ref"])
 
+    def fresh_locator(self) -> dict:
+        self._n += 1
+        return {"path": str(self.tmp / f"fresh{self._n}"), "ref": "main"}
+
 
 def _default_is_main(path: Path) -> bool:
     return _git(path, "symbolic-ref", "--short", "HEAD") == "main"
+
+
+def test_git_created_repo_with_files_in_the_working_tree_is_not_empty(
+    tmp_path: Path,
+) -> None:
+    """Refs are not the whole repository: a file someone dropped into a
+    created checkout -- untracked, staged, or ignored -- is data that
+    `delete_store` would take with the directory. Any of them means keep."""
+    backend = GitBackend()
+    path = tmp_path / "made"
+    loc = {"path": str(path), "ref": "main"}
+    backend.create(loc, owner="0a1b2c3d")
+    assert backend.is_ref_empty(loc) is True
+
+    (path / "notes.txt").write_text("keep me\n", encoding="utf-8")  # untracked
+    assert backend.is_ref_empty(loc) is False
+    _git(path, "add", "notes.txt")  # staged, uncommitted
+    assert backend.is_ref_empty(loc) is False
+    _git(path, "rm", "-q", "--cached", "notes.txt")
+    (path / "notes.txt").unlink()
+    assert backend.is_ref_empty(loc) is True
+
+    (path / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    (path / "scratch.tmp").write_text("x", encoding="utf-8")  # ignored
+    assert backend.is_ref_empty(loc) is False
+    (path / "scratch.tmp").unlink()
+    (path / ".gitignore").unlink()
+    assert backend.is_ref_empty(loc) is True
+    backend.delete_store(loc)
+    assert not path.exists()
+
+
+def test_git_created_repos_share_one_root_and_an_amended_root_is_not_empty(
+    tmp_path: Path,
+) -> None:
+    """`create` makes the same root commit every time (fixed tree, author,
+    dates), so two creates fingerprint identically and `is_ref_empty` can
+    compare the base to that sha -- which also catches an amended root that
+    smuggled files in while staying one commit deep."""
+    backend = GitBackend()
+    a = {"path": str(tmp_path / "a"), "ref": "main"}
+    b = {"path": str(tmp_path / "b"), "ref": "main"}
+    sa = backend.create(a, owner="0a1b2c3d")
+    sb = backend.create(b, owner="0a1b2c3d")
+    assert sa["sha"] == sb["sha"] == GitBackend.EMPTY_ROOT_SHA
+    assert backend.is_ref_empty(a) is True
+
+    path = Path(a["path"])
+    (path / "data.csv").write_text("1,2,3\n", encoding="utf-8")
+    _git(path, "add", "data.csv")
+    _git(path, "commit", "-q", "--amend", "--no-edit")
+    assert _git(path, "rev-list", "--count", "main") == "1"  # still one commit...
+    assert backend.is_ref_empty(a) is False  # ...but not the one we made
+    with pytest.raises(BackendError, match="not empty"):
+        backend.delete_store(a)
+    assert path.exists()
+
+
+def test_git_dirty_checkout_is_the_same_state_as_its_sha(tmp_path: Path) -> None:
+    """`dirty` describes the checkout, not the commit: a fork at the same sha
+    as a base that has stray files is *equal* to it (so gc does not call the
+    fork "unpinned writes"), while `pin` still refuses the dirty tree."""
+    from tether.backends.base import content_state
+
+    backend = GitBackend()
+    loc = {"path": str(tmp_path / "made"), "ref": "main"}
+    state = backend.create(loc, owner="0a1b2c3d")
+    wref = backend.fork(loc, state, "tether.ws.0a1b2c3d.probe")
+    (Path(loc["path"]) / "stray.txt").write_text("x", encoding="utf-8")
+    base = backend.fingerprint(loc, None)
+    fork = backend.fingerprint(loc, wref)
+    assert base["dirty"] is True and fork.get("dirty") is not True
+    assert content_state(backend, base) == content_state(backend, fork)
+    with pytest.raises(BackendError, match="dirty"):
+        backend.pin(loc, base, "0a1b2c3d.0123456789abcdef")
 
 
 def test_git_fork_onto_a_branch_at_the_source_leaves_it_alone(tmp_path: Path) -> None:
