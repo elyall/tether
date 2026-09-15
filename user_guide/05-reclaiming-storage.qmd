@@ -275,6 +275,104 @@ forgets the ref, and the branch itself is evaluated by the next
 `--prune-bookmarks` like any other stray. (Lance refuses to delete a branch a
 tag still points at; tether leaves it and moves on.)
 
+### Stores tether created
+
+Everything above releases *refs* inside stores that existed before tether
+saw them, and tether never deletes such a store. A store made with
+`tether add KEY LOCATOR --kind KIND --create` (or `repo.add(..., create=True)`;
+`repo.create(key, kind, locator)` makes, registers, and opens in one call) is
+different: tether made it, so tether may take it away again once it is plainly
+garbage. The use case is an ephemeral environment: one actor forks what it
+needs, creates the stores it needs, tests, and throws the whole thing away,
+leaving the world as it found it. Two things record what tether made,
+neither of them in history:
+
+- **An owner marker in the store**, written at creation and naming the dataset
+  (Icechunk repository metadata, `git config tether.owner`, a `.tether-owner`
+  file in a directory). Manifests are untrusted input -- a clone can say
+  anything -- so a manifest never authorizes a delete; only the marker does.
+- **A repository-wide index**, `tether-created.jsonl` next to the repository
+  lock in the VCS's shared store (`.jj/repo/` or `.git/`): shared by every
+  checkout of this clone, never committed. History cannot hold this memory:
+  when a fork is abandoned, its commits -- and the manifest that named the
+  store -- vanish, and nothing would remember the store exists.
+
+`gc --delete-stores` considers these stores last, after the pin and branch
+decisions. It is opt-in: a deleted store has no `repair`, and `gc` only knows
+the history this clone has fetched. A store is planned for `delete-store`
+only when all five hold:
+
+1. its owner marker names this dataset (a marker naming another dataset is
+   noted and left alone; a store with no marker is only dropped from the
+   index -- `forget-store`);
+2. no manifest in visible history, in this working tree, or in any live
+   checkout's working tree names it;
+3. every `tether.ws.*` branch of *this dataset* in it belongs to a bookmark
+   this clone can account for: the bookmark the store was created on (the
+   index remembers it), a live bookmark, or one that a `new` in any live
+   checkout of this clone made. A same-dataset branch of a bookmark this
+   clone never had may be another clone or environment that fetched the
+   probe and is working in the store -- its commits are not in your history,
+   so nothing else would protect it. The plan then touches *nothing* in that
+   store, your own pins included (same-dataset commits share
+   content-addressed pins), and says so;
+4. everything of tether's in it is released by the same plan -- its pins are
+   unpinned, and its accounted-for branches are deleted under the
+   `--prune-bookmarks` rules above (without `--prune-bookmarks` a branch
+   blocks the store; with unpinned writes it needs `--force-prune`);
+5. the backend confirms that nothing else remains: the base branch at its
+   initial state, the marker, the refs the plan is about to delete, and --
+   for a store with a working area, such as a git checkout -- no uncommitted
+   files. `None` (cannot tell) means keep.
+
+Otherwise the plan carries a `keep-store` that names what is in the way --
+a branch or pin of another dataset, a branch of a bookmark you never had,
+writes on the base branch, a backend that cannot tell. `delete-store` runs
+after every other action, behind a `store_empty` precondition that is asked
+again with nothing ignored right before the delete, and the backend checks
+owner and emptiness once more inside `delete_store` itself; a tag or branch
+that appeared in between stales the plan and nothing in it runs. `undo gc`
+reports a deleted store as irreversible.
+
+```bash
+tether gc --prune-bookmarks --delete-stores               # shows delete-store / keep-store
+tether gc --prune-bookmarks --delete-stores --no-dry-run  # ...and applies it
+tether gc --prune-bookmarks --delete-stores --force-prune # ...overriding rules 3 and 4
+```
+
+Fetch every bookmark before you run it: a bookmark another clone pushed is a
+reference `gc` can only count once it is in your history.
+
+Two more indexes and one escape hatch round this out:
+
+- **Stores this clone touched.** Every store a checkout of this clone forks a
+  branch in or pins is recorded in `tether-touched.jsonl` beside the created
+  index. A plain `gc` releases this dataset's dead refs in those stores even
+  when no manifest names them any more -- which is exactly the state an
+  abandoned bookmark leaves behind. So when another actor writes ephemeral
+  refs into *your* created store and then abandons them, *their* next `gc`
+  cleans their refs out (their `gc` respects rule 3 the same way: a branch of
+  a bookmark their clone never had stops them), and your next
+  `--delete-stores` finds the store empty and finishes. An entry is dropped
+  (`forget-touched`) once nothing of the dataset's is left in the store.
+- **A store whose creator is gone.** An ephemeral environment's clone can die
+  with its created index. Any clone of the dataset can still reclaim such a
+  store by naming it -- `gc --delete-stores --store KIND=LOCATOR` (repeatable;
+  `LOCATOR` is the positional locator, the `uri`) -- under exactly the same
+  five rules, the owner marker in the store being the authority. A store with
+  no marker is refused whoever asks.
+
+```bash
+tether gc --prune-bookmarks --store icechunk=s3://bucket/probes/emb.icechunk --no-dry-run
+```
+
+Two consequences worth knowing. A clone of the dataset on another machine has
+its own (empty) index and does not reclaim the stores *you* created on its
+own -- it can be told to, by locator. And a store created on the trunk and
+written to through its base branch is kept forever by rule 5 (writes on the
+base branch are not tether's refs); create on a bookmark when you mean to
+throw the store away.
+
 ## Recap
 
 - Plans: `--dry-run` shows store writes; `--plan FILE` saves them;
@@ -288,3 +386,7 @@ tag still points at; tether leaves it and moves on.)
   already holds their head (or nothing was written), `--force-prune` deletes
   them regardless; reclaiming the bytes is the system's own expiry/cleanup
   step.
+- A store `add --create` made is deleted by `gc --delete-stores` once nothing
+  references it, every branch in it is one this clone can account for, and
+  only tether's own refs remain; the owner marker in the store and the
+  untracked index in your repository decide, never a manifest.

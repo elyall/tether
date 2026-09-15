@@ -18,7 +18,22 @@ title: "Configuration"
                               #   states (so `diff --content` can compare them); pruned by gc
     workspace.toml            # untracked: workspace_id, bookmark, working refs, pending forks, base states, fork points, last snapshot
     ops.jsonl                 # untracked: the operation log -- every store write, what it did, what it replaced
+
+<vcs shared dir>/           # .jj/repo/ or .git/ -- one per clone, shared by every checkout, never committed
+  tether.lock                 # the repository-wide lock (add, gc, abandon, promote hold it)
+  tether-created.jsonl        # stores this clone created with `add --create`: dataset id, kind, identity,
+                              #   locator, key, when, the bookmark it was made on -- what `gc --delete-stores`
+                              #   may delete once nothing references them
+  tether-touched.jsonl        # stores this clone forked a branch in or pinned: where `gc` looks for this
+                              #   dataset's dead refs once no manifest names the store any more
 ```
+
+Both indexes live with the repository rather than in history or a checkout
+on purpose: an abandoned fork takes with it the manifest that named the
+store, and `forget-workspace` takes the checkout's own files; the memory of
+what tether made, and where it wrote, has to survive both. They are only
+memories -- the owner marker the backend wrote into the store decides whose
+the store is (see [Reclaiming Storage](05-reclaiming-storage.qmd)).
 
 `pin_id = <dataset-id>.<blake2b(kind, locator identity, content state)[:16]>`;
 the native ref is `tether.<pin_id>`. Identical state yields the same pin within

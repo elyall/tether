@@ -207,7 +207,11 @@ class OpEntry:
         if self.command == "gc":
             n_pins = sum(len(v) for v in (r.get("unpinned") or {}).values())
             n_br = sum(len(v) for v in (r.get("deleted_working_refs") or {}).values())
-            return f"unpinned {n_pins}, deleted {n_br} branch(es)"
+            text = f"unpinned {n_pins}, deleted {n_br} branch(es)"
+            n_stores = len(r.get("deleted_stores") or {})
+            if n_stores:
+                text += f", deleted {n_stores} store(s)"
+            return text
         if self.command == "promote":
             keys = sorted({*(r.get("fast_forwarded") or {}), *(r.get("merged") or {})})
             return f"promoted {', '.join(keys)}" if keys else "nothing promoted"
@@ -217,7 +221,8 @@ class OpEntry:
                 f"{len(r.get('updated') or [])}, removed {len(r.get('removed') or [])}"
             )
         if self.command in ("add", "remove"):
-            return str(r.get("key", ""))
+            key = str(r.get("key", ""))
+            return f"{key} (created store)" if r.get("created") else key
         if self.command == "set":
             return ", ".join(
                 f"{k}: " + " ".join(f"{f}={v[0]}->{v[1]}" for f, v in d.items())

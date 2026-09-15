@@ -191,6 +191,57 @@ credential option out of `tether.toml` into `.tether/secrets.toml`.
   section, then the environment -- an object with no entry behaves as before.
   tether warns when the file is readable by other users and never prints its
   contents. `ObjectBackend.configure_secrets`/`secrets_for` are the hooks.
+- **Store lifecycle: create and reclaim.** `tether add KEY LOCATOR --kind KIND
+  --create` (`Repo.add(..., create=True)`) has the backend make an empty store,
+  write an owner marker *in the store* naming the dataset, and record it in a
+  repository-wide untracked index (`tether-created.jsonl` next to the
+  repository lock in `.jj/repo/` or `.git/`); the manifest carries
+  `origin = "created"` and `status` shows `(created)`. On a non-trunk bookmark
+  the new store's working branch is forked at once, so no second `new` is
+  needed before the first write. `Repo.create(key, kind, locator)` is
+  `add(create=True)` plus `open` -- a throwaway environment's whole setup in
+  one line; `open` itself is unchanged. `add --create` journals before it
+  writes to the store, like every other store-writing command. `undo add`
+  removes the store `--create` made while it is still empty.
+- `gc --delete-stores` (opt-in: a deleted store has no `repair`, and `gc`
+  only knows the history this clone has fetched) reclaims created stores
+  after the pin and branch decisions. A store is planned for `delete-store`
+  -- last in the plan, behind a `store_empty` precondition re-checked right
+  before the delete -- when its marker names this dataset, no manifest in
+  history or in any live checkout's working tree references it, every
+  same-dataset branch in it belongs to a bookmark this clone can account for
+  (the one it was created on, a live one, or one a `new` in any live checkout
+  made -- a branch of a bookmark this clone never had may be another actor's,
+  and the plan then touches nothing in the store), its own pins and branches
+  are released by the plan (branches under the `--prune-bookmarks` rules),
+  and the backend confirms nothing else remains. Anything else is a
+  `keep-store` naming what remains; a store already gone is a `forget-store`.
+  `GcReport.deleted_stores` / `kept_stores` / `forgotten_stores` report it;
+  `undo gc` reports a deleted store as irreversible. A clone's manifest never
+  authorizes a delete: only the marker and the index in your own repository
+  do. `gc --store KIND=LOCATOR` (`plan_gc(stores=[...])`) names a created
+  store to consider when the creator's clone -- and its index -- is gone.
+- `gc` looks inside the stores this clone has *touched*: every store a
+  checkout forks a branch in or pins is recorded in `tether-touched.jsonl`
+  beside the created index, and a plain `gc` releases this dataset's dead
+  refs there once no manifest names the store any more (an abandoned bookmark
+  took the manifest with it). Before, those refs stayed forever and kept the
+  store's creator from ever reclaiming it. An entry is dropped
+  (`forget-touched`) once nothing of the dataset's is left. `memory` accepts
+  the positional `uri` locator like other kinds.
+- Backend contract: `Capability.CREATE` with `create(locator, *, owner)`,
+  `owner(locator)`, `is_ref_empty(locator, *, ignoring=())` (`None` means
+  keep; a working area must hold no uncommitted content), and
+  `delete_store(locator)` (re-checks both, removes only the store's own
+  layout); implemented for `memory`, `icechunk` (repository metadata marker;
+  refuses a non-empty path or prefix; deletes only Icechunk's top-level names,
+  1.x and 2.x layouts), `git` (`init` with one fixed empty root commit shared by
+  every created repository; `git config tether.owner`; a dirty working tree or
+  an amended root is not empty), and `file`
+  (a local directory with a `.tether-owner` marker the directory walk skips).
+  Lance, Delta, and Iceberg need a schema and do not declare it. The
+  conformance suite walks the lifecycle for harnesses that provide
+  `fresh_locator()`.
 
 ## [0.1.0a10] - 2026-09-13
 

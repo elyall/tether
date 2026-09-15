@@ -1,0 +1,6 @@
+abandoned d4756b6b8e3d
+plan: gc (2 write(s))
+  forget-working-ref  scratch/probe  tether.ws.0a1b2c3d.probe  object removed; branch left in place (gc --prune-bookmarks evaluates it)
+               unpin  scratch/probe  [icechunk] tether.0a1b2c3d.569de089097300d2  in a store no manifest names (touched by this clone)
+                      scratch/probe: ~/data/probe.icechunk: kept working branch tether.ws.0a1b2c3d.probe (gc --prune-bookmarks evaluates it)
+(not applied; `tether gc --no-dry-run` releases these, or re-run with --gc)

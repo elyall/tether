@@ -40,17 +40,26 @@ Common conventions:
 
 | Kind | Extra | Maturity | Tier | Flags |
 | --- | --- | --- | --- | --- |
-| `file` | -- (local) / `objectstore` | stable | Observed; Addressable for a versioned remote object | `CHEAP_FINGERPRINT`, `DIFF` |
-| `icechunk` | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE` |
+| `file` | -- (local) / `objectstore` | stable | Observed; Addressable for a versioned remote object | `CHEAP_FINGERPRINT`, `DIFF`, `CREATE` (local directory) |
+| `icechunk` | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE`, `CREATE` |
 | `neon` | `neon` | experimental | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
-| `git` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
+| `git` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE`, `CREATE` |
 | `iceberg` | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `PROMOTE` |
 | `delta` | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
 | `lance` | `lance` | stable | Forkable | `ATOMIC_REF`, `DIFF` |
 | `lakefs` | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
 | `ducklake` | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
 | `dolt` | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
-| `memory` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` (tests only) |
+| `memory` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
+
+`CREATE` is what `tether add --create` needs: the backend can make an empty
+store, mark it as the dataset's, and remove it again once `gc` finds nothing
+but tether's own refs in it (see [Reclaiming
+Storage](05-reclaiming-storage.qmd#stores-tether-created)). Lance, Delta, and
+Iceberg tables need a schema to exist and cannot be created empty; Neon, Dolt,
+DuckLake, and lakeFS objects live inside a project, database, or repository
+tether does not own. For those kinds, make the store with its own tools and
+`add` it.
 
 *Maturity* is what the backend declares (`MATURITY`; `tether backends` prints
 it): **stable** runs its full lifecycle against the real system in CI --
@@ -129,6 +138,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Handle | `FileHandle(uri, version_id)` -- always read-only |
 | Listing | directories and prefixes hand the engine a per-file JSONL listing (`{"p": path, "k": token, "s": size}`) that is stored under `.tether/listings/` |
 | Diff | `files`: per-path added/removed/modified with size deltas from two stored listings; falls back to a count/size summary when a listing is missing; single objects report changed size/etag/sha256/version |
+| Create | a local directory only (`mkdir` plus a `.tether-owner` marker file the directory walk skips, so the directory fingerprints as empty until something is written). Ref-empty means nothing but the marker; `delete_store` is an `rmdir` that refuses anything else. Remote prefixes are not created or removed by tether. |
 | Notes | `--file immutable` (default) turns any drift into an `ImmutableObjectModified` error at `status` -- and drift means the *bytes* changed, not the timestamp. Local walks use `os.scandir`; symlinked directories are not followed. The first fingerprint of a large tree reads every file (sha256 at ~1.5-3 GB/s per core, up to 8 files at a time); later ones read only what changed. |
 
 ## `icechunk` -- Icechunk repositories
@@ -143,6 +153,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Fork | `create_branch(name, snapshot_id)` off the tag (`reset_branch` if it exists) |
 | Handle | `IcechunkHandle(repository, session, branch, tag, snapshot_id)`; `session` is writable for a branch, read-only for a tag/snapshot |
 | Diff | `nodes`: `Repository.diff(from, to)` -- new/deleted groups and arrays, updated metadata, updated chunk counts per array, moves |
+| Create | `Repository.create`, refused if anything exists at the path or under the prefix (not only a repository); the owner marker is the `tether.owner` key in the repository's metadata (needs an icechunk with `Repository.exists` and repository metadata -- 2.2.0 is known to work; older ones lose the `CREATE` capability with a clear error). Ref-empty: no branch but the base, no tag (a pin's later generation `tether.<id>.N` counts as the pin the plan names), and the base still at the repository's first snapshot. `delete_store` re-checks owner and emptiness, then removes only Icechunk's own top-level names (1.x and 2.x layouts) -- a directory or prefix holding anything else is refused and kept. |
 
 ## `neon` -- Neon Postgres
 
@@ -174,6 +185,7 @@ jj repositories work through their `.git`.
 | Fork | branch `name` at the tag's sha (`branch -f` if it exists) |
 | Handle | `GitHandle(path, sha, worktree)` |
 | Diff | `files`: `git diff --name-status -M` with `--numstat` line counts (`+a -d`) |
+| Create | `git init -b <ref>` plus one empty root commit with a fixed tree, author, and dates, so every store tether creates has the same root sha (`GitBackend.EMPTY_ROOT_SHA`) and the base branch exists to pin and fork from; the owner marker is `git config tether.owner`. Ref-empty: no branch or tag beyond the base, the base *at* that root sha (an amended root is not), and a clean working tree (`git status --porcelain --ignored`: an untracked, staged, or ignored file is data `delete_store` would take with the directory). `delete_store` re-checks both and removes the repository directory only then. |
 | Notes | remote-only (url) repositories are not supported yet. |
 
 ## `iceberg` -- Apache Iceberg tables (pyiceberg)

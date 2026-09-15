@@ -771,6 +771,42 @@ def test_use_cases_story(
     ]
     story.tether("abandon-trials", "abandon", *drop, "--gc")
     story.jj("log-abandoned", "log", "-r", "main::@")
+    # A store made for one probe: tether creates it, and reclaims it with
+    # the probe -- the data directory ends as it began.
+    story.sh("ls-before", "ls", str(data), display="ls ~/data")
+    story.tether("new-probe", "new", "-b", "probe")
+    story.tether(
+        "add-probe",
+        "add",
+        "scratch/probe",
+        "--kind",
+        "icechunk",
+        str(data / "probe.icechunk"),
+        "--create",
+    )
+    story.python(
+        "probe-py",
+        """
+        import zarr
+        from tether import Repo
+
+        repo = Repo.find(".")
+        h = repo.open("scratch/probe")
+        root = zarr.create_group(store=h.session.store)
+        root.create_array("embeddings", shape=(3, 4), dtype="f4")[:] = 0.5
+        h.session.commit("embeddings: probe")
+        """,
+    )
+    story.tether("commit-probe", "commit", "-m", "probe: embeddings v2")
+    story.tether("status-probe", "status")
+    story.jj("log-probe", "log", "-r", "main::@")
+    story.tether("new-sweep-again", "new", "sweep")
+    story.tether("abandon-probe", "abandon", "probe")
+    story.jj("delete-probe", "bookmark", "delete", "probe")
+    story.tether(
+        "gc-probe", "gc", "--prune-bookmarks", "--delete-stores", "--no-dry-run"
+    )
+    story.sh("ls-after", "ls", str(data), display="ls ~/data")
 
     # ---- 6. Recover ----------------------------------------------------
     story.tether("new-scratch", "new", "-b", "scratch", "--eager")

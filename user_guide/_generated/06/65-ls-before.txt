@@ -1,0 +1,5 @@
+features.lance
+imaging.icechunk
+qc.lance
+raw
+scratch.lance

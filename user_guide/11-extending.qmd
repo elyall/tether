@@ -62,6 +62,16 @@ Method by method:
 | `ancestor_of(locator, ancestor, descendant)` | Whether `ancestor` (a state) is in `descendant`'s history; `None` when unknown. `promote` falls back to it when no fork point was recorded. |
 | `PROMOTE_HINT` (class attribute) | The sentence `promote` shows when it refuses: what the user should do with the system's own tools. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
+| `create(locator, *, owner)` | `CREATE`: make an empty store at the locator, write an owner marker *in the store* naming `owner` (a dataset id), and return the initial state. Raise `BackendError` if anything is already there -- `create` never adopts. |
+| `owner(locator)` | `CREATE`: the dataset id in the store's owner marker; `None` when tether never wrote one or the store is gone. |
+| `is_ref_empty(locator, *, ignoring=())` | `CREATE`: `True` when nothing remains but the base branch at its initial state, the marker, and the refs in `ignoring` (the ones a gc plan is about to delete) -- and, for a store with a working area (a git checkout, a directory), no uncommitted content: files are data whether or not a ref names them; `False` otherwise; `None` when the backend cannot tell. `None` means keep. |
+| `delete_store(locator)` | `CREATE`: remove the store. Called only after `is_ref_empty` returned `True` and `owner` named the caller's dataset -- and expected to check both again itself, right before the irreversible step, and to remove only what the store's own layout accounts for. |
+
+The owner marker is the whole basis for a delete: manifests travel with
+clones and are untrusted, so a manifest field never authorizes one. Put the
+marker where the store keeps its own metadata (Icechunk repository metadata,
+`git config`, a `.tether-owner` file the directory walk skips) -- never in a
+ref that `list_pins` or `list_working_refs` would report.
 
 `pin` must be idempotent *and say which it did*: return `Pin(..., created=True)`
 when it made the ref, `created=False` when it found the ref already carrying
@@ -135,6 +145,7 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `BRANCH_IS_STORAGE` | never delete a stray working branch in `gc --prune-bookmarks` without `--force-prune` (deleting reclaims the data, as in Neon) |
 | `PROMOTE` | call `promote` in `tether promote` when the base is unchanged since the fork point |
 | `MERGE` | call `merge` in `tether promote` when the base moved (or `--strategy merge`) |
+| `CREATE` | call `create` for `add --create` / `Repo.create`; `owner`, `is_ref_empty`, and `delete_store` in `gc --delete-stores` for a created store nothing references any more |
 
 ## Content diffs and listings
 
@@ -213,6 +224,9 @@ class MyHarness:
         self._n += 1
         ...  # write something new at working_ref (or the base branch)
 
+    def fresh_locator(self) -> Locator:  # CREATE backends only
+        ...  # a locator where no store exists yet
+
 
 def test_conformance() -> None:
     run_conformance(MyHarness())
@@ -223,7 +237,12 @@ determinism, `DIFF` (empty self-diff, non-empty after a mutation),
 `ADDRESSABLE` (open by state), `PIN` (create, list, verify shallow and deep,
 idempotency, protection against later drift of the working ref), `FORK` (a
 fresh fork fingerprints equal to the pinned state; writes to the fork leave the
-base untouched), and unpin. A harness may set `capabilities` to exercise a
+base untouched), and unpin. For `CREATE` it walks the store lifecycle at a
+`fresh_locator()`: `create` -> `owner` names the creator -> `is_ref_empty` is
+`True` -> a second `create` is refused -> a written fork makes it `False`, and
+`True` again when that fork is in `ignoring` -> the fork deleted, `True` ->
+`delete_store` -> `owner` is `None` and `fingerprint` raises -> `create` at the
+same locator works again. A harness may set `capabilities` to exercise a
 specific tier of a multi-tier backend.
 
 Look at `tether.backends.memory` for the executable specification the suite was
@@ -237,7 +256,8 @@ Two members beyond reading and committing files: `history_digest()` digests
 every visible commit id (gc plans bind to it, so a commit made in another
 workspace stales them), and `shared_dir()` names the directory every
 checkout of the repository shares (git's common dir, jj's repo dir), where
-the repository-wide lock lives.
+the repository-wide lock and the created- and touched-store indexes
+(`tether-created.jsonl`, `tether-touched.jsonl`) live.
 
 Backends never touch the VCS. If you need to support another version-control
 system for the *manifests*, implement `tether.vcs.VcsAdapter` (resolve, read

@@ -1,4 +1,4 @@
-undid 569de0890973 (new: forked code, features, qc/focus, scratch/embeddings, zarr/imaging)
+undid 29739c9a980b (new: forked code, features, qc/focus, scratch/embeddings, zarr/imaging)
   restored   code: deleted tether.ws.0a1b2c3d.scratch
   restored   features: deleted tether.ws.0a1b2c3d.scratch
   restored   qc/focus: deleted tether.ws.0a1b2c3d.scratch

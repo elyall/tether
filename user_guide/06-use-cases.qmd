@@ -514,6 +514,91 @@ Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
 retention show up in `tether verify --all-history` as missing -- that is the
 trade you made with `--pin record`, stated back to you.
 
+**A store that should not outlive its probe.** So far every store existed
+before tether saw it, and tether never deletes what it merely adopted. A
+probe often needs a store of its own -- a second embeddings table to compare
+against -- and that store has no reason to exist once the probe is thrown
+away. `add --create` has tether make the store, on a bookmark of its own:
+
+{{< include _generated/06/65-ls-before.sh >}}
+
+{{< include _generated/06/65-ls-before.txt >}}
+
+{{< include _generated/06/66-new-probe.sh >}}
+
+{{< include _generated/06/66-new-probe.txt >}}
+
+{{< include _generated/06/67-add-probe.sh >}}
+
+{{< include _generated/06/67-add-probe.txt >}}
+
+The store is created empty with an owner marker naming this dataset, and
+remembered in a repository-wide index outside history
+(`.jj/repo/tether-created.jsonl` next to the repository lock), along with the
+bookmark it was made on. Because the probe is a bookmark, the new store's
+working branch is forked at once -- no second `new` -- and the first writable
+`open` lands on it (from Python, `repo.create("scratch/probe", "icechunk",
+{"uri": ...})` does the `add` and the `open` in one call):
+
+{{< include _generated/06/68-probe-py.py >}}
+
+{{< include _generated/06/69-commit-probe.sh >}}
+
+{{< include _generated/06/69-commit-probe.txt >}}
+
+{{< include _generated/06/70-status-probe.sh >}}
+
+{{< include _generated/06/70-status-probe.txt >}}
+
+{{< include _generated/06/71-log-probe.sh >}}
+
+{{< include _generated/06/71-log-probe.txt >}}
+
+The probe did not pan out. Leave the bookmark, drop its commit, delete the
+bookmark: the same three steps as for `relabel-v3` in section 2. Back on
+`sweep`, `new` still lists the probe's working ref -- for an object that does
+not exist at this revision, kept so `gc` can find the branch -- and `abandon`
+shows the gc plan it does not yet apply. No manifest names the store any more,
+yet the plan still finds the probe's pin in it: tether remembers every store
+this clone forked or pinned in (`tether-touched.jsonl`, next to the created
+index) and releases its own dead refs there. The plan says nothing about the
+store *itself*: reclaiming a created store is opt-in (`gc --delete-stores`),
+because a deleted store has no `repair` and `gc` only knows the history this
+clone has fetched. Its branch, too, is only ever deleted under
+`--prune-bookmarks`:
+
+{{< include _generated/06/72-new-sweep-again.sh >}}
+
+{{< include _generated/06/72-new-sweep-again.txt >}}
+
+{{< include _generated/06/73-abandon-probe.sh >}}
+
+{{< include _generated/06/73-abandon-probe.txt >}}
+
+{{< include _generated/06/74-delete-probe.sh >}}
+
+{{< include _generated/06/74-delete-probe.txt >}}
+
+{{< include _generated/06/75-gc-probe.sh >}}
+
+{{< include _generated/06/75-gc-probe.txt >}}
+
+{{< include _generated/06/76-ls-after.sh >}}
+
+{{< include _generated/06/76-ls-after.txt >}}
+
+Unpin, delete the branch, and -- with nothing left in the store but the owner
+marker -- delete the store, in that order and only then. The data directory is
+as it was before the probe. (The sweep table's `probe` branch is kept: a
+`record` object's branch holds a pin-less recorded state, and `gc` will not
+delete that without `--force-prune`.) A store tether *adopted* is never
+deleted this way, and a clone of the dataset cannot make it happen by editing
+a manifest: only the marker in the store and the index in your own repository
+say a store is tether's to remove. Had another checkout or clone forked its
+own branch in the store meanwhile -- a bookmark this clone never had -- the
+plan would have kept the store whole, that branch and your pins alike, and
+said so.
+
 Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 ## 6. Recover
@@ -523,17 +608,17 @@ Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
 **An unwanted `new`** -- you started a bookmark you did not mean to, and
 `--eager` forked every branch at once. The op log knows what was created:
 
-{{< include _generated/06/65-new-scratch.sh >}}
+{{< include _generated/06/77-new-scratch.sh >}}
 
-{{< include _generated/06/65-new-scratch.txt >}}
+{{< include _generated/06/77-new-scratch.txt >}}
 
-{{< include _generated/06/66-ops.sh >}}
+{{< include _generated/06/78-ops.sh >}}
 
-{{< include _generated/06/66-ops.txt >}}
+{{< include _generated/06/78-ops.txt >}}
 
-{{< include _generated/06/67-undo-new.sh >}}
+{{< include _generated/06/79-undo-new.sh >}}
 
-{{< include _generated/06/67-undo-new.txt >}}
+{{< include _generated/06/79-undo-new.txt >}}
 
 Five branches deleted, the workspace file and the VCS working copy put back,
 the bookmark gone: the checkout is on `sweep` again as if nothing happened.
@@ -544,13 +629,13 @@ even from a commit whose branches already sit exactly at the pins.
 `zarr/imaging` should go back to what an older commit pinned. `restore`
 resets the current bookmark's branch for that object, and nothing else:
 
-{{< include _generated/06/68-restore.sh >}}
+{{< include _generated/06/80-restore.sh >}}
 
-{{< include _generated/06/68-restore.txt >}}
+{{< include _generated/06/80-restore.txt >}}
 
-{{< include _generated/06/69-status-restored.sh >}}
+{{< include _generated/06/81-status-restored.sh >}}
 
-{{< include _generated/06/69-status-restored.txt >}}
+{{< include _generated/06/81-status-restored.txt >}}
 
 The other branches, the manifests, and the working copy stay put; the next
 `commit` would pin what you restored. Here it was a demonstration. `undo`
@@ -558,41 +643,41 @@ does not guess where a branch it *reset* should go -- the store may not allow
 re-pointing, and which head you want is your call -- so it restores the
 workspace record, says what the branch was, and leaves the move to you:
 
-{{< include _generated/06/70-undo-restore.sh >}}
+{{< include _generated/06/82-undo-restore.sh >}}
 
-{{< include _generated/06/70-undo-restore.txt >}}
+{{< include _generated/06/82-undo-restore.txt >}}
 
 `restore` is its own undo: name the commit whose state you want. The branch
 holds the demonstration's state, which this workspace never committed, so
 `restore` asks for `--discard` before it throws that away:
 
-{{< include _generated/06/71-restore-back.sh >}}
+{{< include _generated/06/83-restore-back.sh >}}
 
-{{< include _generated/06/71-restore-back.txt >}}
+{{< include _generated/06/83-restore-back.txt >}}
 
 **Several things in a row.** A restore you did not mean, then a bookmark you
 did not mean. `undo` reverses the newest operation each time; run it once
 per slip:
 
-{{< include _generated/06/72-restore-features.sh >}}
+{{< include _generated/06/84-restore-features.sh >}}
 
-{{< include _generated/06/72-restore-features.txt >}}
+{{< include _generated/06/84-restore-features.txt >}}
 
-{{< include _generated/06/73-new-again.sh >}}
+{{< include _generated/06/85-new-again.sh >}}
 
-{{< include _generated/06/73-new-again.txt >}}
+{{< include _generated/06/85-new-again.txt >}}
 
-{{< include _generated/06/74-ops-again.sh >}}
+{{< include _generated/06/86-ops-again.sh >}}
 
-{{< include _generated/06/74-ops-again.txt >}}
+{{< include _generated/06/86-ops-again.txt >}}
 
-{{< include _generated/06/75-undo-again.sh >}}
+{{< include _generated/06/87-undo-again.sh >}}
 
-{{< include _generated/06/75-undo-again.txt >}}
+{{< include _generated/06/87-undo-again.txt >}}
 
-{{< include _generated/06/76-undo-restore-features.sh >}}
+{{< include _generated/06/88-undo-restore-features.sh >}}
 
-{{< include _generated/06/76-undo-restore-features.txt >}}
+{{< include _generated/06/88-undo-restore-features.txt >}}
 
 The restore had *created* `features`' branch on `sweep` (nothing had written
 to `features` there yet), so undoing it deletes that branch again; `sweep`
@@ -613,9 +698,9 @@ None of this touched history: the `scratch` and `again` bookmarks came and
 went without a commit, and `restore` acts on the stores. The log is what
 section 5 left, and the workspace is back on `sweep`:
 
-{{< include _generated/06/77-log-recovered.sh >}}
+{{< include _generated/06/89-log-recovered.sh >}}
 
-{{< include _generated/06/77-log-recovered.txt >}}
+{{< include _generated/06/89-log-recovered.txt >}}
 
 The boundary: `jj undo` and `git reset` move the manifests, never the stores;
 tether's `undo` and `repair` cover tether's side and say exactly what they
@@ -635,26 +720,26 @@ Push the history into Postgres -- after every commit to `main`, typically
 from CI. Every commit on every bookmark goes, with its parents, refs, and
 one row per object per commit:
 
-{{< include _generated/06/78-publish.sh >}}
+{{< include _generated/06/90-publish.sh >}}
 
-{{< include _generated/06/78-publish.txt >}}
+{{< include _generated/06/90-publish.txt >}}
 
 Consumers join their own run log against `tether.objects` -- the per-commit
 table; `tether.object_states` is the distinct (system, state) pairs a
 catalog keys on. A training run recorded which dataset commit it read, and
 the join says what that meant for every input:
 
-{{< include _generated/06/79-consumer-join.py >}}
+{{< include _generated/06/91-consumer-join.py >}}
 
-{{< include _generated/06/79-consumer-join.txt >}}
+{{< include _generated/06/91-consumer-join.txt >}}
 
 `pin_id` is null for the recorded-only objects (the raw plates, the
 `--pin record` scratch table); their `state_json` is still the exact state.
 For a provenance dashboard, `tether export` writes the same tables as files:
 
-{{< include _generated/06/80-export.sh >}}
+{{< include _generated/06/92-export.sh >}}
 
-{{< include _generated/06/80-export.txt >}}
+{{< include _generated/06/92-export.txt >}}
 
 And when the registry -- not the repository -- is where objects are declared,
 run the other direction: `tether import` from a query, `commit`, and the
@@ -665,9 +750,9 @@ publishes, the consumer's pipeline verifies the commit it is about to read
 and refuses to start on a pin that is gone (`--deep` opens each recorded
 state, which is the only way to check a `record`-pinned object):
 
-{{< include _generated/06/81-verify-rev.sh >}}
+{{< include _generated/06/93-verify-rev.sh >}}
 
-{{< include _generated/06/81-verify-rev.txt >}}
+{{< include _generated/06/93-verify-rev.txt >}}
 
 `publish` and `export` write to Postgres and to files, not to the repository,
 so the story ends where section 5 left it: the sweep on its bookmark, `main`
@@ -676,8 +761,8 @@ scratch table and hold the imaging store, so `promote zarr/imaging` lands the
 labels on purpose and the scratch rows, which are scratch, stay on their
 branch.
 
-{{< include _generated/06/82-log-end.sh >}}
+{{< include _generated/06/94-log-end.sh >}}
 
-{{< include _generated/06/82-log-end.txt >}}
+{{< include _generated/06/94-log-end.txt >}}
 
 Read next: [Registries and SQL](10-registries-and-sql.qmd).
