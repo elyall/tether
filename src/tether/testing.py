@@ -16,12 +16,14 @@ from tether.backends.base import (
     ObjectDiff,
     VerifyStatus,
     content_state,
+    effective_capabilities,
 )
 from tether.errors import BackendError
 from tether.handles import Handle
 from tether.manifest import (
     Locator,
     Pin,
+    Policy,
     compute_pin_id,
     ref_for_pin,
     working_ref_name,
@@ -225,6 +227,11 @@ def _create_checks(h: BackendHarness) -> None:
         f"{b.kind} declares CREATE: its harness must provide fresh_locator()"
     )
     loc = fresh()
+    if Capability.CREATE not in effective_capabilities(b, loc, Policy()):
+        # Declared, but not for this locator or this library version (an
+        # icechunk without repository metadata): the engine would refuse
+        # `add --create` the same way, so there is nothing to walk.
+        return
     owner = "0a1b2c3d"
     state = b.create(loc, owner=owner)
     assert isinstance(state, dict), "create must return the initial state"

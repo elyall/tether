@@ -37,6 +37,12 @@ from tether.cli import app
 
 ic = pytest.importorskip("icechunk")
 zarr = pytest.importorskip("zarr")
+if not hasattr(ic.Repository, "metadata"):  # icechunk 1.x (Python 3.11)
+    pytest.skip(
+        "the story's `add --create` step needs an icechunk with repository "
+        "metadata (2.x); the snippets are checked on Python 3.12+",
+        allow_module_level=True,
+    )
 lance = pytest.importorskip("lance")
 pa = pytest.importorskip("pyarrow")
 typer_testing = pytest.importorskip("typer.testing")

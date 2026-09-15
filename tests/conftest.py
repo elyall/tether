@@ -85,6 +85,13 @@ def _env(monkeypatch: pytest.MonkeyPatch, _jj_config: Path) -> None:
     if _BIN and os.path.isdir(_BIN) and shutil.which("jj") is None:
         monkeypatch.setenv("PATH", _BIN + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("JJ_CONFIG", str(_jj_config))
+    # git needs an identity to commit, and a CI runner has none configured.
+    # Every repository a test makes -- a created store, a clone, a subprocess
+    # -- inherits this one, the way jj gets its identity from JJ_CONFIG above.
+    for var in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(var, "tether tests")
+    for var in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(var, "tests@tether.dev")
     monkeypatch.delenv("TETHER_REV", raising=False)
 
 

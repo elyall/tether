@@ -57,6 +57,14 @@ class IcechunkHarness:
         }
 
 
+def _needs_lifecycle_api() -> None:
+    from tether.backends.icechunk import IcechunkBackend
+
+    why = IcechunkBackend._lifecycle_api()
+    if why is not None:
+        pytest.skip(why)  # icechunk 1.x: no repository metadata, no CREATE
+
+
 def test_icechunk_created_store_is_empty_when_only_a_later_pin_generation_remains(
     tmp_path: Path,
 ) -> None:
@@ -67,6 +75,7 @@ def test_icechunk_created_store_is_empty_when_only_a_later_pin_generation_remain
     from tether.backends.icechunk import IcechunkBackend
     from tether.manifest import ref_for_pin
 
+    _needs_lifecycle_api()
     backend = IcechunkBackend()
     loc = {"uri": str(tmp_path / "made"), "branch": "main"}
     initial = backend.create(loc, owner="0a1b2c3d")
@@ -95,6 +104,7 @@ def test_icechunk_create_refuses_anything_already_there_and_delete_stays_inside(
     a stranger's file under the prefix keeps the store."""
     from tether.backends.icechunk import IcechunkBackend
 
+    _needs_lifecycle_api()
     backend = IcechunkBackend()
     taken = tmp_path / "taken"
     taken.mkdir()
@@ -174,7 +184,8 @@ def test_icechunk_library_errors_become_backend_errors(tmp_path: Path) -> None:
     from tether.backends.icechunk import IcechunkBackend
 
     b = IcechunkBackend()
-    with pytest.raises(BackendError, match="RepositoryNotFoundError"):
+    # 2.x names the error class; 1.x (the resolution on Python 3.11) does not.
+    with pytest.raises(BackendError, match=r"RepositoryNotFoundError|doesn't exist"):
         b.fingerprint({"uri": str(tmp_path / "missing")}, None)
     uri = _new_repo(tmp_path / "repo")
     loc = {"uri": uri}

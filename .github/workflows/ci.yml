@@ -38,6 +38,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov upload authenticates with the job's OIDC token
     strategy:
       fail-fast: false
       matrix:
@@ -65,8 +68,13 @@ jobs:
         run: uv run pytest --cov=tether --cov-report=xml --cov-report=term-missing:skip-covered
       - name: Upload coverage
         # One upload per matrix leg; Codecov merges them into a single report.
+        # Pushes to a branch are not "tokenless" uploads (only fork PRs are),
+        # so authenticate with the job's OIDC token rather than a stored
+        # CODECOV_TOKEN. A failed upload fails the leg: a silently missing
+        # report is how the badge stayed blank through every alpha.
         uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           flags: py${{ matrix.python-version }}
-          fail_ci_if_error: false
+          use_oidc: true
+          fail_ci_if_error: true
