@@ -1,14 +1,26 @@
 ---
-title: "Use Cases"
+title: "Worked Examples"
+guide-section: "Core Workflows"
 ---
 
-Seven situations tether is built for, told as one story: each section starts
-where the previous one left the dataset, and ends with `jj log` so you can
-see what it did to the repository's history and bookmarks. The dataset is an
+Seven situations tether is built for, run end to end as one story. Each
+section starts where the previous one left the dataset and ends with `jj log`,
+so you can see what it did to the repository's history and bookmarks, and
+with a pointer to the guide that explains the mechanics. The dataset is an
 Icechunk store `zarr/imaging`, a Lance table `features`, a directory of raw
 files `raw/plate1`, and the analysis code repository `code`. (The other guides
 also use a Neon database, `db/metrics`; it is left out here so that the story
-can run.) Each section ends with the guide that explains the mechanics.
+can run locally.)
+
+| Section | Situation |
+| --- | --- |
+| [1](#reproduce-an-analysis-months-later) | Reproduce an analysis months later |
+| [2](#reprocess-on-a-branch-then-land-it-or-throw-it-away) | Reprocess on a branch, then land it or throw it away |
+| [3](#ab-two-candidates-keep-one) | A/B: two candidates, keep one |
+| [4](#catch-drift-nightly-without-a-watcher) | Catch drift nightly without a watcher |
+| [5](#keep-the-data-bill-down) | Keep the data bill down |
+| [6](#recover) | Recover from mistakes |
+| [7](#publish-history-to-a-registry-experimental) | Publish history to a registry (experimental) |
 
 ::: {.callout-note title="Executed, not written"}
 `tests/test_use_cases.py` runs every command on this page against local
@@ -99,7 +111,7 @@ copy on top, as `jj commit` would:
 
 {{< include _generated/06/09-log.txt >}}
 
-Read next: [Pinning](03-pinning.qmd).
+Mechanics: [Pinning](03-pinning.qmd).
 
 ## 2. Reprocess on a branch, then land it or throw it away
 
@@ -217,7 +229,7 @@ promote a child branch into its parent; landing it is the trunk recipe above
 or applying the migration to `main` yourself; the branch was the rehearsal.
 :::
 
-Read next: [Branching and Writing](04-branching-and-writing.qmd).
+Mechanics: [Branching and Writing](04-branching-and-writing.qmd#landing-it-tether-promote).
 
 ## 3. A/B: two candidates, keep one
 
@@ -324,8 +336,8 @@ Icechunk. `a` and `main` point at the same commit; `jj bookmark delete a` and
 a later `gc --prune-bookmarks` retire the winner's branches the same way once
 nobody works on them.
 
-Read next: [Branching and Writing](04-branching-and-writing.qmd#workspaces-and-bookmarks),
-[Reclaiming Storage](05-reclaiming-storage.qmd).
+Mechanics: [Workspaces and bookmarks](04-branching-and-writing.qmd#workspaces-and-bookmarks),
+[`drop`](07-cli.qmd#drop).
 
 ## 4. Catch drift nightly without a watcher
 
@@ -442,7 +454,8 @@ to *trail* the world rather than merely watch it: a nightly `tether pull` on
 
 {{< include _generated/06/54-log-pull.txt >}}
 
-Read next: [Pinning](03-pinning.qmd#drift), [Registries and SQL](10-registries-and-sql.qmd).
+Mechanics: [Drift](03-pinning.qmd#drift) and [Verify](03-pinning.qmd#verify);
+`import` is in [Registries and SQL](10-registries-and-sql.qmd#import).
 
 ## 5. Keep the data bill down
 
@@ -571,7 +584,7 @@ forked its own branch in the store meanwhile -- a bookmark this clone never
 had -- the plan would have kept the store whole, that branch and your pins
 alike, and said so.
 
-Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
+Mechanics: [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 ## 6. Recover
 
@@ -680,7 +693,7 @@ could not do (a pin whose snapshot the store already expired, a `promote`). `sta
 vanished from the VCS behind tether's back, or a bookmark was deleted,
 renamed, or moved by hand.
 
-Read next: [CLI Guide](07-cli.qmd#ops-undo-repair), [Concepts](02-concepts.qmd#the-operation-log).
+Mechanics: [`ops`, `undo`, `repair`](07-cli.qmd#ops-undo-repair) in the CLI Guide.
 
 ## 7. Publish history to a registry (experimental)
 
@@ -737,4 +750,4 @@ branch.
 
 {{< include _generated/06/88-log-end.txt >}}
 
-Read next: [Registries and SQL](10-registries-and-sql.qmd).
+Mechanics: [Registries and SQL](10-registries-and-sql.qmd).

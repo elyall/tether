@@ -1,17 +1,39 @@
 ---
 title: "Backends"
+guide-section: "Reference"
 ---
 
+One section per backend: the extra that installs it, its tier and flags, the
+locator fields it reads (`tether add` options, `--set`, `Repo.add`), its
+`[backends.<kind>]` config, what it records as state, how pins and forks map
+onto the system, the handle `open` returns, and what `diff --content`
+reports. Credentials are never stored in manifests.
 
-For each backend: the extra that installs it, its capability tier and flags,
-the locator fields it reads (from `tether add` options / `--set` / `Repo.add`),
-its `[backends.<kind>]` config in `tether.toml`, what it records as state, how
-pins and forks map onto the system, the handle `open` returns, and what
-`diff --content` reports. Credentials are never stored in manifests.
+| Kind | Extra | Maturity | Tier | Flags |
+| --- | --- | --- | --- | --- |
+| [`file`](#file-local-paths-and-object-stores) | -- (local) / `objectstore` | stable | Observed; Addressable for a versioned remote object | `CHEAP_FINGERPRINT`, `DIFF`, `CREATE` (local directory) |
+| [`icechunk`](#icechunk-icechunk-repositories) | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `CREATE` |
+| [`git`](#git-git-and-jj-repositories) | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` |
+| [`lance`](#lance-lance-datasets) | `lance` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY` |
+| [`delta`](#delta-delta-lake-tables) | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
+| [`neon`](#neon-neon-postgres) | `neon` | experimental | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
+| [`iceberg`](#iceberg-apache-iceberg-tables) | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `HISTORY`, `PROMOTE` |
+| [`lakefs`](#lakefs-lakefs-repositories) | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
+| [`ducklake`](#ducklake-ducklake-catalogs) | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
+| [`dolt`](#dolt-dolt-databases) | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
+| [`memory`](#memory-in-process-reference-backend) | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
 
-Common conventions:
+*Maturity* is what the backend declares (`MATURITY`; `tether backends` prints
+it): **stable** runs its full lifecycle against the real system in CI --
+embedded stores and libraries; **experimental** is tested against a fake of a
+network service and has not been run against the service itself by the
+maintainers. `add` says so when you register an experimental kind. The tiers
+and flags are defined in
+[Writing a Backend](11-extending.qmd#capabilities-decide-behavior).
 
-- `branch` in a locator is the *upstream* ref (default `main`): what the
+## Conventions
+
+- `branch` in a locator is the *upstream* branch (default `main`): what the
   trunk bookmark stands for. On the trunk the working ref is that branch
   itself; on any other bookmark `tether new -b NAME` forks
   `tether.ws.<dataset8>.<bookmark>` from the pin.
@@ -21,10 +43,20 @@ Common conventions:
   inside its own dataset's namespace.
 - `identity` is the subset of the locator that names the system; two objects
   of one dataset with the same identity and state share one pin.
+- Locators are committed and read from every directory and every clone, so a
+  *relative* local path (`file` `uri`/`path`, `git` `path`,
+  `icechunk`/`lance`/`delta` `uri`, `ducklake` `data_path`) is resolved
+  against the directory `add` or `import` ran in and stored absolute. URLs
+  and absolute paths are stored as given.
+- Objects that live in one native branch space -- two databases of a Neon
+  project, two keys on one Icechunk store -- share a branch per bookmark:
+  `new` forks it once and every member writes through it, and `gc` collects
+  the pins every object references per branch space before deciding what is
+  unreferenced.
 - `at` in a locator is an object's initial position (`tether add --at` /
   `--pick`): the first commit pins that native state instead of the `branch`
-  head; a trunk `pull` later moves the object onto the branch. `tether log` lists
-  what each system accepts:
+  head; a trunk `pull` later moves the object onto the branch. `tether log`
+  lists what each system accepts:
 
 | Kind | `at` accepts | `log` lists |
 | --- | --- | --- |
@@ -38,59 +70,45 @@ Common conventions:
 | `git` | any commit-ish (alias of `ref`) | `git log` with decorations |
 | `neon`, `file` | not supported | -- |
 
-| Kind | Extra | Maturity | Tier | Flags |
-| --- | --- | --- | --- | --- |
-| `file` | -- (local) / `objectstore` | stable | Observed; Addressable for a versioned remote object | `CHEAP_FINGERPRINT`, `DIFF`, `CREATE` (local directory) |
-| `icechunk` | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `CREATE` |
-| `neon` | `neon` | experimental | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
-| `git` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` |
-| `iceberg` | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `HISTORY`, `PROMOTE` |
-| `delta` | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
-| `lance` | `lance` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY` |
-| `lakefs` | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
-| `ducklake` | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
-| `dolt` | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
-| `memory` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
+## What the flags mean in practice
 
-`CREATE` is what `tether add --create` needs: the backend can make an empty
-store, mark it as the dataset's, and remove it again once `gc` finds nothing
-but tether's own refs in it (see [Reclaiming
-Storage](05-reclaiming-storage.qmd#stores-tether-created)). Lance, Delta, and
-Iceberg tables need a schema to exist and cannot be created empty; Neon, Dolt,
-DuckLake, and lakeFS objects live inside a project, database, or repository
-tether does not own. For those kinds, make the store with its own tools and
-`add` it.
+**`PROMOTE` and `MERGE`.** `PROMOTE` means `tether promote` can fast-forward
+the base branch to a fork (Icechunk `reset_branch`, Iceberg
+`set-snapshot-ref`, git `merge --ff-only`, lakeFS / Dolt merges); `MERGE`
+means it can three-way merge a diverged fork (git `merge`, lakeFS
+`merge_into`, `DOLT_MERGE`). Lance cannot move a branch head yet and Neon
+cannot promote a child branch, so both are refused with instructions.
 
-*Maturity* is what the backend declares (`MATURITY`; `tether backends` prints
-it): **stable** runs its full lifecycle against the real system in CI --
-embedded stores and libraries; **experimental** is tested against a fake of a
-network service and has not been run against the service itself by the
-maintainers. `add` says so when you register an experimental kind.
+**`--pin record`** removes `PIN` from any backend: the state is recorded
+without a native ref and `new` forks from it directly (Icechunk snapshot id,
+Lance `(branch, version)`, Iceberg snapshot id, lakeFS/Dolt/git commit, Neon
+LSN on the branch it was read from) for as long as the system still has that
+state.
 
-Locators are committed and read from every directory and every clone, so a
-*relative* local path (`file` `uri`/`path`, `git` `path`, `icechunk`/`lance`/
-`delta` `uri`, `ducklake` `data_path`) is resolved against the directory `add`
-or `import` ran in and stored absolute. URLs and absolute paths are stored as
-given.
+**`CREATE`** *(experimental)* is what `tether add --create` needs: the backend
+can make an empty store, mark it as the dataset's, and remove it again once
+`gc` finds nothing but tether's own refs in it (see
+[Stores tether created](05-reclaiming-storage.qmd#stores-tether-created)).
+Lance, Delta, and Iceberg tables need a schema to exist and cannot be created
+empty; Neon, Dolt, DuckLake, and lakeFS objects live inside a project,
+database, or repository tether does not own. For those kinds, make the store
+with its own tools and `add` it.
 
-Objects that live in one native branch space share a branch per bookmark:
-`branch_scope(locator)` names the resource that owns branches (a Neon
-project, an Iceberg table; the canonical identity elsewhere), `new` forks it
-once and every member writes through it, and `gc` collects the pins every
-object references per `ref_namespace(locator)` before deciding what a
-project- or table-wide listing left unreferenced.
+## State keys: content and address
 
-`PROMOTE` means `tether promote` can fast-forward the base branch to a fork
-(Icechunk `reset_branch`, Iceberg `set-snapshot-ref`, git `merge --ff-only`,
-lakeFS / Dolt merges); `MERGE` means it can three-way merge a diverged fork
-(git `merge`, lakeFS `merge_into`, `DOLT_MERGE`). Lance cannot move a branch
-head yet and Neon cannot promote a child branch, so both are refused with
-instructions.
+A state's keys do two jobs:
 
-`--pin record` removes `PIN` from any of these: the state is recorded without a
-native ref and `new` forks from it directly (Icechunk snapshot id, Lance
-`(branch, version)`, Iceberg snapshot id, lakeFS/Dolt/git commit, Neon LSN on
-the branch it was read from) for as long as the system still has that state.
+- **Content** keys say what the data is: an Icechunk snapshot id, a Neon
+  `next_xid`, a git sha. Equality (drift, `commit`'s unchanged check,
+  `promote`), pin ids, and listing names use only these.
+- **Address** keys say where to find or cut it and can move without the data
+  changing: Neon's `lsn` advances on checkpoints; git's `change_id` exists only
+  when jj is installed, and its `dirty` describes the checkout, not the
+  commit. Backends list them in `VOLATILE_KEYS`; `open`, `pin`, and `verify`
+  get the whole state.
+
+Iceberg's `metadata_location`, which changes on every table commit on any
+branch, is in neither: it is not part of the state at all.
 
 ## Content diffs
 
@@ -113,15 +131,15 @@ concurrently across objects:
 | `dolt` | tables | `dolt_diff_summary` + `dolt_diff_stat` | `modified t +6 rows` |
 | `neon` | -- | no native diff | |
 
-Directory and prefix states are digests, so the `file` backend hands the
-engine a per-file listing at commit time; it is stored content-addressed under
-`.tether/listings/` and committed with the manifests (the same trick as DVC's
-`.dir` files). Diffs of commits made before listings existed fall back to a
-count/size summary. `gc` removes listings no manifest references. Entries are
-capped at 2000 per object; counts are exact. See
-[Concepts: Listings](02-concepts.qmd#listings).
+A directory or prefix state is only a digest, so it cannot be diffed on its
+own. At commit time the `file` backend hands the engine a per-file listing; it
+is stored content-addressed under `.tether/listings/` and committed with the
+manifests (the same trick as DVC's `.dir` files). `diff --content` compares
+two listings file by file; diffs of commits made before listings existed fall
+back to a count/size summary. `gc` removes listings no manifest references.
+Entries are capped at 2000 per object; counts are exact.
 
-## `file` -- local paths and object stores
+## `file`: local paths and object stores
 
 Plain artifacts: a local file or directory, or an object / prefix in S3
 (`s3://`), GCS (`gs://`), or Azure Blob (`az://`, `abfs://`), through
@@ -141,7 +159,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Create | a local directory only (`mkdir` plus a `.tether-owner` marker file the directory walk skips, so the directory fingerprints as empty until something is written). Ref-empty means nothing but the marker; `delete_store` is an `rmdir` that refuses anything else. Remote prefixes are not created or removed by tether. |
 | Notes | `--file immutable` (default) turns any drift into an `ImmutableObjectModified` error at `status` -- and drift means the *bytes* changed, not the timestamp. Local walks use `os.scandir`; symlinked directories are not followed. The first fingerprint of a large tree reads every file (sha256 at ~1.5-3 GB/s per core, up to 8 files at a time); later ones read only what changed. |
 
-## `icechunk` -- Icechunk repositories
+## `icechunk`: Icechunk repositories
 
 | | |
 | --- | --- |
@@ -155,7 +173,9 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Diff | `nodes`: `Repository.diff(from, to)` -- new/deleted groups and arrays, updated metadata, updated chunk counts per array, moves |
 | Create | `Repository.create`, refused if anything exists at the path or under the prefix (not only a repository); the owner marker is the `tether.owner` key in the repository's metadata (needs an icechunk with `Repository.exists` and repository metadata -- 2.2.0 is known to work; older ones lose the `CREATE` capability with a clear error). Ref-empty: no branch but the base, no tag (a pin's later generation `tether.<id>.N` counts as the pin the plan names), and the base still at the repository's first snapshot. `delete_store` re-checks owner and emptiness, then removes only Icechunk's own top-level names (1.x and 2.x layouts) -- a directory or prefix holding anything else is refused and kept. |
 
-## `neon` -- Neon Postgres
+## `neon`: Neon Postgres
+
+*Experimental*: tested against a fake of the Neon API, not a live project.
 
 | | |
 | --- | --- |
@@ -170,7 +190,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Diff | not supported (no native primitive) |
 | Notes | pins are branches, so a working branch cannot be deleted while its pins exist -- `gc --prune-bookmarks` plans such a branch as `keep-branch: cannot be deleted` (with the pins named) even under `--force-prune`; `gc` only drops leaf pins. `commit` then `new` reuses the working branch (it sits at the pin); `new` onto another pin forks a sibling name instead of resetting a branch with children. State content is `{next_xid, lineage}` (`lsn` and `timeline` are volatile address keys): two siblings of one lineage that consumed the same number of transactions compare equal, since Neon has no content hash. Branches *are* the storage (`BRANCH_IS_STORAGE`): `gc --prune-bookmarks` never deletes a Neon working branch that holds unpinned data without `--force-prune`, and never by its state alone. Neon cannot merge a child back into `main` -- work on the trunk bookmark (writes land on `main` directly) for production. `protected` requires a paid plan. Fingerprinting may wake a suspended compute; a plain `status` does not fingerprint (`--snapshot`, `commit`, and `verify` do). |
 
-## `git` -- git and jj repositories
+## `git`: git and jj repositories
 
 Pin the *code* (or any git-tracked data) that produced a dataset. Colocated
 jj repositories work through their `.git`.
@@ -188,7 +208,10 @@ jj repositories work through their `.git`.
 | Create | `git init -b <ref>` plus one empty root commit with a fixed tree, author, and dates, so every store tether creates has the same root sha (`GitBackend.EMPTY_ROOT_SHA`) and the base branch exists to pin and fork from; the owner marker is `git config tether.owner`. Ref-empty: no branch or tag beyond the base, the base *at* that root sha (an amended root is not), and a clean working tree (`git status --porcelain --ignored`: an untracked, staged, or ignored file is data `delete_store` would take with the directory). `delete_store` re-checks both and removes the repository directory only then. |
 | Notes | remote-only (url) repositories are not supported yet. |
 
-## `iceberg` -- Apache Iceberg tables (pyiceberg)
+## `iceberg`: Apache Iceberg tables
+
+*Experimental*: driven through a fake of the pyiceberg table API; not yet run
+against a catalog service.
 
 | | |
 | --- | --- |
@@ -201,7 +224,7 @@ jj repositories work through their `.git`.
 | Handle | `IcebergHandle(table, ref, snapshot_id)` |
 | Diff | `snapshots`: one entry per snapshot on `b`'s ancestry back to `a`, from snapshot summaries (`append: +5 rows, +1 files`); when `a` is not an ancestor, `total-*` counters are compared instead |
 
-## `delta` -- Delta Lake tables (delta-rs)
+## `delta`: Delta Lake tables
 
 | | |
 | --- | --- |
@@ -213,7 +236,7 @@ jj repositories work through their `.git`.
 | Handle | `DeltaHandle(uri, version, table)` -- read-only `DeltaTable` at the version |
 | Diff | `commits`: one entry per transaction-log commit in `(a, b]` with its operation and metrics (`WRITE: +2 rows, +1 files`) |
 
-## `lance` -- Lance datasets
+## `lance`: Lance datasets
 
 | | |
 | --- | --- |
@@ -227,9 +250,10 @@ jj repositories work through their `.git`.
 | Diff | `fragments`: fragment ids added/removed, deletion-file changes, columns added/removed, from the two manifests |
 | Notes | an untouched fork reports its parent's `(branch, version)`, so a no-op commit after `tether new` is a no-op. |
 
-## `lakefs` -- lakeFS repositories
+## `lakefs`: lakeFS repositories
 
-*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
+*Experimental*: tested against a fake of the lakeFS API, not a live
+deployment.
 
 | | |
 | --- | --- |
@@ -242,9 +266,10 @@ jj repositories work through their `.git`.
 | Handle | `LakeFSHandle(uri, repository, ref, commit_id, prefix)` with `uri = lakefs://repo/ref/prefix/` (accepted by lakefs-spec, the S3 gateway, `lakectl`) |
 | Diff | `objects`: server-side `Reference.diff` between the commits, scoped to `prefix`, with sizes |
 
-## `ducklake` -- DuckLake catalogs (DuckDB)
+## `ducklake`: DuckLake catalogs
 
-*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
+*Experimental*: tested against a local DuckDB-file catalog, not a Postgres or
+MySQL catalog with an object-store `data_path`.
 
 | | |
 | --- | --- |
@@ -257,9 +282,10 @@ jj repositories work through their `.git`.
 | Diff | `tables`: per-table created/dropped/altered/inserted/deleted from the snapshots' `changes` maps, with row counts from `ducklake_table_changes` for tables that still exist |
 | Notes | a DuckDB-file metadata catalog can be attached only once per process: operations attach/detach per call (serialized per catalog), and an open handle or your own writer connection in the same process blocks `status`. Postgres/SQLite/MySQL catalogs have no such limit. |
 
-## `dolt` -- Dolt databases (MySQL protocol)
+## `dolt`: Dolt databases
 
-*Experimental*: tested against a fake (lakeFS, Dolt) or a local catalog (DuckLake), not against a live deployment; outside the core stack.
+*Experimental*: tested against a fake of the Dolt SQL surface, not a running
+`dolt sql-server`.
 
 | | |
 | --- | --- |
@@ -273,7 +299,7 @@ jj repositories work through their `.git`.
 | Diff | `tables`: `dolt_diff_summary` (added/dropped/modified/renamed tables, schema changes) with `dolt_diff_stat` row counts |
 | Notes | talks to `dolt sql-server` / Hosted Dolt via PyMySQL; the SQL surface sits behind the `DoltClient` protocol (`tether.backends.dolt`) so other transports can be substituted. |
 
-## `memory` -- in-process reference backend
+## `memory`: in-process reference backend
 
 The executable specification of the protocol, used by the conformance suite and
 the engine tests. Locator `{system, branch}`; state `snapshot_id`; tags and

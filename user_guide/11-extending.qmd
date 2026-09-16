@@ -1,12 +1,16 @@
 ---
 title: "Writing a Backend"
+guide-section: "Advanced"
 ---
 
-A backend maps tether's operations onto one class of system. One instance
-serves every object of its kind; per-object addressing travels in the
-`locator`, so backends are cheap, stateless coordinators over resources the
-user already has. Implement the `ObjectBackend` protocol
-(`tether.backends.base`), register it, and run the conformance suite.
+For contributors adding a system tether does not know yet. A backend maps
+tether's operations onto one class of system. One instance serves every
+object of its kind; per-object addressing travels in the `locator`, so
+backends are cheap, stateless coordinators over resources the user already
+has. Implement the `ObjectBackend` protocol (`tether.backends.base`),
+register it, and run the conformance suite. This page also defines the
+capability flags the rest of the guide refers to, and what *experimental*
+means for a backend.
 
 ## The protocol
 

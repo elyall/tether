@@ -1,11 +1,15 @@
 ---
 title: "CLI Guide"
+guide-section: "Reference"
 ---
 
-The per-command reference (arguments, options, `--help` text) is generated from
-the Typer app and lives under **Reference → CLI**. This page covers what the
-help text cannot: how the commands compose, what they print as JSON, exit
-codes, and environment.
+The per-command reference (arguments, options, `--help` text) is generated
+from the Typer app and lives under **Reference → CLI**. This page covers what
+the help text cannot: how the commands compose, what each one does in the VCS
+and in the stores, exit codes, environment, and JSON shapes. The tutorials
+([Pinning](03-pinning.qmd), [Branching and Writing](04-branching-and-writing.qmd),
+[Reclaiming Storage](05-reclaiming-storage.qmd)) show the same commands in
+use.
 
 ```
 tether init [PATH]
@@ -38,19 +42,21 @@ tether publish [--to DSN] [--schema NAME] [--rev REV]... [--listings] [--dry-run
 tether import SOURCE [--table NAME | --query SQL] [--sync] [--dry-run | --plan FILE | --from-plan FILE]
 ```
 
-Commands run from anywhere inside a dataset: the root is found by walking up to
-the nearest `tether.toml`. Every command that inspects external systems fans out
-concurrently across objects, and every command that prints a result accepts
-`--json` except `add` and `remove`.
+Commands run from anywhere inside a dataset: the root is found by walking up
+to the nearest `tether.toml`. Every command that inspects external systems
+fans out concurrently across objects, and every command that prints a result
+accepts `--json` except `add` and `remove`. `export`, `publish`, and `import`
+are experimental and print a note saying so.
 
 ## Exit codes and errors
 
 `0` on success, `1` on any `TetherError` (printed to stderr as `error: ...`).
-`verify` also exits `1` when any report is not `ok`, which makes it a natural
-CI gate. `undo`, `repair`, `upgrade`, and `forget-workspace` exit `2` when they did part of the job and the
-store would not allow the rest (each such part is printed as `IRREVERSIBLE` /
-`FAILED`). Failures in one object's backend during a fan-out are aggregated
-into one message listing each object.
+`verify` also exits `1` when any report is not `ok`, and `promote` when
+anything was refused, which makes both natural CI gates. `undo`, `repair`,
+`upgrade`, and `forget-workspace` exit `2` when they did part of the job and
+the store would not allow the rest (each such part is printed as
+`IRREVERSIBLE` / `FAILED`). Failures in one object's backend during a fan-out
+are aggregated into one message listing each object.
 
 ## Revisions
 
@@ -72,7 +78,57 @@ the ones you are done with.
 | `PATH`, `JJ_CONFIG`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
 | Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](09-backends.qmd). |
 
-## Locator options for `add`
+## Plans
+
+`commit`, `new`, `restore`, `gc`, `drop`, `promote`, `import`, `repair`,
+`upgrade`, and `forget-workspace` write to external systems (or rewrite
+history), and each is a plan followed by an apply. `--dry-run` runs only the
+plan and prints it (as JSON with `--json`); `--plan FILE` also saves it;
+`--from-plan FILE` skips planning and applies the saved actions. Before
+applying, tether re-checks the plan's preconditions -- the manifests, the
+branch heads it will touch, the workspace -- and refuses with
+`StalePlanError` if anything differs from what the plan recorded. `gc` and
+`drop` are dry runs unless `--no-dry-run` or `--from-plan` is given. The
+contract is spelled out in
+[Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans).
+
+```
+plan: commit (2 write(s))
+                 pin  zarr/imaging  [icechunk] tether.0a1b2c3d.deb4861eb388e5f6  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
+          vcs-commit  jj commit: 'Relabel plate1'
+                      db/metrics: unchanged
+```
+
+Action verbs, by command:
+
+| Command | Verbs |
+| --- | --- |
+| `commit`, `pull` | `pin`, `record`, `vcs-commit` |
+| `new` | `fork`, `defer-fork`, `reuse`, `share`, `trunk` |
+| `restore` | `fork`, `refuse` |
+| `promote` | `fast-forward`, `merge`, `hold`, `refuse` |
+| `gc` | `unpin`, `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`; with `--delete-stores`: `delete-store`, `keep-store`, `forget-store`, `forget-touched` |
+| `drop` | `leave-bookmark`, `abandon-commit`, `delete-bookmark`, then gc's verbs |
+| `forget-workspace` | `delete-file`, `forget-vcs-workspace` |
+| `import` | `add`, `update`, `remove` |
+| `publish` | `upsert` |
+| `repair` | `repin`, `refork` |
+| `upgrade` | `rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`, `refingerprint`, `rename-manifest`, `rewrite-locator` |
+
+`trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, `keep-branch`, and
+`keep-store` are informational -- they write nothing, and a plan holding only
+those is empty.
+
+`share` is how objects that live in one native branch space -- two databases
+of a Neon project, two keys on one Icechunk store -- get *one* branch per
+bookmark: the first member forks (or defers) it, the others share it, and a
+member that pins a different state of the same branch is refused (a branch is
+at one point; commit them together on the trunk first). `restore` and
+`promote` follow the same rule: one reset or fast-forward per branch, the
+siblings `share` it -- and both refuse to name only some of the objects that
+write through a branch, since moving it moves them all.
+
+## `add`, `set`, `remove`
 
 The positional `LOCATOR` becomes the `uri` field. Named options map to locator
 fields; `--set key=value` (repeatable) covers everything else. Which fields a
@@ -90,20 +146,23 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
 | `--at ID` / `--pick` | `at` | initial position: snapshot id / version / commit / tag (all but file, neon) that the first commit pins instead of the branch head; `--pick` chooses from `log` interactively |
 | `--set k=v` | `k` | `path=`, `identifier=`, `data_path=`, `allow_dirty=1`, ... |
-| `--create` | -- | **experimental**: make an empty store at the locator first (`CREATE` backends: icechunk, git, a local `file` directory; the memory backend), mark it as this dataset's, and index it so `gc --delete-stores` can delete it once nothing references it. Refused if anything already exists there. On a bookmark the store's working branch is forked at once; no `new` needed before the first write. From Python, `repo.create(key, kind, locator)` does this and opens the handle. |
+| `--create` | -- | **experimental**: make an empty store at the locator first (`CREATE` backends: icechunk, git, a local `file` directory), mark it as this dataset's, and index it so `gc --delete-stores` can delete it once nothing references it. Refused if anything already exists there. On a bookmark the store's working branch is forked at once. From Python, `repo.create(key, kind, locator)` does this and opens the handle. |
 
-`tether set KEY... --file|--pin` changes a registered object's policy in
-place (`--all` for every object): manifest-only, logged, undoable. Commit to
-record the policy. Whether writes fork or land upstream is not a policy: it is
-the bookmark the working copy is on.
-
-Policy options: `--file immutable|versioned` (`file` only: treat drift
-as an error, or record object-store version ids), `--pin native|record` (any
+Policy options: `--file immutable|versioned` (`file` only: treat drift as an
+error, or record object-store version ids) and `--pin native|record` (any
 backend: create a native ref per commit, or record the state only and fork
 from it while the system retains it -- see
-[Reclaiming storage](05-reclaiming-storage.qmd)).
+[Reclaiming Storage](05-reclaiming-storage.qmd)). `tether set KEY... --file|--pin`
+changes a registered object's policy in place (`--all` for every object):
+manifest-only, logged, undoable; commit to record it. Whether writes fork or
+land upstream is not a policy: it is the bookmark the working copy is on.
 
-## Status labels
+`tether remove KEY` deletes the manifest and nothing else: the object's
+working ref stays in `.tether/workspace.toml` until a plain `gc` forgets it,
+and the store branch itself is judged by the next `gc --prune-bookmarks` like
+any other stray.
+
+## `status`
 
 ```
 dataset 3f9c2a1b7d0e (STALE: zarr/imaging); on bookmark relabel
@@ -115,14 +174,18 @@ dataset 3f9c2a1b7d0e (STALE: zarr/imaging); on bookmark relabel
 - The header names the bookmark this working copy is on (`on trunk bookmark
   main`; `on no bookmark: read-only`), and a `warning:` line follows when the
   VCS moved, renamed, or deleted it behind tether's back, with what to do.
-- `new` never committed; `modified` current state differs from the committed
-  one; `clean` unchanged; `error` the fingerprint failed.
-- `unrecoverable`: the committed state cannot be reconstructed later (Observed).
+- States: `new` (no commit yet), `modified` (the bookmark's branch for the
+  object differs from the commit), `behind` (on the trunk, a branch-less or
+  `--at` object whose system moved past its pin -- `pull` takes it), `clean`,
+  `error` (the fingerprint failed).
+- `unrecoverable`: the committed state cannot be reconstructed later
+  (Observed).
 - `(created)`: the store was made by `add --create` (`origin = "created"` in
   the manifest; informational -- `gc` decides deletion from the store's owner
   marker, not from this).
-- `(STALE)`: HEAD's manifests changed since this workspace forked its refs (the objects are named; writable `open` and `commit` refuse for all until `new`);
-  run `tether new` before writing.
+- `(STALE)`: HEAD's manifests changed since this workspace forked its refs;
+  the objects are named, and writable `open` and `commit` refuse for all until
+  `tether new`.
 - `verify=`: shown when `[verify] on_status = true`.
 
 `status` is local by default: it shows the *last* snapshot of each object's
@@ -132,16 +195,36 @@ enough to run constantly. `--snapshot` fans out and fingerprints every object
 first: one metadata round-trip per system in parallel, so wall time is the
 slowest one (a suspended Neon compute has to wake). A workspace with no
 snapshot yet always takes one. `[snapshot] auto = true` makes every `status`
-fingerprint; `--no-snapshot` then wins. `verify` always fingerprints.
+fingerprint; `--no-snapshot` then wins. `verify` always fingerprints. A commit
+refreshes the cache only for the objects it fingerprinted, so an object a
+fan-out found `behind` still reads `behind` after an unrelated commit. See
+[Positions](04-branching-and-writing.qmd#positions-and-tether-pull).
 
-States: `new` (no commit yet), `modified` (the bookmark's branch for the
-object differs from the commit), `behind` (on the trunk, a branch-less or
-`--at` object whose system moved past its pin -- `pull` takes it), `clean`,
-`error`. A commit refreshes the cache only for the objects it fingerprinted,
-so an object a fan-out found `behind` still reads `behind` after an unrelated
-commit. See [Positions](04-branching-and-writing.qmd#positions-and-tether-pull).
+## `commit`
 
-## What `pull` does
+1. Refuse if the VCS working copy has left the bookmark (`status` says how to
+   return). Under jj the bookmark must be on the working copy or its parent
+   -- where `new` and `commit` leave it; a `jj new` past an empty change puts
+   it a step further back, and `commit` refuses rather than move it in a
+   second operation (`tether new NAME --keep` brings the working copy back
+   without touching branches). Snapshot the bookmark's branches -- on the
+   trunk every upstream branch, elsewhere the `tether.ws.*` branches that
+   exist -- unless `--no-snapshot`. Objects with no branch keep their pin.
+   Then quiescence checks for backends that need them (Neon refuses while
+   writers are active; `--force` skips).
+2. For each object whose state changed: Pinnable/Forkable backends create the
+   native ref `tether.<pin_id>`; Addressable and `--pin record` objects record
+   the state; Observed backends record it with `recoverable = false`
+   (`--strict` fails instead). Unchanged objects are skipped. If a pin fails,
+   pins created by the same commit are released best-effort.
+3. Write `.tether/objects/<key>.toml` and any `.tether/listings/<hash>.jsonl`,
+   then `jj commit` / `git commit` scoped to those paths (`--no-vcs` skips).
+4. Move the bookmark onto the new commit (one jj operation with the commit,
+   so `jj undo` takes both back; git branches follow by themselves). The
+   store branches stay where they are: `commit` is not `jj commit`, nothing
+   new is forked, and the next write lands on the same branch.
+
+## `pull`
 
 The dataset's fetch. For the bookmark this working copy is on (the only one
 it can pull; `tether new NAME` first for another): fingerprint the heads of
@@ -154,30 +237,7 @@ exist yet, are skipped with a reason; a `file = "immutable"` object that
 changed is refused; uncommitted manifest edits are refused (commit them
 first). `undo` uncommits a pull like a commit.
 
-## What `commit` does
-
-1. Refuse if the VCS working copy has left the bookmark (`status` says how to
-   return). Under jj the bookmark must be on the working copy or its parent
-   -- where `new` and `commit` leave it; a `jj new` past an empty change puts
-   it a step further back, and `commit` refuses rather than move it in a
-   second operation (`tether new NAME --keep` brings the working copy back
-   without touching branches). Snapshot the bookmark's branches -- on the trunk every upstream
-   branch, elsewhere the `tether.ws.*` branches that exist -- unless
-   `--no-snapshot`. Objects with no branch keep their pin. Then quiescence
-   checks for backends that need them (Neon refuses while writers are active;
-   `--force` skips).
-2. For each object whose state changed: Pinnable/Forkable backends create the
-   native ref `tether.<pin_id>`; Addressable and `--pin record` objects record
-   the state; Observed backends record it with `recoverable = false`
-   (`--strict` fails instead). Unchanged objects are skipped.
-3. Write `.tether/objects/<key>.toml` and any `.tether/listings/<hash>.jsonl`,
-   then `jj commit` / `git commit` scoped to those paths (`--no-vcs` skips).
-4. Move the bookmark onto the new commit (one jj operation with the commit,
-   so `jj undo` takes both back; git branches follow by themselves). The
-   store branches stay where they are: `commit` is not `jj commit`, nothing
-   new is forked, and the next write lands on the same branch.
-
-## What `new` does
+## `new`
 
 Decides which bookmark this working copy works on, then records a working ref
 per Forkable object. `-b NAME` creates the bookmark at `REV` (default: here)
@@ -193,7 +253,7 @@ shows `defer-fork` and the first writable `open` creates it from the pin.
 `--eager` creates them all during `new`. Objects with `pin = "record"` fork
 during `new` regardless, because only a branch keeps their recorded state from
 expiring. `Repo.materialize_fork(key)` creates one deferred branch on demand.
-The trade-offs are laid out in [Branching and writing](04-branching-and-writing.qmd#lazy-or-eager).
+The trade-offs: [Lazy or eager](04-branching-and-writing.qmd#lazy-or-eager).
 
 A working branch this workspace already has is *reset* onto the pin by the
 fork -- unless it already sits exactly at the pin (you just committed from
@@ -203,51 +263,107 @@ and `new` stops before touching the VCS or any store; commit the writes, or
 pass `--discard` to throw them away (the fork action then says what it
 discards).
 
-If a pin fails, pins created by the same commit are released best-effort.
+## `open`
 
-## Plans: `--dry-run`, `--plan`, `--from-plan`
+| Handle | Address |
+| --- | --- |
+| `FileHandle` | `uri[#version_id]` |
+| `NeonHandle` | connection URL, password redacted (`--with-password` prints it; `--json` never does) |
+| `GitHandle` | `path@sha` |
+| `IcechunkHandle` | `uri#<tag or branch or snapshot_id>` |
+| `IcebergHandle` | `identifier#<ref or snapshot_id>` |
+| `DeltaHandle` | `uri@vN` |
+| `LanceHandle` | `uri#tag` or `uri#branch@vN` |
+| `LakeFSHandle` | `lakefs://repo/ref/prefix/` |
+| `DuckLakeHandle` | `metadata#snapshot=N` |
+| `DoltHandle` | `mysql://user@host:port/db/ref` |
 
-`commit`, `new`, `restore`, `gc`, `drop`, `promote`, `import`, `repair`,
-`upgrade`, and `forget-workspace` are the commands that write to external
-systems (or rewrite history), and each is a plan followed by an apply. `--dry-run` runs only the plan and prints
-it (as JSON with `--json`); `--plan FILE` also saves it; `--from-plan FILE`
-skips planning and applies the saved actions. Before applying, tether
-re-fingerprints the planned objects (and, for `new`, re-reads the manifests at
-the target) and refuses with `StalePlanError` if anything differs from what
-the plan recorded. `gc` is a dry run unless `--no-dry-run` or `--from-plan` is
-given.
+Without `-r` (and without `TETHER_REV`), Forkable objects open **writable** at
+their working ref -- creating it first if `new` deferred the fork, the one
+store write that is not its own command -- and everything else read-only at
+the base. With `-r REV`, the handle is read-only at that commit's pinned (or
+recorded Addressable) state.
 
-```
-plan: commit (2 write(s))
-                 pin  zarr/imaging  [icechunk] tether.0a1b2c3d.deb4861eb388e5f6  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
-          vcs-commit  jj commit: 'Relabel plate1'
-                      db/metrics: unchanged
-```
+## `restore`
 
-Action verbs: `pin`, `record` (commit); `fork`, `defer-fork`, `reuse`,
-`share`, `trunk` (new); `fork`, `refuse` (restore); `delete-file`,
-`forget-vcs-workspace` (forget-workspace); `leave-bookmark`,
-`abandon-commit`, `delete-bookmark` followed by gc's verbs (drop);
-`fast-forward`, `merge`, `hold`, `refuse` (promote); `unpin`, `delete-branch`,
-`keep-branch`, `forget-working-ref`, `delete-listing`, and -- with
-`--delete-stores` -- `delete-store`, `keep-store`, `forget-store`,
-`forget-touched` (gc); `add`, `update`,
-`remove` (import); `upsert` (publish); `repin`, `refork` (repair);
-`rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`,
-`refingerprint`, `rename-manifest`, `rewrite-locator` (upgrade);
-`vcs-commit`. `trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, and
-`keep-branch` are informational -- they write nothing.
+`tether restore KEY... --from REV` is the per-object `jj restore --from`: it
+resets (or creates) `KEY`'s working branch from what `REV`'s manifest pinned
+and touches nothing else -- other objects' branches, the working-tree
+manifests, and the VCS working copy stay. The object is *not* stale
+afterwards: the next `commit` pins what you restored. Its fork point moves to
+`REV`'s state, so `promote` treats a base that moved since as a divergence
+(merge or refuse), not a fast-forward. A branch holding writes you never
+committed is refused unless `--discard`. `undo` of a restore deletes the
+branch if the restore *created* it and otherwise reports the head it had:
+`restore` again, from the commit you want, is the way back.
 
-`share` is how objects that live in one native branch space -- two databases
-of a Neon project, two keys on one Icechunk store -- get *one* branch per
-bookmark: the first member forks (or defers) it, the others share it, and a
-member that pins a different state of the same branch is refused (a branch is
-at one point; commit them together on the trunk first). `restore` and
-`promote` follow the same rule: one reset or fast-forward per branch, the
-siblings `share` it -- and both refuse to name only some of the objects that
-write through a branch, since moving it moves them all.
+## `promote`
 
-## `gc` scope
+Per Forkable object, compares the upstream branch to the fork point recorded
+when the bookmark's branch was created (or, with `--rev`, to the target's
+ancestry): unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` ->
+`merge`; otherwise `refuse` with the backend's recipe. `--strategy ff` turns
+merges into refusals, `--strategy merge` turns fast-forwards into refusals.
+
+A bookmark is planned whole or not at all: if any object is refused and no
+keys were named, the others are `held` (the output says what each would have
+done) and nothing is written -- a refusal never leaves `main` with a mix of
+landed and unlanded systems. That guarantee is the plan's: once the apply is
+under way each system's fast-forward stands on its own, so a backend that
+fails mid-apply leaves the systems before it landed and the trunk bookmark
+where it was (`promote` again finishes the rest; there is no cross-system
+undo). `tether promote KEY...` lands a subset on purpose; the trunk bookmark
+never moves for a subset. When everything fast-forwarded and nothing was
+refused, the trunk bookmark is moved to this bookmark's commit
+(`main -> <commit>` in the output). After a merge the branch is reset onto
+the merge result so the next `commit` pins it, and a second `promote` moves
+the trunk. Exit status is `1` when anything was refused (conflicts included).
+The walkthrough: [Landing it](04-branching-and-writing.qmd#landing-it-tether-promote).
+
+## `drop`
+
+`tether drop BOOKMARK` throws a bookmark away: the opposite of `promote`, in
+one step. Dry-run by default; the plan lists, in order:
+
+1. `leave-bookmark` -- when this checkout is on it, `new` to `--to` (default
+   the trunk) first. A bookmark another live checkout works on is refused.
+2. `abandon-commit`, one per commit that only this bookmark reaches. Commits
+   another bookmark also reaches stay, so a line that branched off this one
+   keeps its base. (jj: `jj abandon`; git: nothing reaches them once the
+   branch is gone.)
+3. `delete-bookmark`.
+4. the store side: `gc --prune-bookmarks` restricted to this bookmark's
+   branches, the pins nothing references once the commits are gone, and with
+   `--delete-stores` the experimental created-store step. One rule is
+   `drop`'s own: a branch whose head a *dropped commit* pinned or recorded is
+   deleted -- that is committed work you are throwing away by name -- where
+   `gc` alone would keep it as "unpinned writes". Writes no commit ever
+   recorded are still kept unless `--force-prune`.
+
+The store actions in the plan are a preview computed as if the commits were
+already gone; apply re-plans them live after the VCS half, because `gc`
+binds to the history it sees. The plan is stale -- refused with "re-run the
+plan" -- if the bookmark moved, this checkout moved, history changed, another
+checkout started working on the bookmark, or the set of commits only the
+bookmark reaches changed (a `promote` or a `jj bookmark set` onto the line in
+between); that last one is re-derived at apply, never trusted from a saved
+plan. Refused for the trunk. Not undoable by tether (`jj undo` / the reflog
+bring the commits and the bookmark back; `repair` the pins and branches while
+their states are reachable).
+
+## `abandon`
+
+`tether abandon REV...` is the surgical form: `jj abandon` / a git rebase
+that drops the named commits from a line you keep, plus the `gc` plan for the
+pins only they referenced. Later commits keep their manifests exactly as they
+were (snapshot, not patch, semantics -- the VCS's own rebase would conflict on
+them). Nothing is released unless `--gc`; `tether gc --no-dry-run` does it
+later. Under git the commits must be on the current branch and the tree
+clean; a conflict outside `.tether/` aborts. Not undoable by tether -- `jj
+undo` / the reflog bring the commits back, `repair` the pins. To throw a whole
+bookmark away, use `drop`.
+
+## `gc`
 
 Default: release pins no manifest in VCS history (or the working tree)
 references, forget the working refs of objects removed with `tether remove`
@@ -288,61 +404,13 @@ are unpinned and their branches judged by the table above (without
 
 `--store KIND=LOCATOR` (repeatable) adds a created store to consider even when
 this clone's index does not have it -- the creator's clone is gone -- under the
-same rules; it implies `--delete-stores`.
-
-Under the same flag, `gc` also looks inside the stores this clone has
-*touched* (forked a branch in, or pinned -- `tether-touched.jsonl`) that no
-manifest names any more, and releases this dataset's dead refs there
-(`unpin`, `delete-branch` under the table above, "touched by this clone" in
-the detail). A store with nothing of the dataset's left is dropped from that
-index (`forget-touched`). A same-dataset ref this clone cannot account for is
-left alone, with a note.
-
-`undo gc` reports a deleted store as irreversible. See
-[Reclaiming Storage](05-reclaiming-storage.qmd#stores-tether-created).
-
-## `drop`
-
-`tether drop BOOKMARK` throws a bookmark away: the opposite of `promote`, in
-one step. Dry-run by default; the plan lists, in order:
-
-1. `leave-bookmark` -- when this checkout is on it, `new` to `--to` (default
-   the trunk) first. A bookmark another live checkout works on is refused.
-2. `abandon-commit`, one per commit that only this bookmark reaches. Commits
-   another bookmark also reaches stay, so a line that branched off this one
-   keeps its base. (jj: `jj abandon`; git: nothing reaches them once the
-   branch is gone.)
-3. `delete-bookmark`.
-4. the store side: `gc --prune-bookmarks` restricted to this bookmark's
-   branches, the pins nothing references once the commits are gone, and with
-   `--delete-stores` the experimental created-store step. One rule is
-   `drop`'s own: a branch whose head a *dropped commit* pinned or recorded is
-   deleted -- that is committed work you are throwing away by name -- where
-   `gc` alone would keep it as "unpinned writes". Writes no commit ever
-   recorded are still kept unless `--force-prune`.
-
-The store actions in the plan are a preview computed as if the commits were
-already gone; apply re-plans them live after the VCS half, because `gc`
-binds to the history it sees. The plan is stale -- refused with "re-run the
-plan" -- if the bookmark moved, this checkout moved, history changed, another
-checkout started working on the bookmark, or the set of commits only the
-bookmark reaches changed (a `promote` or a `jj bookmark set` onto the line in
-between); that last one is re-derived at apply, never trusted from a saved
-plan. Refused for the trunk. Not undoable by tether
-(`jj undo` / the reflog bring the commits and the bookmark back; `repair` the
-pins and branches while their states are reachable).
-
-## `abandon`
-
-`tether abandon REV...` is the surgical form: `jj abandon` / a git rebase
-that drops the named commits from a line you keep, plus the `gc` plan for the
-pins only they referenced. Later commits keep their manifests exactly as they
-were (snapshot, not patch, semantics -- the VCS's own rebase would conflict on
-them). Nothing is released unless `--gc`; `tether gc --no-dry-run` does it
-later. Under git the commits must be on the current branch and the tree
-clean; a conflict outside `.tether/` aborts. Not undoable by tether -- `jj
-undo` / the reflog bring the commits back, `repair` the pins. To throw a whole
-bookmark away, use `drop`.
+same rules; it implies `--delete-stores`. Under the same flag, `gc` also looks
+inside the stores this clone has *touched* (forked a branch in, or pinned --
+`tether-touched.jsonl`) that no manifest names any more, and releases this
+dataset's dead refs there; a store with nothing of the dataset's left is
+dropped from that index (`forget-touched`). `undo gc` reports a deleted store
+as irreversible. The rules in full:
+[Stores tether created](05-reclaiming-storage.qmd#stores-tether-created).
 
 ## `forget-workspace`
 
@@ -350,20 +418,55 @@ bookmark away, use `drop`.
 `git worktree remove` plus tether's half: its `workspace.toml` and `ops.jsonl`
 are removed and the VCS stops tracking the checkout. Store branches belong to
 bookmarks, not workspaces, so none are touched -- `jj bookmark delete NAME`
-then `gc --prune-bookmarks` releases them. Forgetting the current workspace
-leaves the directory without a working copy under jj, as `jj workspace
-forget` does. Plan/apply; not undoable. The retire-a-bookmark flow:
-[Reclaiming storage](05-reclaiming-storage.qmd#branches-of-bookmarks-that-are-gone).
+then `gc --prune-bookmarks` (or `tether drop NAME`) releases them. Forgetting
+the current workspace leaves the directory without a working copy under jj,
+as `jj workspace forget` does. Plan/apply; not undoable. The retire-a-bookmark
+flow: [Branches of bookmarks that are gone](05-reclaiming-storage.qmd#branches-of-bookmarks-that-are-gone).
 
 ## `ops`, `undo`, `repair`
 
-Every command that writes to a store appends an entry to this workspace's
-operation log, `.tether/ops.jsonl` (untracked; see
-[Concepts](02-concepts.qmd#the-operation-log)). `tether ops` prints the newest
-entries, one line each -- id, time, command, what it did, and `(undone by ID)`
-where applicable.
+### The operation log
 
-`tether undo [OP_ID]` reverses the newest undoable entry (or the one named):
+The VCS records the manifests. It cannot see which native refs `commit`
+created, which branches `new` forked or reset and what their heads were
+before, what `gc` deleted, or where `promote` moved a base branch from. Every
+apply therefore writes an entry to `.tether/ops.jsonl` -- per workspace,
+untracked, append-only, like jj's own `op log` -- holding the plan it applied,
+what it did, and what it replaced. `tether ops` prints the newest entries,
+one line each: id, time, command, what it did, and `(undone by ID)` where
+applicable.
+
+The log is a journal: a store-writing command appends its entry (plan and
+what `undo` would need) and syncs it *before* the first side effect, then
+appends a completion mark with the result. A process killed in between leaves
+an entry marked `INCOMPLETE`; `undo` skips it (what it did is not known),
+`repair --dry-run` names it, and `gc` collects whatever it left. Each side
+effect also appends a progress record as it takes effect, so `repair
+--dry-run` can say which forks, unpins, or fast-forwards of an interrupted
+operation had already happened; running the command again finishes what is
+left.
+
+One writer holds `.tether/lock` for the duration of a writing command, so two
+`tether` processes in one checkout cannot interleave journal entries and
+`workspace.toml` writes. Commands that create references to pins (`commit`,
+`pull`), release them (`gc`), or remove commits (`undo`, `abandon`, `drop`)
+also hold a repository-wide lock in the VCS's shared directory, so a gc here
+cannot race a commit in another workspace.
+
+`commit` compensates as a unit: if anything fails after the pins -- a
+manifest write, a listing, the VCS commit -- the pins this commit created are
+released (never a pin an earlier commit made and this one merely reused), the
+manifests it wrote are put back, and the journal records the attempt as
+failed and rolled back. The one thing it never undoes is a dataset commit that
+landed: if the adapter fails *after* writing the commit, history already names
+the pins, so the operation completes as a commit that succeeded and the
+trailing error is reported.
+
+### `undo`
+
+`tether undo [OP_ID]` reverses the newest undoable entry (or the one named)
+*where the store still allows it*, and says exactly what it could not
+reverse:
 
 ```
 $ tether undo
@@ -383,24 +486,30 @@ undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
 | `promote` | -- | always; the previous upstream heads are printed (the trunk bookmark: `jj bookmark set main -r <before>`) |
 | `repair`, `upgrade`, `abandon`, `drop`, `forget-workspace` | -- | always |
 
+The rule for the store side: `undo` deletes what an operation *created* and
+never guesses where something it *reset* should go -- that is a `restore` you
+choose. Several slips in a row are several `undo`s, newest first (there is no
+`jj op restore` equivalent: tether's log holds per-operation deltas, not whole
+views). A created branch that gained writes since the operation is never
+deleted silently: `undo` refuses until you commit them or pass `--discard`.
+
 When the VCS goes around tether (`jj undo`, `jj abandon`, `git reset` on a
 dataset commit), `tether status` prints a `warning:` per vanished commit and
 `tether ops` flags its entry `(vcs commit gone)`. An *undone* commit leaves the
 manifests as uncommitted edits -- commit again; an *abandoned* one reverts
 them -- `gc` releases its pins, `repair` recreates them if it comes back.
+`jj undo` and `git reset` revert the manifests, never the stores: use them for
+the VCS side, `tether undo` for tether's.
 
-The rule for the store side: `undo` deletes what an operation *created* and
-never guesses where something it *reset* should go. Several slips in a row are
-several `undo`s, newest first (there is no `--to`; tether's log holds per-op
-deltas, not whole views, and a walk that stops half-way is worse than one step
-you can see).
+### `repair`
 
-`tether repair` rebuilds what the manifests promise: a pin whose native ref is
-missing is recreated from the recorded state (if the store still has it); a
-working branch this workspace expects but the store lost is forked again.
-`--all-history` checks every commit's pins, not just the working tree's. Pins
-that exist but point elsewhere are reported as notes, never overwritten. It is
-a plan/apply command like the others.
+`tether repair` is the other direction: given the manifests, rebuild what
+they promise. A pin whose native ref is gone is recreated from the recorded
+state (as long as the store still has it); a working branch this workspace
+expects but the store lost is forked again. `--all-history` checks every
+commit's pins, not just the working tree's. Pins that exist but point
+elsewhere are reported as notes, never overwritten. Plan/apply like the
+others.
 
 Icechunk keeps a tombstone for every deleted tag and never lets the name be
 reused, so there a repinned pin lives under the next *generation* of its id
@@ -458,74 +567,16 @@ must agree. That means:
 - Re-running `tether upgrade` continues under the same id and skips the
   renames already made.
 
-## What `restore` does
-
-`tether restore KEY... --from REV` is the per-object `jj restore --from`: it
-resets (or creates) `KEY`'s working branch from what `REV`'s manifest pinned
-and touches nothing else -- other objects' branches, the working-tree
-manifests, and the VCS working copy stay. The object is *not* stale
-afterwards: the next `commit` pins what you restored. Its fork point moves to
-`REV`'s state, so `promote` treats a base that moved since as a divergence
-(merge or refuse), not a fast-forward. A branch holding writes you never
-committed is refused unless `--discard`. `undo` of a restore deletes the
-branch if the restore *created* it and otherwise reports the head it had:
-`restore` again, from the commit you want, is the way back. Plan/apply like
-the others.
-
-## What `promote` does
-
-Per Forkable object, compares the upstream branch to the fork point recorded
-when the bookmark's branch was created (or, with `--rev`, to the target's
-ancestry): unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` ->
-`merge`; otherwise `refuse` with the backend's recipe. `--strategy ff` turns
-merges into refusals, `--strategy merge` turns fast-forwards into refusals.
-A bookmark is planned whole or not at all: if any object is refused and no
-keys were named, the others are `held` (the output says what each would have
-done) and nothing is written -- a refusal never leaves `main` with a mix of
-landed and unlanded systems. That guarantee is the plan's: once the apply is
-under way each system's fast-forward stands on its own, so a backend that
-fails mid-apply leaves the systems before it landed and the trunk bookmark
-where it was (`promote` again finishes the rest; there is no cross-system
-undo). `tether promote KEY...` lands a subset on purpose; the
-trunk bookmark never moves for a subset. When everything fast-forwarded and
-nothing was refused, the trunk bookmark is moved to this bookmark's commit
-(`main -> <commit>` in the output). After a merge the branch is reset onto
-the merge result so the next `commit` pins it, and a second `promote` moves
-the trunk. Exit status is `1` when anything was refused (conflicts included)
-so CI notices. See
-[Branching and writing](04-branching-and-writing.qmd#landing-it-tether-promote).
-
-## What `open` prints
-
-| Handle | Address |
-| --- | --- |
-| `FileHandle` | `uri[#version_id]` |
-| `NeonHandle` | connection URL, password redacted (`--with-password` prints it; `--json` never does) |
-| `GitHandle` | `path@sha` |
-| `IcechunkHandle` | `uri#<tag or branch or snapshot_id>` |
-| `IcebergHandle` | `identifier#<ref or snapshot_id>` |
-| `DeltaHandle` | `uri@vN` |
-| `LanceHandle` | `uri#tag` or `uri#branch@vN` |
-| `LakeFSHandle` | `lakefs://repo/ref/prefix/` |
-| `DuckLakeHandle` | `metadata#snapshot=N` |
-| `DoltHandle` | `mysql://user@host:port/db/ref` |
-
-Without `-r` (and without `TETHER_REV`), Forkable objects open **writable** at
-their working ref -- creating it first if `new` deferred the fork, the one
-store write that is not its own command -- and everything else read-only at
-the base. With `-r REV`, the
-handle is read-only at that commit's pinned (or recorded Addressable) state.
-
 ## `log`
 
 Lists an object's native history newest first: id, timestamp, message, and
 the branches, tags, and tether pins (`tether.<id>`) pointing at each entry.
 For a registered object it starts at the working ref (or the `at` it was
-registered at); `--ref` starts elsewhere (a branch, tag, or id). With `--kind`, the
-positional is a locator for an unregistered object, so you can browse before
-`add`. Ids are valid `--at` values.
+registered at); `--ref` starts elsewhere (a branch, tag, or id). With `--kind`,
+the positional is a locator for an unregistered object, so you can browse
+before `add`. Ids are valid `--at` values.
 
-## `diff` defaults
+## `diff`
 
 No arguments: current commit vs working tree. One revision: that revision vs
 nothing (everything `removed`). Two: `REV_A → REV_B`. `--content` adds each

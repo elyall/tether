@@ -1,6 +1,10 @@
 ---
 title: "Configuration"
+guide-section: "Reference"
 ---
+
+What a dataset is made of on disk, what `tether.toml` can say, and where
+credentials and other per-checkout settings live.
 
 ## Layout
 
@@ -21,7 +25,7 @@ title: "Configuration"
     ops.jsonl                 # untracked: the operation log -- every store write, what it did, what it replaced
 
 <vcs shared dir>/           # .jj/repo/ or .git/ -- one per clone, shared by every checkout, never committed
-  tether.lock                 # the repository-wide lock (add, gc, abandon, promote hold it)
+  tether.lock                 # the repository-wide lock (commit, pull, gc, drop, abandon, undo hold it)
   tether-created.jsonl        # stores this clone created with `add --create`: dataset id, kind, identity,
                               #   locator, key, when, the bookmark it was made on -- what `gc --delete-stores`
                               #   may delete once nothing references them
@@ -49,7 +53,7 @@ the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
 default; a minimal file is `[tether] version = 4` plus the id `init` generates.
 A dataset whose version is older than this tether's is refused by every
 command except `tether upgrade`, which brings it forward in one step (see the
-[CLI guide](07-cli.qmd#upgrade)).
+[CLI Guide](07-cli.qmd#upgrade)).
 
 ```toml
 [tether]
@@ -111,7 +115,7 @@ and ignored, and `tether upgrade` drops it.
 | Field | Values | Meaning |
 | --- | --- | --- |
 | `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
-| `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming storage](05-reclaiming-storage.qmd). |
+| `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming Storage](05-reclaiming-storage.qmd). |
 
 ## Import query
 
@@ -138,7 +142,7 @@ has never heard of cannot reach a store from a clone. Everything else goes in
 `.tether/secrets.toml` (next section), where the same tables may hold any key.
 The per-backend keys are listed in [Backends](09-backends.qmd).
 
-## Trust boundary: `.tether/secrets.toml`
+## Trust boundary: `.tether/secrets.toml` {#trust-boundary-tethersecretstoml}
 
 A cloned dataset is untrusted input. `tether.toml` and the manifests arrive
 with every clone, so nothing in them may choose an executable tether runs, an
@@ -272,7 +276,8 @@ writable `open` never resets a branch that moved in between; `last_snapshot`
 line per store-writing command, appended only (an interruption loses at most
 the line being written). `tether ops` reads it, `tether undo` reverses from
 it. Deleting it loses nothing but the ability to undo what came before. What
-each entry holds: [Concepts](02-concepts.qmd#the-operation-log).
+each entry holds, and how the journal survives an interrupted command:
+[The operation log](07-cli.qmd#the-operation-log) in the CLI Guide.
 
 ## Environment variables
 
