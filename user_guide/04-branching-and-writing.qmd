@@ -288,13 +288,20 @@ Apply refuses if an upstream moved after the plan was made.
 
 The other ending is one command too. `tether drop NAME` leaves the bookmark if
 this checkout is on it (`--to` says where; the trunk by default), drops the
-commits only that bookmark reaches, deletes it, and releases what it held in
-the stores: its pins, and its `tether.ws.*` branches. One rule is `drop`'s
-own: a branch whose head a *dropped commit* pinned is deleted -- that is
-committed work you are throwing away by name, not an afternoon nobody knew
-about. Writes no commit ever recorded are kept, and said so, unless
-`--force-prune`. Dry-run by default; refused for the trunk and for a bookmark
-another live checkout is working on. See the [CLI Guide](07-cli.qmd#drop).
+commits nothing else reaches, deletes it, and releases what it held in the
+stores: its pins, and its `tether.ws.*` branches. One rule is `drop`'s own: a
+branch whose head a *dropped commit* pinned is deleted -- that is committed
+work you are throwing away by name, not an afternoon nobody knew about. Writes
+no commit ever recorded are kept, and said so, unless `--force-prune`. Dry-run
+by default; refused for the trunk and for a bookmark another live checkout is
+working on.
+
+"Nothing else reaches" is the VCS's word: another bookmark, a tag, a pushed
+`NAME@origin`, another workspace sitting on the line -- any of them keeps the
+commits, and the plan then deletes just the bookmark and says what still
+reaches them. Commits are the surgical form's business: `tether abandon REV
+--gc` takes commits off a bookmark you are keeping and releases their pins in
+one action; `drop` is for the whole line. See the [CLI Guide](07-cli.qmd#drop).
 
 ## Positions, and `tether pull`
 

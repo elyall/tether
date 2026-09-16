@@ -347,9 +347,26 @@ plan" -- if the bookmark moved, this checkout moved, history changed, another
 checkout started working on the bookmark, or the set of commits only the
 bookmark reaches changed (a `promote` or a `jj bookmark set` onto the line in
 between); that last one is re-derived at apply, never trusted from a saved
-plan. Refused for the trunk. Not undoable by tether (`jj undo` / the reflog
-bring the commits and the bookmark back; `repair` the pins and branches while
-their states are reachable).
+plan. Refused for the trunk. "Only the bookmark reaches" is exact: another
+bookmark, a tag, a remote bookmark (`feature@origin`, `origin/feature`) or
+another workspace's working copy on the line all keep the commits, and the
+plan then deletes just the bookmark and notes what still reaches them (jj:
+the next `jj git push` deletes the remote side; git: `git push <remote>
+--delete feature`).
+
+Not undoable by tether, and a `drop` you regret is three steps, in order and
+before the next `gc`:
+
+1. `jj undo` (jj) or `git branch feature <sha>` from `git reflog` (git):
+   the commits and the bookmark are back.
+2. `tether repair --all-history`: it re-pins what those commits recorded
+   (`--all-history` because this checkout is not on them yet). Their states
+   are still in the stores if nothing has cleaned them -- an Icechunk
+   snapshot is only unreachable, not deleted, until the repository's own
+   expiry runs.
+3. `tether new feature` to work on it again. The `tether.ws.*` branches
+   `drop` deleted are gone; the bookmark starts from its pins, as a fresh
+   fork.
 
 ## `abandon`
 
