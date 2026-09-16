@@ -510,9 +510,11 @@ tether undo            # the fork  -> branch deleted, fork pending again
 tether ops             # both entries now read "(undone by ...)"
 ```
 
-What undo cannot do it says so: a `gc` that deleted pins gets its branches
-and listings back but reports the pins as `IRREVERSIBLE` (exit code 2); a
-`promote` is refused with the previous base heads printed. `jj undo` and
+What undo cannot do it says so: after a `gc`, forgotten working refs and
+deleted listings come back, but deleted branches and pins stay gone and are
+reported as `IRREVERSIBLE` (exit code 2; `repair` recreates them from the
+manifests while the state is still reachable); a `promote` is refused with
+the previous base heads printed. `jj undo` and
 `git reset` stay what they were -- they move the manifests, never the stores;
 tether's undo is the other half.
 

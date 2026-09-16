@@ -19,7 +19,9 @@ pip install tether-vcs[all]                 # everything
 ```
 
 The distribution is `tether-vcs` (PyPI reserves the bare name); the package you
-import and the command you run are both `tether`.
+import and the command you run are both `tether`. Python 3.11 or newer; the
+experimental `tether add --create` on an Icechunk store needs icechunk 2.x,
+which needs 3.12.
 
 Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`, `azure`
 are aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`,
@@ -39,7 +41,7 @@ tether status
 ```
 
 ```
-dataset 0f2e9c7a11b3
+dataset 0f2e9c7a11b3; on trunk bookmark main
        new  db/metrics  [neon/forkable]
        new  raw/plate1  [file/observed] unrecoverable
        new  zarr/imaging  [icechunk/forkable]
@@ -89,7 +91,8 @@ Where to next:
 <dataset-root>/
   tether.toml                 # committed config, including the dataset id
   .tether/
-    .gitignore                # ignores the two per-workspace files below
+    .gitignore                # ignores the untracked per-checkout files: workspace.toml,
+                              #   ops.jsonl, secrets.toml, cache/, lock
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
     listings/<hash>.jsonl     # committed per-file listings for directory/prefix states
     workspace.toml            # untracked: workspace id, bookmark, working refs, base states, fork points

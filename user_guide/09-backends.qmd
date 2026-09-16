@@ -41,16 +41,16 @@ Common conventions:
 | Kind | Extra | Maturity | Tier | Flags |
 | --- | --- | --- | --- | --- |
 | `file` | -- (local) / `objectstore` | stable | Observed; Addressable for a versioned remote object | `CHEAP_FINGERPRINT`, `DIFF`, `CREATE` (local directory) |
-| `icechunk` | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE`, `CREATE` |
+| `icechunk` | `icechunk` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `CREATE` |
 | `neon` | `neon` | experimental | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
-| `git` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE`, `CREATE` |
-| `iceberg` | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `PROMOTE` |
-| `delta` | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
-| `lance` | `lance` | stable | Forkable | `ATOMIC_REF`, `DIFF` |
-| `lakefs` | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
-| `ducklake` | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF` |
-| `dolt` | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE` |
-| `memory` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
+| `git` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` |
+| `iceberg` | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `HISTORY`, `PROMOTE` |
+| `delta` | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
+| `lance` | `lance` | stable | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY` |
+| `lakefs` | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
+| `ducklake` | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
+| `dolt` | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
+| `memory` | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
 
 `CREATE` is what `tether add --create` needs: the backend can make an empty
 store, mark it as the dataset's, and remove it again once `gc` finds nothing
@@ -130,7 +130,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `uri` (positional; `path` accepted). A trailing `/` (or empty key) means a prefix. `region` overrides the store region. |
-| Config | `storage_options = {...}` passed to `obstore.store.from_url`. Committed (`tether.toml`): region, account name and other non-secret options; endpoints and credentials only in `.tether/secrets.toml`, which may also name a `profile`/`role_arn` or literal keys per URI prefix or object. Otherwise credentials come from the environment / instance metadata. |
+| Config | `storage_options = {...}` passed to `obstore.store.from_url`. Committed (`tether.toml`): only the allowlisted `region`, `allow_http`, `virtual_hosted_style_request`, `conditional_put`; endpoints, account names, and credentials only in `.tether/secrets.toml`, which may also name a `profile`/`role_arn` or literal keys per URI prefix or object. Otherwise credentials come from the environment / instance metadata. |
 | Identity | `{uri}` |
 | State | local file: `type=file, size, sha256`; local dir: `type=dir, count, size, digest` (digest over per-file sha256s); remote object: `type=object, size, etag[, version_id]`; prefix: `type=prefix, count, size, digest` (one paged `LIST`, etag+size per key). Local hashes are cached by `(size, mtime_ns, ctime_ns, inode)` in `.tether/cache/file-hashes.json`, so only files whose stat changed are re-read |
 | Tier | Observed by default. `--file versioned` on a single *remote* object makes it Addressable via `version_id` (S3 version id / GCS generation / Azure version id; requires versioning on the bucket/container -- a recorded state without a version id is refused by `open`). Local paths and prefixes are always Observed. |
@@ -180,7 +180,7 @@ jj repositories work through their `.git`.
 | Locator | `path` (local checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
 | Config | `git_path`, `jj_path` -- `.tether/secrets.toml` `[vcs]` or `TETHER_GIT`/`TETHER_JJ` only; a committed value is refused |
 | Identity | `{path}` (resolved absolute) |
-| State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available, volatile so the same sha pins identically with or without jj |
+| State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available. Both `dirty` and `change_id` are volatile: the same sha is the same state -- and pins identically -- whether or not jj is installed or the checkout has stray files; `pin` still reads the full state and refuses a dirty tree |
 | Pin | lightweight tag `tether.<id>` at the sha. With `remote` set the pin is pushed and is only a pin once the push succeeds: a failed push fails the `pin` and removes the local tag; `unpin` deletes on the remote first and fails if that fails, so local and remote never diverge silently |
 | Fork | branch `name` at the tag's sha (`branch -f` if it exists) |
 | Handle | `GitHandle(path, sha, worktree)` |

@@ -9,7 +9,9 @@ Supporting modules:
 
 - `tether.handles`: the typed native handles `Repo.open` returns.
 - `tether.backends`: the `ObjectBackend` protocol, capability tiers, reports,
-  and the backend registry (one module per system under `tether.backends.*`).
+  and the backend registry (one module per system: stable kinds under
+  `tether.backends.*`, kinds tested against fakes so far under
+  `tether.experimental.backends.*`).
 - `tether.testing`: the conformance suite for backend authors.
 - `tether.vcs`: the jj/git adapters tether stores its history through.
 

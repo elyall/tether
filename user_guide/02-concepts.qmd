@@ -88,7 +88,7 @@ the branch that stands for it:
 | no bookmark | none: read-only | no |
 | any, object not committed yet | -- | yes, once: the branch head or `--at` |
 
-Objects whose system has no branches (files, Iceberg, Delta, DuckLake) have
+Objects whose system has no branches (files, Delta, DuckLake) have
 no working ref on any bookmark: they keep their pin until a trunk `pull`
 reads them. The rule: `commit` contacts an object only if this checkout can
 have moved it; everything else keeps its pin, the way a file you did not edit
@@ -270,7 +270,9 @@ Orthogonal flags refine behavior: `CHEAP_FINGERPRINT` (metadata only),
 (create-if-absent pins), `DIFF` (native content diffs), `HISTORY` (native
 log), `BRANCH_IS_STORAGE` (deleting a branch reclaims its data; `gc` never
 prunes such a branch without force), `PROMOTE` (fast-forward the base branch
-to a fork) and `MERGE` (three-way merge a fork into the base).
+to a fork), `MERGE` (three-way merge a fork into the base), and `CREATE`
+(make a store tether then owns and remove it again -- the experimental
+`add --create` / `gc --delete-stores`).
 
 ## Handles, not data
 
@@ -303,8 +305,9 @@ A state's keys do two jobs:
   `promote`), pin ids, and listing names use only these.
 - **Address** keys say where to find or cut it and can move without the data
   changing: Neon's `lsn` advances on checkpoints; git's `change_id` exists only
-  when jj is installed. Backends list them in `VOLATILE_KEYS`; `open`, `pin`,
-  and `verify` get the whole state.
+  when jj is installed, and its `dirty` describes the checkout, not the
+  commit. Backends list them in `VOLATILE_KEYS`; `open`, `pin`, and `verify`
+  get the whole state.
 
 Iceberg's `metadata_location`, which changes on every table commit on any
 branch, is in neither: it is not part of the state at all.
@@ -360,7 +363,7 @@ in `status` and `ops`).
 | push, fetch, review | jj / git | sharing is the VCS's |
 | open a second checkout | `jj workspace add` / `git worktree add` | the first tether command there starts its own tether workspace; it works on a bookmark of its own, or `--shared` |
 | finish with a checkout | `tether forget-workspace` | the VCS forgets it and its tether state files go; the bookmark's branches stay |
-| undo tether's last operation | `tether undo` (`--to ID` for several) | the VCS cannot see what tether did to the stores |
+| undo tether's last operation | `tether undo` (an `ID` from `tether ops` for an older one; run again for several) | the VCS cannot see what tether did to the stores |
 | undo any other VCS operation | `jj undo` / the reflog | tether did nothing there; `status` warns if a dataset commit went with it |
 | a store lost a pin or branch a manifest names | `tether repair` | manifests are the source of truth |
 | reclaim storage | `tether gc` (after the VCS surgery above) | what history no longer names, the stores can release |

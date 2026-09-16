@@ -13,7 +13,8 @@ title: "Configuration"
     .gitignore                # ignores workspace.toml, ops.jsonl, secrets.toml, cache/, lock
     secrets.toml              # untracked: everything a clone must not decide -- credentials or references,
                               #   endpoints, executables, init SQL; per kind, per URI prefix, per object
-    objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
+    objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin,
+                              #   recoverable, captured_at, origin (only when "created")
     listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
                               #   states (so `diff --content` can compare them); pruned by gc
     workspace.toml            # untracked: workspace_id, bookmark, working refs, pending forks, base states, fork points, last snapshot
@@ -45,14 +46,14 @@ several datasets pin one store.
 
 A dataset's configuration is `tether.toml` at the dataset root, committed with
 the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
-default; a minimal file is `[tether] version = 3` plus the id `init` generates.
+default; a minimal file is `[tether] version = 4` plus the id `init` generates.
 A dataset whose version is older than this tether's is refused by every
-command except `tether upgrade`, which brings it forward one migration at a
-time (see the [CLI guide](07-cli.qmd#upgrade)).
+command except `tether upgrade`, which brings it forward in one step (see the
+[CLI guide](07-cli.qmd#upgrade)).
 
 ```toml
 [tether]
-version = 3         # the format this tether writes; older datasets need `tether upgrade`
+version = 4         # the format this tether writes; older datasets need `tether upgrade`
 
 [dataset]
 id = "0a1b2c3d"      # 8 hex chars; the namespace of this dataset's pins and branches in every store
@@ -245,6 +246,9 @@ last_snapshot_at = "2026-09-04T22:10:03.118Z"
 [pending_forks]                      # decided by `new`, created on first writable open
 "features" = "tether.ws.0a1b2c3d.relabel"
 
+[pending_resets."features"]          # the head `new` reviewed and agreed to reset on that open
+version = 9                          #   (a branch that moved since is refused instead)
+
 [base_states."zarr/imaging"]         # committed state this working ref corresponds to
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
 
@@ -258,7 +262,9 @@ snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 `base_states` drive stale-working-copy detection (per object); `working_refs`
 are what `open` writes to; `pending_forks` are the branches `new` decided on but has not
 created (the first writable `open` moves an entry to `working_refs`);
-`last_snapshot` (and `last_snapshot_at`) is what a plain `status` shows.
+`pending_resets` record the head `new` saw on a branch it will reset, so a
+writable `open` never resets a branch that moved in between; `last_snapshot`
+(and `last_snapshot_at`) is what a plain `status` shows.
 
 ## Operation log
 

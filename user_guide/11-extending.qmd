@@ -199,7 +199,7 @@ drives the label. To graduate a backend: move its file to `tether/backends/`,
 point its `_BUILTIN_MODULES` entry there, set `MATURITY = "stable"`, and update
 the maturity table in [Backends](09-backends.qmd). Nothing users type or
 import changes, because none of it named the module path. The registry layer
-graduates the same way: move the two modules up, keep the `tether` re-exports.
+graduates the same way: move the package up, keep the `tether` re-exports.
 
 ## Conformance suite
 

@@ -1,7 +1,7 @@
 """Backend protocol, capability tiers, and a small registry.
 
 A *backend* maps tether operations onto one class of system (files, Icechunk,
-Neon, ...). Backends declare their capabilities; the engine (``repo.py``)
+Neon, ...). Backends declare their capabilities; the engine (``tether.repo``)
 enforces them per command and degrades explicitly, and the conformance suite
 (``testing.py``) runs the tier-appropriate checks against any backend.
 
@@ -494,7 +494,7 @@ class ObjectBackend(Protocol):
     def working_ref_blockers(self, locator: Locator, ref: str) -> str | None:
         """Why ``ref`` cannot be deleted right now, or ``None`` if it can.
 
-        Consulted by ``gc --prune-workspaces`` and ``forget-workspace`` before
+        Consulted by ``gc --prune-bookmarks`` and ``forget-workspace`` before
         planning a ``delete-branch``, so an undeletable branch is planned as
         kept with the reason instead of failing at apply time. Neon: a branch
         with children (pins taken on it) cannot be deleted until they are.
@@ -531,7 +531,7 @@ class ObjectBackend(Protocol):
     def list_working_refs(self, locator: Locator) -> list[str]:
         """Native branches created by :meth:`fork` (``tether.ws.*``). Requires ``FORK``.
 
-        Default: none. Used by ``gc --prune-workspaces``.
+        Default: none. Used by ``gc --prune-bookmarks``.
         """
         return []
 

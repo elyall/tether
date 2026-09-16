@@ -205,11 +205,12 @@ tether gc --plan /tmp/gc.json
 tether gc --from-plan /tmp/gc.json
 ```
 
-`gc` is the one command whose store writes cannot all be undone: `tether undo`
-after a `gc` brings back deleted branches (from the heads it recorded) and
-listings (from the VCS), and reports the released pins as irreversible. If you
-restore a commit that references a released pin -- `jj undo` of the abandon --
-`tether repair` recreates the pin from the manifest's state, as long as the
+`gc` is the one command whose store writes cannot be undone: `tether undo`
+after a `gc` restores the working refs it forgot and the listings it deleted
+(from the VCS), and reports the released pins and deleted branches as
+irreversible. If you restore a commit that references a released pin --
+`jj undo` of the abandon -- `tether repair` recreates the pin from the
+manifest's state, as long as the
 system has not expired that snapshot yet. That window is the argument for
 running `gc` some time *after* the history edit, not in the same breath.
 

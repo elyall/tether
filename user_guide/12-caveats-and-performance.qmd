@@ -112,8 +112,10 @@ that policy too (tether does not record per-object version ids), and a
 recorded object state that carries no version id -- the bucket was not
 versioned after all -- is refused by `open` rather than served from the
 object's current bytes. Object-store credentials come from the environment;
-`[backends.file] storage_options` in `tether.toml` passes non-secret options
-(region, endpoint, account name) to obstore.
+`[backends.file] storage_options` in `tether.toml` passes the allowlisted
+non-secret options (`region`, `allow_http`, `virtual_hosted_style_request`,
+`conditional_put`) to obstore; endpoints, account names, and credentials go in
+`.tether/secrets.toml`.
 
 **Iceberg catalog variance.** S3 Tables disables maintenance when user refs
 exist; use `--pin record` there (forks then come from the snapshot id, valid

@@ -24,8 +24,8 @@ else tether can do with each depends on what the system offers:
 | single object-store objects with versioning enabled | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | git / [jj](https://jj-vcs.dev) repositories | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Icechunk](https://icechunk.io) repositories | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| [Neon](https://neon.com) Postgres databases | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| [Apache Iceberg](https://iceberg.apache.org) tables | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| [Neon](https://neon.com) Postgres databases *(experimental)* | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [Apache Iceberg](https://iceberg.apache.org) tables *(experimental)* | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | [Delta Lake](https://delta.io) tables | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | [Lance](https://lance.org) datasets | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
 | [lakeFS](https://lakefs.io) repositories *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -123,6 +123,9 @@ pip install tether-vcs[cli]                 # core + CLI
 pip install tether-vcs[cli,icechunk,neon]   # add backends you need
 pip install tether-vcs[all]                 # everything
 ```
+
+Python 3.11 or newer. (`tether add --create` on an Icechunk store needs
+icechunk 2.x, which needs 3.12.)
 
 Extras: `cli`, `objectstore` (S3/GCS/Azure for `file`; `s3`/`gcs`/`azure` are
 aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,

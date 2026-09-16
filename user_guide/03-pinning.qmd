@@ -32,7 +32,7 @@ tether status
 ```
 
 ```
-dataset 0f2e9c7a11b3
+dataset 0f2e9c7a11b3; on trunk bookmark main
        new  db/metrics  [neon/forkable]
        new  raw/plate1  [file/observed] unrecoverable
        new  zarr/imaging  [icechunk/forkable]
@@ -79,7 +79,7 @@ Added regular file .tether/objects/zarr/imaging.toml:
        15: [state]
        16: snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
        18: [pin]
-       19: id = "6674305d5e1f"
+       19: id = "0a1b2c3d.6674305d5e1fe5f6"
        20: ref = "tether.0a1b2c3d.6674305d5e1fe5f6"
 ```
 

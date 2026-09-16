@@ -376,7 +376,7 @@ class VcsAdapter(Protocol):
         """Root directories of every live checkout of this repository.
 
         jj workspaces (``jj workspace list`` + ``jj workspace root --name``) or
-        git worktrees (``git worktree list``). Used by ``gc --prune-workspaces``
+        git worktrees (``git worktree list``). Used by ``gc --prune-bookmarks``
         to keep the working branches of workspaces that still exist.
         """
 
