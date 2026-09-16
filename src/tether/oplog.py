@@ -168,7 +168,7 @@ class OpEntry:
             and self.undone_by is None
             and not self.incomplete
             and self.command
-            not in ("undo", "repair", "upgrade", "abandon", "forget-workspace")
+            not in ("undo", "repair", "upgrade", "abandon", "drop", "forget-workspace")
         )
 
     def summary(self) -> str:
@@ -204,6 +204,18 @@ class OpEntry:
             return f"restored {', '.join(keys)} from {str(r.get('from_commit'))[:12]}"
         if self.command == "fork":
             return f"forked {r.get('key')} -> {r.get('ref')}"
+        if self.command == "drop":
+            n = len(r.get("abandoned") or [])
+            gc = r.get("gc") or {}
+            n_pins = sum(len(v) for v in (gc.get("unpinned") or {}).values())
+            n_br = sum(len(v) for v in (gc.get("deleted_working_refs") or {}).values())
+            text = (
+                f"dropped {r.get('bookmark')}: {n} commit(s), {n_pins} pin(s), "
+                f"{n_br} branch(es)"
+            )
+            if gc.get("deleted_stores"):
+                text += f", {len(gc['deleted_stores'])} store(s)"
+            return text
         if self.command == "gc":
             n_pins = sum(len(v) for v in (r.get("unpinned") or {}).values())
             n_br = sum(len(v) for v in (r.get("deleted_working_refs") or {}).values())

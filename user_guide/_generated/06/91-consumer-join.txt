@@ -1,8 +1,0 @@
-train-2026-09-14 code 0a1b2c3d.68c2991eb8b34295 {'sha': '68610dc2b2ea1ca33630406d6a60d6ea0f912acb', 'dirty': False}
-train-2026-09-14 features 0a1b2c3d.1be70ba1eb967f7f {'branch': 'main', 'version': 3}
-train-2026-09-14 qc/focus 0a1b2c3d.e1d708f361c4f9cf {'branch': 'main', 'version': 1}
-train-2026-09-14 raw/plate1 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': '9990e2f2b8b77725dbbecc9acb45df5f'}
-train-2026-09-14 raw/plate2 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': 'a3fb5832d75cdfb070f8d0599f98c7b3'}
-train-2026-09-14 raw/plate3 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': '47532d1166feda0d67f0151292ebf110'}
-train-2026-09-14 scratch/embeddings None {'branch': 'tether.ws.0a1b2c3d.sweep', 'version': 5}
-train-2026-09-14 zarr/imaging 0a1b2c3d.0e509868c4ad0242 {'snapshot_id': '4JV2FQGRZYNAGTXXRJER'}

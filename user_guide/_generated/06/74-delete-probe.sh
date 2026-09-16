@@ -1,1 +1,0 @@
-jj bookmark delete probe

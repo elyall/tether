@@ -588,9 +588,8 @@ def test_use_cases_story(
     )
     story.tether("commit-features", "commit", "-m", "Features rebuilt for model v3")
     story.jj("log-landed", "log")
-    story.tether("abandon-relabel", "abandon", "relabel-v3", "--gc")
-    story.jj("delete-relabel", "bookmark", "delete", "relabel-v3")
-    story.tether("gc-relabel", "gc", "--prune-bookmarks", "--no-dry-run")
+    story.tether("drop-relabel-plan", "drop", "relabel-v3")
+    story.tether("drop-relabel", "drop", "relabel-v3", "--no-dry-run")
     story.jj("log-clean", "log")
 
     # ---- 3. A/B --------------------------------------------------------
@@ -630,9 +629,7 @@ def test_use_cases_story(
     story.tether("diff-ab", "diff", "a", "b", "--content")
     story.tether("promote-a", "promote")
     story.tether("forget-b", "forget-workspace", ws_b[:8])
-    story.tether("abandon-b", "abandon", "b", "--gc")
-    story.jj("delete-b", "bookmark", "delete", "b")
-    story.tether("gc-b", "gc", "--prune-bookmarks", "--force-prune", "--no-dry-run")
+    story.tether("drop-b", "drop", "b", "--no-dry-run")
     story.jj("log-final", "log")
 
     # ---- 4. Catch drift nightly ----------------------------------------
@@ -806,11 +803,14 @@ def test_use_cases_story(
     story.tether("commit-probe", "commit", "-m", "probe: embeddings v2")
     story.tether("status-probe", "status")
     story.jj("log-probe", "log", "-r", "main::@")
-    story.tether("new-sweep-again", "new", "sweep")
-    story.tether("abandon-probe", "abandon", "probe")
-    story.jj("delete-probe", "bookmark", "delete", "probe")
     story.tether(
-        "gc-probe", "gc", "--prune-bookmarks", "--delete-stores", "--no-dry-run"
+        "drop-probe",
+        "drop",
+        "probe",
+        "--to",
+        "sweep",
+        "--delete-stores",
+        "--no-dry-run",
     )
     story.sh("ls-after", "ls", str(data), display="ls ~/data")
 

@@ -1,0 +1,12 @@
+  pinned scratch/embeddings -> (addressable)
+  pinned zarr/imaging -> tether.0a1b2c3d.f6b7dc3d46841ab8
+committed 4b82058e9ca8
+  pinned scratch/embeddings -> (addressable)
+  pinned zarr/imaging -> tether.0a1b2c3d.dee05e5b687e6a25
+committed 33df955000c4
+  pinned scratch/embeddings -> (addressable)
+  pinned zarr/imaging -> tether.0a1b2c3d.72e6ad98408a9f09
+committed 0e509868c4ad
+  pinned scratch/embeddings -> (addressable)
+  pinned zarr/imaging -> tether.0a1b2c3d.37522ceba6ebd89c
+committed 55901daa14e8

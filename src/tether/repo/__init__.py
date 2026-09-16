@@ -11,13 +11,14 @@ from __future__ import annotations
 from tether.repo._commit import CommitOps
 from tether.repo._core import TETHER_REV_ENV, RepoCore
 from tether.repo._fork import ForkOps
-from tether.repo._gc import GcOps
+from tether.repo._gc import GcOps, GcScope
 from tether.repo._objects import ObjectOps
 from tether.repo._promote import PromoteOps
 from tether.repo._reports import (
     AbandonReport,
     CommitResult,
     DiffEntry,
+    DropReport,
     ForgetWorkspaceReport,
     GcReport,
     ObjectStatus,
@@ -37,8 +38,10 @@ __all__ = [
     "AbandonReport",
     "CommitResult",
     "DiffEntry",
+    "DropReport",
     "ForgetWorkspaceReport",
     "GcReport",
+    "GcScope",
     "ObjectStatus",
     "PromoteReport",
     "PullReport",

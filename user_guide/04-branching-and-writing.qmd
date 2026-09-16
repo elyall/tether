@@ -323,6 +323,19 @@ promote a child branch into its parent -- for a database that must receive
 writes on `main`, work on the trunk bookmark, where the working ref *is*
 `main` and pins (child branches at an LSN) provide reproducibility.
 
+## Throwing it away: `tether drop`
+
+The other ending is one command too. `tether drop NAME` leaves the bookmark
+if this checkout is on it (`--to` says where; the trunk by default), drops
+the commits only that bookmark reaches, deletes it, and releases what it held
+in the stores: its pins, and its `tether.ws.*` branches under `gc`'s rules --
+with one difference. A branch whose head a *dropped commit* pinned or recorded
+is deleted: that is committed work you are throwing away by name, not an
+afternoon nobody knew about. Writes no commit ever recorded are kept, and
+said so, unless `--force-prune`. Dry-run by default, so the plan shows every
+step first; refused for the trunk and for a bookmark another live checkout is
+working on. See the [CLI guide](07-cli.qmd#drop).
+
 ## Positions, and `tether pull`
 
 A dataset commit records an exact state per object. Between commits each
@@ -555,3 +568,5 @@ return or continue under the new name, `tether new -b NAME` to recreate one,
   trunk bookmark to the commit.
 - `pull` on the trunk reads every upstream branch and branch-less object and
   commits what moved.
+- `drop NAME` is the opposite of `promote`: leave the bookmark, drop the
+  commits only it reaches, delete it, release its pins and branches.

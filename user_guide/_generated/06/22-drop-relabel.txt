@@ -1,0 +1,6 @@
+dropped relabel-v3: 1 commit(s) (bae316fbb4cc)
+unpinned 1 pin(s)
+  lance: 0a1b2c3d.9f8c161504d93a19
+deleted 2 working branch(es)
+  features: tether.ws.0a1b2c3d.relabel-v3
+  zarr/imaging: tether.ws.0a1b2c3d.relabel-v3

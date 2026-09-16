@@ -1,4 +1,0 @@
-abandoned d4756b6b8e3d
-plan: gc (1 write(s))
-  forget-working-ref  scratch/probe  tether.ws.0a1b2c3d.probe  object removed; branch left in place (gc --prune-bookmarks evaluates it)
-(not applied; `tether gc --no-dry-run` releases these, or re-run with --gc)

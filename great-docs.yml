@@ -47,7 +47,7 @@ cli:
       contents: [commit, pull, new, open, restore, promote]
     - title: Maintenance
       desc: Reclaim native refs, and see or reverse what tether did.
-      contents: [gc, abandon, forget-workspace, ops, undo, repair, upgrade]
+      contents: [gc, drop, abandon, forget-workspace, ops, undo, repair, upgrade]
     - title: Registries
       desc: "Experimental: derive SQL tables from history, push them to Postgres, or import the object set from a registry."
       contents: [export, publish, import]
@@ -179,14 +179,14 @@ skill:
     - "`tether gc` never deletes branches on its own; `--prune-bookmarks` keeps every bookmark the VCS has or a live checkout works on (`--keep-bookmark` for one that lives elsewhere), deletes stray `tether.ws.*` branches only when their head is pinned or untouched, and `--force-prune` deletes the rest along with any unpinned data on them -- except a branch the store refuses to delete (Neon: pins hang off it), which is planned as kept with the reason. `forget-workspace` never touches branches."
     - "`tether new` refuses to reset a working branch that holds writes you never committed; commit them or pass `--discard`. A branch already sitting at the pin is reused, not re-forked."
     - "`jj undo` / `git reset` move the manifests, never the stores. `tether undo` reverses tether's own operations from its op log (`tether ops`); `tether repair` recreates pins and branches the manifests still name. `status` warns when a dataset commit vanished from the VCS behind tether's back, and when the bookmark was deleted, renamed, moved, or left."
-    - "A tether command exists where an operation has a VCS half and a store half (`commit`, `new`, `pull`, `promote`, `restore`, `abandon`, `forget-workspace`); everything that only touches files and history is jj/git's. Run `tether status` after any VCS operation that moved the working copy or a bookmark, and `tether new` before writing again."
+    - "A tether command exists where an operation has a VCS half and a store half (`commit`, `new`, `pull`, `promote`, `restore`, `abandon`, `drop`, `forget-workspace`); everything that only touches files and history is jj/git's. Run `tether status` after any VCS operation that moved the working copy or a bookmark, and `tether new` before writing again."
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
     - "Production databases that must receive writes on `main` (e.g. Neon, which cannot promote a child branch) are written on the trunk bookmark: `tether new main`."
     - "`tether promote` lands the bookmark: each system's upstream branch fast-forwards to the bookmark's branch when unchanged since the fork point (a moved upstream needs a backend with `MERGE` -- lakeFS, Dolt, git -- or a manual re-apply; Icechunk/Iceberg refuse, Lance/Neon cannot promote at all), and when everything fast-forwarded the trunk bookmark moves to the commit."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on every command that makes them (`commit`, `new`, `gc`, `promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace`); save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
-    - "Retire a losing bookmark in this order: `tether forget-workspace` its checkout, `tether abandon --gc` its commit, `jj bookmark delete` it, `tether gc --prune-bookmarks` its branches (delete the bookmark before the abandon and gc sees pinned heads, needing no `--force-prune`)."
+    - "Retire a losing bookmark with `tether drop NAME` (dry run first): it leaves the bookmark if the checkout is on it, drops the commits only it reaches, deletes it, and releases its pins and branches -- a branch whose head a dropped commit pinned goes without `--force-prune`. `tether forget-workspace` another checkout that is on it first; `drop` refuses while one is."
     - "Datasets from before 0.1.0a8 need `tether upgrade` (`--dry-run` first): it renames every pin and branch into the dataset's namespace and rewrites history to match, so every clone must re-sync afterwards. The later parts (content-hashed file states with the `write` policy line dropped; one manifest file per key with absolute local paths) touch only the working tree. `tether.upgrade` ships with the betas and is removed at 0.1.0."
     - "To hold an input still under a long analysis, work on a bookmark and do not write to it: it keeps its pin. To trail the world, run `tether pull` on `main`."
     - "Use `--pin record` on scratch objects when only the branch heads matter; it skips the native ref per commit and forks from the recorded state."

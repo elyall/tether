@@ -176,7 +176,8 @@ command.
 A tether command exists where an operation has two halves -- one in the VCS,
 one in the stores -- that must happen together: `commit` (pin, commit, move
 the bookmark), `new` (create or join a bookmark, then its branches), `pull`,
-`promote`, `restore`, `abandon`, `forget-workspace`, and `undo` / `repair`
+`promote`, `restore`, `abandon`, `drop`, `forget-workspace`, and `undo` /
+`repair`
 for what tether itself did. Everything that only touches files and history --
 describe, squash, rebase, push, `jj undo` of a non-tether operation -- is the
 VCS's, and tether notices what it needs to: a bookmark deleted, renamed, or

@@ -34,6 +34,7 @@ PRECONDITION_KINDS = frozenset(
         "pin_state",
         "no_new_holders",
         "store_empty",
+        "bookmark_head",
     }
 )
 """What a plan may require of the world before it is applied. Each is one
@@ -151,7 +152,16 @@ class Plan:
     )
 
     NON_WRITES = frozenset(
-        {"trunk", "keep-branch", "defer-fork", "refuse", "reuse", "hold", "share"}
+        {
+            "trunk",
+            "keep-branch",
+            "keep-store",
+            "defer-fork",
+            "refuse",
+            "reuse",
+            "hold",
+            "share",
+        }
     )
     """Actions that write nothing to an external system when applied."""
 

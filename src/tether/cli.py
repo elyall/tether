@@ -38,6 +38,7 @@ from tether.manifest import Policy
 from tether.plan import Plan
 from tether.repo import (
     CommitResult,
+    DropReport,
     GcReport,
     PromoteReport,
     Repo,
@@ -1318,6 +1319,107 @@ def abandon(
             "(not applied; `tether gc --no-dry-run` releases these, "
             "or re-run with --gc)"
         )
+
+
+@app.command()
+def drop(
+    bookmark: str = typer.Argument(..., help="The bookmark to throw away."),
+    to: str | None = typer.Option(
+        None,
+        "--to",
+        help="Where to leave for when this checkout is on the bookmark "
+        "(default: the trunk).",
+    ),
+    delete_stores: bool = typer.Option(
+        False,
+        "--delete-stores",
+        help="Also reclaim stores created on it (experimental; see `gc`).",
+    ),
+    force_prune: bool = typer.Option(
+        False,
+        "--force-prune",
+        help="Delete its branches even when they hold unpinned writes. Data on "
+        "them is lost.",
+    ),
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--no-dry-run", help="Only show the plan (default)."
+    ),
+    plan_out: Path | None = typer.Option(
+        None, "--plan", help="Write the plan to FILE (implies --dry-run)."
+    ),
+    from_plan: Path | None = typer.Option(
+        None, "--from-plan", help="Apply a plan saved with --plan."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Throw a bookmark away: its commits, the bookmark, and its store leftovers.
+
+    The opposite of `promote`, in one step: leave the bookmark if this checkout
+    is on it (`--to`, default the trunk), drop the commits only it reaches,
+    delete it, then release what it held in the stores -- `gc
+    --prune-bookmarks` for this bookmark alone, under its rules (a branch with
+    unpinned writes is kept unless `--force-prune`; `--delete-stores` adds the
+    experimental created-store step). Refused for the trunk and for a
+    bookmark another live checkout works on. Dry-run by default: the plan
+    shows the store side as it will be once the commits are gone. Not undoable
+    by tether (`jj undo` / the reflog bring the commits back; `repair` the pins
+    and branches).
+    """
+    if delete_stores and not json_out:
+        _experimental_note(
+            "reclaiming created stores is experimental: `delete-store` has no "
+            "`repair`; read the plan"
+        )
+    repo = _repo()
+    try:
+        if from_plan is not None:
+            plan = _load_plan(from_plan, "drop")
+            report: DropReport = repo.apply_drop(plan)
+        else:
+            plan = repo.plan_drop(
+                bookmark, to=to, delete_stores=delete_stores, force_prune=force_prune
+            )
+            if dry_run or plan_out is not None:
+                _save_plan(plan, plan_out)
+                _show_plan(plan, as_json=json_out)
+                if not json_out:
+                    typer.echo("(not applied; `--no-dry-run` drops it)")
+                return
+            report = repo.apply_drop(plan)
+    except TetherError as exc:
+        _fail(exc)
+    gc = report.gc_report
+    if json_out:
+        _emit(
+            {
+                "bookmark": report.bookmark,
+                "left_for": report.left_for,
+                "abandoned": report.abandoned,
+                "gc": {
+                    "unpinned": gc.unpinned,
+                    "deleted_working_refs": gc.deleted_working_refs,
+                    "kept_working_refs": gc.kept_working_refs,
+                    "forgotten_working_refs": gc.forgotten_working_refs,
+                    "deleted_listings": gc.deleted_listings,
+                    "deleted_stores": gc.deleted_stores,
+                    "kept_stores": gc.kept_stores,
+                    "forgotten_stores": gc.forgotten_stores,
+                }
+                if gc is not None
+                else None,
+            },
+            as_json=True,
+        )
+        return
+    if report.left_for:
+        typer.echo(f"left {report.bookmark} for {report.left_for}")
+    n = len(report.abandoned)
+    typer.echo(
+        f"dropped {report.bookmark}: {n} commit(s)"
+        + (" (" + ", ".join(c[:12] for c in report.abandoned) + ")" if n else "")
+    )
+    if gc is not None:
+        _print_gc_report(gc)
 
 
 @app.command()

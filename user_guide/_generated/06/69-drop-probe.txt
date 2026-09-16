@@ -1,0 +1,11 @@
+note: reclaiming created stores is experimental: `delete-store` has no `repair`; read the plan
+left probe for sweep
+dropped probe: 1 commit(s) (713126458caf)
+unpinned 1 pin(s)
+  icechunk: 0a1b2c3d.d4756b6b8e3d3e89
+deleted 2 working branch(es)
+  scratch/embeddings: tether.ws.0a1b2c3d.probe
+  scratch/probe: tether.ws.0a1b2c3d.probe
+forgot 1 working ref(s) of removed object(s)
+deleted 1 created store(s)
+  scratch/probe: ~/data/probe.icechunk

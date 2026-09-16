@@ -1,0 +1,3 @@
+added scratch/embeddings (lance)
+  pinned scratch/embeddings -> (addressable)
+committed 0a7a909e41d5

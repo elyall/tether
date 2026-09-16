@@ -499,6 +499,27 @@ class VcsAdapter(Protocol):
     def bookmark_delete(self, name: str) -> None:
         """Delete the bookmark / branch ``name``."""
 
+    def exclusive_commits(self, bookmark: str) -> list[str]:
+        """Commit ids reachable from ``bookmark`` and from nothing else that
+        keeps a commit visible -- no other local bookmark, tag, remote
+        bookmark, or another workspace's working copy: the line of work that
+        leaves visible history with the bookmark. Oldest first."""
+
+    def remote_counterparts(self, bookmark: str) -> list[str]:
+        """Remote refs for ``bookmark`` (``origin/feature``, ``feature@origin``):
+        what still reaches its commits after a local drop, and what a later
+        push deletes (jj) or leaves (git)."""
+
+    def files_at_many(self, revs: list[str], reldir: str) -> dict[str, dict[str, str]]:
+        """``{rev: files_at(rev, reldir)}`` for several commits through one
+        object reader."""
+
+    def drop_bookmark(self, bookmark: str, commits: list[str]) -> None:
+        """Make ``bookmark`` and its ``commits`` (from :meth:`exclusive_commits`)
+        disappear from visible history. jj abandons the commits (which takes
+        the bookmark with them); git deletes the branch, after which nothing
+        reaches the commits. The working copy must not be on the bookmark."""
+
     def current_bookmarks(self) -> list[str]:
         """The bookmarks the working copy is on.
 
@@ -760,6 +781,61 @@ class JjAdapter:
 
     def bookmark_delete(self, name: str) -> None:
         self._jj("bookmark", "delete", name)
+
+    def exclusive_commits(self, bookmark: str) -> list[str]:
+        marks = self.bookmarks()
+        if bookmark not in marks:
+            raise VcsError(f"no bookmark {bookmark!r}")
+        others = sorted({c for n, c in marks.items() if n != bookmark})
+        # Everything else that keeps a commit visible: other local bookmarks,
+        # tags, remote bookmarks (a pushed `B@origin` outlives the local
+        # delete), and other workspaces' working copies. Not this
+        # workspace's: on the bookmark it sits on top of the line.
+        keep = " | ".join(
+            [*others, "tags()", "remote_bookmarks()", "working_copies() ~ @"]
+        )
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--reversed",
+            "-r",
+            f"(::{marks[bookmark]}) ~ (::({keep})) ~ root()",
+            "-T",
+            'commit_id ++ "\\n"',
+        )
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def remote_counterparts(self, bookmark: str) -> list[str]:
+        out = self._jj(
+            "bookmark",
+            "list",
+            "--all-remotes",
+            "--ignore-working-copy",
+            "-T",
+            'if(remote, name ++ "@" ++ remote ++ "\\n", "")',
+            check=False,
+        )
+        found = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        # `@git` is jj's own view of the colocated repo, not a remote.
+        return sorted(
+            r for r in found if r.startswith(f"{bookmark}@") and not r.endswith("@git")
+        )
+
+    def files_at_many(self, revs: list[str], reldir: str) -> dict[str, dict[str, str]]:
+        reader = self._reader()
+        if reader is None:
+            return {rev: self._files_at_slow(rev, reldir) for rev in revs}
+        with reader:
+            return {
+                rev: _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
+                for rev in revs
+            }
+
+    def drop_bookmark(self, bookmark: str, commits: list[str]) -> None:
+        if commits:
+            self._jj("abandon", *commits)
+        if bookmark in self.bookmarks():  # jj drops it with its commit; else here
+            self._jj("bookmark", "delete", bookmark)
 
     def _bookmarks_at(self, rev: str) -> list[str]:
         out = self._jj(
@@ -1314,6 +1390,37 @@ class GitAdapter:
 
     def bookmark_delete(self, name: str) -> None:
         self._git("branch", "-D", name)
+
+    def exclusive_commits(self, bookmark: str) -> list[str]:
+        marks = self.bookmarks()
+        if bookmark not in marks:
+            raise VcsError(f"no branch {bookmark!r}")
+        # Every other ref under refs/ keeps what it reaches -- other branches
+        # (parking branches included), tags, remote-tracking refs -- which is
+        # what `rev-list --all` still sees after `branch -D`.
+        mine = f"refs/heads/{bookmark}"
+        refs = self._git("for-each-ref", "--format=%(refname)", "refs/").stdout.split()
+        others = [f"^{ref}" for ref in refs if ref != mine]
+        out = self._git("rev-list", "--reverse", marks[bookmark], *others)
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def remote_counterparts(self, bookmark: str) -> list[str]:
+        out = self._git(
+            "for-each-ref", "--format=%(refname:short)", "refs/remotes/", check=False
+        )
+        return sorted(r for r in out.stdout.split() if r.partition("/")[2] == bookmark)
+
+    def files_at_many(self, revs: list[str], reldir: str) -> dict[str, dict[str, str]]:
+        with GitObjectReader(self._exe, self.root) as reader:
+            return {
+                rev: _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
+                for rev in revs
+            }
+
+    def drop_bookmark(self, bookmark: str, commits: list[str]) -> None:
+        # Deleting the branch is the whole operation: nothing else reaches
+        # its exclusive commits, so `rev-list --all` stops seeing them.
+        self._git("branch", "-D", bookmark)
 
     def current_bookmarks(self) -> list[str]:
         out = self._git("symbolic-ref", "--short", "-q", "HEAD", check=False)

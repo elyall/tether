@@ -1,0 +1,12 @@
+dataset 0aed347cebd2; on bookmark probe
+  states as fingerprinted 0s ago; --snapshot to refresh
+  warning: dataset commit bae316fbb4cc (op 6cb575772d10) is no longer in VCS history: undone or abandoned outside tether; its pins for features, zarr/imaging are unreferenced; `gc` will release them, `repair` recreates them if the commit comes back
+      clean  code  [git/forkable]
+      clean  features  [lance/forkable]
+      clean  qc/focus  [lance/forkable]
+      clean  raw/plate1  [file/observed] unrecoverable
+      clean  raw/plate2  [file/observed] unrecoverable
+      clean  raw/plate3  [file/observed] unrecoverable
+      clean  scratch/embeddings  [lance/forkable]
+      clean  scratch/probe  [icechunk/forkable] (created)
+      clean  zarr/imaging  [icechunk/forkable]

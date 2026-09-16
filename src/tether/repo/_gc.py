@@ -7,6 +7,7 @@ try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from tether.backends.base import (
     effective_capabilities,
 )
 from tether.errors import (
+    ConfigError,
     MultiObjectError,
     StalePlanError,
     TetherError,
@@ -49,6 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 from tether.repo._core import RepoCore
 from tether.repo._reports import (
     AbandonReport,
+    DropReport,
     ForgetWorkspaceReport,
     GcReport,
     short_state,
@@ -56,6 +59,29 @@ from tether.repo._reports import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
+
+
+@dataclass(frozen=True)
+class GcScope:
+    """What `drop` asks of `plan_gc`: judge one bookmark's branches only, and
+    plan as if a line of commits were already out of history.
+
+    Attributes:
+        bookmarks: Restrict the branch sweep to these bookmarks' branches
+            (`None`: every stray branch, as `gc --prune-bookmarks` does).
+        excluded_commits: Commit ids to leave out of the history walk, as if
+            abandoned -- the preview of a drop. Such a plan is never applied.
+        gone_bookmarks: Bookmarks to treat as no longer live.
+        dropped_manifests: Manifests of commits that are (or will be) gone.
+            Not references, but a branch whose head one of them pinned or
+            recorded is work being thrown away knowingly, so the sweep may
+            delete it. The excluded commits' manifests join this list.
+    """
+
+    bookmarks: frozenset[str] | None = None
+    excluded_commits: frozenset[str] = frozenset()
+    gone_bookmarks: frozenset[str] = frozenset()
+    dropped_manifests: tuple[ObjectManifest, ...] = ()
 
 
 STORE_OPS = frozenset({"keep-store", "forget-store", "forget-touched", "delete-store"})
@@ -75,6 +101,7 @@ class GcOps(RepoCore):
         force_prune: bool = False,
         delete_stores: bool = False,
         stores: Sequence[tuple[str, dict]] = (),
+        scope: GcScope | None = None,
     ) -> Plan:
         """Compute what `gc` would release without writing anywhere.
 
@@ -112,7 +139,14 @@ class GcOps(RepoCore):
         Under the same flag, stores this clone forked or pinned in that no
         manifest names any more get their dead refs of this dataset released
         (see `tether.experimental.lifecycle`). The whole step is experimental.
+
+        `scope` is `drop`'s: judge one bookmark's branches only, and plan as
+        if its commits were already gone (see `GcScope`).
         """
+        scope = scope or GcScope()
+        excluded = set(scope.excluded_commits)
+        gone = set(scope.gone_bookmarks)
+        dropped: list[ObjectManifest] = list(scope.dropped_manifests)
         referenced: dict[str, set[str]] = {}
 
         def key_for(backend: ObjectBackend, locator: dict) -> str:
@@ -132,6 +166,9 @@ class GcOps(RepoCore):
         all_manifests: list[ObjectManifest] = []
         seen: set[str] = set()
         for _rev, objects in self._iter_history_objects():
+            if _rev in excluded:
+                dropped.extend(objects.values())
+                continue
             for m in objects.values():
                 all_manifests.append(m)
                 if m.pin is None:
@@ -154,6 +191,19 @@ class GcOps(RepoCore):
                 "prune_bookmarks": prune_bookmarks,
                 "keep_bookmarks": sorted(keep_bookmarks or ()),
                 "force_prune": force_prune,
+                "scope": (
+                    {
+                        "bookmarks": (
+                            sorted(scope.bookmarks)
+                            if scope.bookmarks is not None
+                            else None
+                        ),
+                        "excluded_commits": sorted(excluded),
+                        "gone_bookmarks": sorted(gone),
+                    }
+                    if scope != GcScope()
+                    else None
+                ),
                 "delete_stores": delete_stores or bool(stores),
                 "stores": [[k, dict(loc)] for k, loc in stores],
                 "manifest_hash": self.current_manifest_hash(),
@@ -235,7 +285,7 @@ class GcOps(RepoCore):
             )
 
         if prune_bookmarks:
-            live = self.live_bookmarks() | set(keep_bookmarks or ())
+            live = (self.live_bookmarks() | set(keep_bookmarks or ())) - gone
             plan.context["live_bookmarks"] = sorted(live)
             plan.notes.append(f"keeping live bookmarks: {', '.join(sorted(live))}")
             self._plan_prune_bookmarks(
@@ -244,6 +294,12 @@ class GcOps(RepoCore):
                 key_for,
                 live,
                 force_prune,
+                only_slugs=(
+                    {bookmark_slug(b) for b in scope.bookmarks}
+                    if scope.bookmarks is not None
+                    else None
+                ),
+                dropped=dropped,
             )
 
         # Listings no manifest (in history or the working tree) names.
@@ -276,7 +332,7 @@ class GcOps(RepoCore):
                 keep_bookmarks=(
                     set(plan.context.get("live_bookmarks") or ())
                     if prune_bookmarks
-                    else self.live_bookmarks() | set(keep_bookmarks or ())
+                    else (self.live_bookmarks() | set(keep_bookmarks or ())) - gone
                 ),
                 prune_bookmarks=prune_bookmarks,
                 force=force_prune,
@@ -291,6 +347,9 @@ class GcOps(RepoCore):
         key_for: Callable[[ObjectBackend, dict], str],
         keep_bookmarks: set[str],
         force: bool,
+        *,
+        only_slugs: set[str] | None = None,
+        dropped: Sequence[ObjectManifest] = (),
     ) -> None:
         """Add `delete-branch` / `keep-branch` actions for stray `tether.ws.*` branches.
 
@@ -324,6 +383,18 @@ class GcOps(RepoCore):
             if content not in bucket.setdefault(sys_key, []):
                 bucket[sys_key].append(content)
 
+        # `drop`: states the dropped commits pinned or recorded. Not references
+        # any more, but a branch sitting at one holds only work the user is
+        # throwing away by name, not writes nobody knew about.
+        dropped_pinned: dict[str, list[State | None]] = {}
+        for m in dropped:
+            if m.state is None:
+                continue
+            sys_key = key_for(self.backend_for(m.kind), m.locator)
+            content = self._content(m.kind, m.state)
+            if content not in dropped_pinned.setdefault(sys_key, []):
+                dropped_pinned[sys_key].append(content)
+
         systems_seen: set[str] = set()
         for key in sorted(self.objects):
             m = self.objects[key]
@@ -349,6 +420,8 @@ class GcOps(RepoCore):
                 legacy_ws = working_ref_workspace(ref)
                 if ref in in_use:
                     continue
+                if only_slugs is not None and slug not in only_slugs:
+                    continue  # `drop`: only the dropped bookmark's branches
                 if slug is not None and slug in keep_slugs:
                     if slug == bookmark_slug(self.workspace.bookmark or ""):
                         origin = "this bookmark's branch; no object uses it"
@@ -395,6 +468,8 @@ class GcOps(RepoCore):
                     if head is not None:
                         if head in pinned.get(sys_key, []):
                             safe = "head is pinned"
+                        elif head in dropped_pinned.get(sys_key, []):
+                            safe = "head was committed by a dropped commit"
                         elif head == base_head:
                             safe = "head equals the base branch"
                         elif head in recorded.get(sys_key, []):
@@ -623,6 +698,292 @@ class GcOps(RepoCore):
                         preview_store_action(a, report)
                 return report
             return self.apply_gc(plan)
+
+    # -- drop ------------------------------------------------------------------ #
+    def plan_drop(
+        self: Repo,
+        bookmark: str,
+        *,
+        to: str | None = None,
+        delete_stores: bool = False,
+        force_prune: bool = False,
+    ) -> Plan:
+        """Compute what throwing a bookmark away would do, without doing it.
+
+        Landing a bookmark is one command (`promote`); throwing one away was
+        four: leave it, abandon its commits, delete it, `gc --prune-bookmarks`.
+        `drop` composes them, in that order, under the same rules each has on
+        its own:
+
+        - `leave-bookmark`: when this checkout is on the bookmark, `new` to
+          `to` (default: the trunk) first. Another live checkout on it refuses
+          the whole plan -- someone is working there.
+        - `abandon-commit`, one per commit that only this bookmark reaches
+          (`VcsAdapter.exclusive_commits`): commits another bookmark also
+          reaches stay, so a line that branched off this one keeps its base.
+        - `delete-bookmark`.
+        - the store side, exactly `gc --prune-bookmarks` restricted to this
+          bookmark's branches (head pinned or equal to the base, else kept
+          unless `force_prune`), the pins nothing references once the commits
+          are gone, and with `delete_stores` the experimental created-store
+          step. These actions are a *preview* planned as if the commits were
+          already gone; `apply_drop` re-plans them live after the VCS half,
+          because gc binds to the history it sees.
+
+        Args:
+            bookmark: The bookmark to drop. Never the trunk.
+            to: Where to leave for when this checkout is on the bookmark
+                (default: the trunk bookmark).
+            delete_stores: Also reclaim stores created on it (experimental;
+                see `plan_gc`).
+            force_prune: Delete its branches even when they hold unpinned
+                writes.
+
+        Raises:
+            ConfigError: The trunk, an unknown bookmark, or one another live
+                checkout works on.
+        """
+        trunk = self.config.trunk
+        if bookmark == trunk:
+            raise ConfigError(
+                f"{bookmark!r} is the trunk bookmark; it cannot be dropped"
+            )
+        marks = self.vcs.bookmarks()
+        if bookmark not in marks:
+            raise ConfigError(f"no bookmark {bookmark!r}")
+        holders = self.bookmark_holders(bookmark)
+        if holders:
+            raise ConfigError(
+                f"bookmark {bookmark!r} is worked on by checkout(s) "
+                f"{', '.join(holders)}; `tether forget-workspace` or `tether new` "
+                "there first"
+            )
+        destination = to or trunk
+        if destination != trunk and destination not in marks:
+            raise ConfigError(f"no bookmark {destination!r} to leave for")
+        here = self.workspace.bookmark == bookmark
+        if here:
+            # Leaving is a `new <destination>`, which refuses a bookmark
+            # another live checkout works on (it wants `--shared`). Refuse
+            # here, in the plan, rather than half-way through the apply.
+            there = self.bookmark_holders(destination)
+            if there:
+                raise ConfigError(
+                    f"cannot leave for {destination!r}: checkout(s) "
+                    f"{', '.join(there)} work on it; `--to` another bookmark"
+                )
+        commits = self.vcs.exclusive_commits(bookmark)
+        remotes = self.vcs.remote_counterparts(bookmark)
+        vcs_head = self._vcs_head_or_none()
+        history_digest = self.vcs.history_digest()
+        plan = Plan(
+            command="drop",
+            context={
+                "bookmark": bookmark,
+                "commits": list(commits),
+                "leave": destination if here else None,
+                "delete_stores": delete_stores,
+                "force_prune": force_prune,
+                "workspace_id": self.workspace.workspace_id,
+                "vcs_head": vcs_head,
+                "history_digest": history_digest,
+            },
+        )
+        if history_digest is not None:
+            plan.require(
+                "history_digest",
+                history_digest,
+                detail="history changed since the drop plan was made; re-run the plan",
+            )
+        plan.require(
+            "bookmark_head",
+            marks[bookmark],
+            key=bookmark,
+            bookmark=bookmark,
+            detail=f"bookmark {bookmark} moved since the drop plan was made "
+            "(now at {observed}); re-run the plan",
+        )
+        plan.require(
+            "no_new_holders",
+            None,
+            bookmark=bookmark,
+            detail=f"another checkout started working on {bookmark} ({{observed}}); "
+            "re-run the plan",
+        )
+        if vcs_head is not None:
+            plan.require(
+                "vcs_head",
+                vcs_head,
+                detail="the working copy moved since the drop plan was made; "
+                "re-run the plan",
+            )
+        if here:
+            plan.actions.append(
+                Action(
+                    "leave-bookmark",
+                    target=destination,
+                    detail=f"this checkout is on {bookmark}; `new {destination}` first",
+                )
+            )
+        subjects = {
+            c.commit_id: c.message.splitlines()[0] if c.message else ""
+            for c in self.vcs.commit_info(list(commits))
+        }
+        for commit in commits:
+            plan.actions.append(
+                Action(
+                    "abandon-commit",
+                    target=commit[:12],
+                    detail=subjects.get(commit, ""),
+                    params={"commit": commit},
+                )
+            )
+        plan.actions.append(
+            Action(
+                "delete-bookmark",
+                target=bookmark,
+                detail="jj: goes with its commits; git: the branch",
+            )
+        )
+        # The store side, as gc will see it once the commits are gone. While
+        # this checkout is on the bookmark its working tree still names the
+        # bookmark's objects; plan against the destination's manifests.
+        objects, refs = self.objects, self.workspace.working_refs
+        excluded = list(commits)
+        try:
+            if here:
+                # As after `new <destination>`: its manifests, none of this
+                # bookmark's working refs, and (jj) without the empty
+                # working-copy commit on top of the bookmark, whose tree still
+                # names the bookmark's pins.
+                self.objects = self._objects_at(destination)
+                self.workspace.working_refs = {}
+                excluded.append(self.vcs.current_rev())
+            preview = self.plan_gc(
+                prune_bookmarks=True,
+                force_prune=force_prune,
+                delete_stores=delete_stores,
+                scope=GcScope(
+                    bookmarks=frozenset({bookmark}),
+                    excluded_commits=frozenset(excluded),
+                    gone_bookmarks=frozenset({bookmark}),
+                ),
+            )
+        finally:
+            self.objects, self.workspace.working_refs = objects, refs
+        plan.actions.extend(preview.actions)
+        plan.notes.extend(preview.notes)
+        if remotes:
+            reach = "still reach its commits" if not commits else "also exist"
+            what = (
+                "the deletion goes with the next `jj git push`"
+                if self.vcs.kind == "jj"
+                else "`git push <remote> --delete " + bookmark + "` removes them"
+            )
+            plan.notes.append(f"{', '.join(remotes)} {reach}; {what}")
+        if preview.writes:
+            plan.notes.append(
+                "store actions are what gc will plan once the commits are gone; "
+                "they are re-planned at apply"
+            )
+        return plan
+
+    def apply_drop(self: Repo, plan: Plan) -> DropReport:
+        """Execute a plan from `plan_drop`: leave, abandon, delete, then plan
+        and apply the gc live (the plan's store actions were a preview). The
+        set of commits only the bookmark reaches is derived again here and
+        must match the plan's: it depends on every other bookmark, which no
+        precondition watches.
+
+        Not undoable by tether: the VCS's own undo brings the commits and the
+        bookmark back, and `repair` the pins and branches while their states
+        are reachable.
+        """
+        with self._writer_lock(), self._repo_lock():
+            self._verify_plan(plan, "drop")
+            ctx = plan.context
+            bookmark = str(ctx["bookmark"])
+            planned = [str(c) for c in ctx.get("commits") or []]
+            # The plan promised these commits and no others. Which commits only
+            # this bookmark reaches depends on every *other* bookmark, and
+            # none of the preconditions above watches those: a `promote` or a
+            # `jj bookmark set` onto the line in between would make jj abandon
+            # commits the trunk now sits on. Derive the set again, here.
+            commits = self.vcs.exclusive_commits(bookmark)
+            if set(commits) != set(planned):
+                gained = sorted(set(planned) - set(commits))
+                shared = ", ".join(c[:12] for c in gained)
+                raise StalePlanError(
+                    f"the commits only {bookmark} reaches changed since the drop "
+                    f"plan was made ({len(planned)} planned, {len(commits)} now"
+                    + (f"; another bookmark now reaches {shared}" if gained else "")
+                    + "); re-run the plan"
+                )
+            leave = ctx.get("leave")
+            pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
+            op = self._begin_op("drop", plan=plan, pre=pre)
+            report = DropReport(bookmark=bookmark, plan=plan)
+            # What the dropped commits pinned: not references once they are
+            # gone, but the branch sweep may delete a head one of them pinned.
+            # One object reader for all of them, not one process per commit.
+            dropped_manifests = [
+                m
+                for files in self.vcs.files_at_many(
+                    commits, self._objects_reldir()
+                ).values()
+                for m in self._parse_manifests(files).values()
+            ]
+            if leave:
+                dropped_manifests.extend(self.objects.values())
+                self.new(str(leave))
+                report.left_for = str(leave)
+                self._progress(op, "leave-bookmark", target=str(leave))
+            self.vcs.drop_bookmark(bookmark, commits)
+            report.abandoned = commits
+            self._progress(op, "delete-bookmark", target=bookmark)
+            self._manifest_cache.clear()
+            self.objects = read_objects(self.root)
+            gc_plan = self.plan_gc(
+                prune_bookmarks=True,
+                force_prune=bool(ctx.get("force_prune")),
+                delete_stores=bool(ctx.get("delete_stores")),
+                scope=GcScope(
+                    bookmarks=frozenset({bookmark}),
+                    dropped_manifests=tuple(dropped_manifests),
+                ),
+            )
+            report.gc_report = (
+                self.apply_gc(gc_plan)
+                if not gc_plan.is_empty
+                else GcReport(dry_run=False, plan=gc_plan)
+            )
+            self._end_op(
+                op,
+                result={
+                    "bookmark": bookmark,
+                    "left_for": report.left_for,
+                    "abandoned": commits,
+                    "gc": report_dict(report.gc_report),
+                },
+            )
+            return report
+
+    def drop(
+        self: Repo,
+        bookmark: str,
+        *,
+        to: str | None = None,
+        delete_stores: bool = False,
+        force_prune: bool = False,
+    ) -> DropReport:
+        """Throw a bookmark away: `plan_drop` then `apply_drop` under one lock.
+        See `plan_drop` for what that means and `apply_drop` for what it
+        cannot undo."""
+        with self._writer_lock():
+            plan = self.plan_drop(
+                bookmark, to=to, delete_stores=delete_stores, force_prune=force_prune
+            )
+            return self.apply_drop(plan)
 
     # -- forget-workspace ------------------------------------------------------ #
     def _workspace_root(self, workspace_id8: str) -> Path | None:

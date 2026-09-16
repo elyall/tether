@@ -1143,6 +1143,10 @@ class RepoCore:
             holders = self.bookmark_holders(str(params["bookmark"]))
             if holders:
                 fail(", ".join(holders))
+        elif kind == "bookmark_head":
+            observed = self.vcs.bookmarks().get(str(params["bookmark"]))
+            if observed != pre.expected:
+                fail(observed or "gone")
         elif kind == "store_empty":
             # A created store gc is about to remove: nothing may remain in it
             # but tether's own refs the same plan deletes first (`ignoring`).

@@ -1,0 +1,3 @@
+4897a4aca888  2026-09-01T09:00:05+00:00  new      forked code, features, qc/focus, scratch/embeddings, zarr/imaging
+85dbb59077c7  2026-09-01T09:00:04+00:00  restore  restored features from 695fe286e11b
+68c2991eb8b3  2026-09-01T09:00:03+00:00  restore  restored zarr/imaging from 569de0890973

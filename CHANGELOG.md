@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `tether drop BOOKMARK` (`Repo.plan_drop` / `apply_drop` / `drop`): throwing
+  a bookmark away is one command, the opposite of `promote`. In order: leave
+  the bookmark when this checkout is on it (`--to`, default the trunk), drop
+  the commits only it reaches (jj: `jj abandon`; git: nothing reaches them
+  once the branch is gone), delete it, then the store side -- `gc
+  --prune-bookmarks` restricted to its branches, the pins nothing references
+  once the commits are gone, and with `--delete-stores` the experimental
+  created-store step. One rule is `drop`'s own: a branch whose head a dropped
+  commit pinned or recorded is deleted (committed work thrown away by name),
+  where `gc` keeps it as "unpinned writes"; uncommitted writes still need
+  `--force-prune`. Dry-run by default; the plan previews the store side as it
+  will be once the commits are gone and apply re-plans it live; the set of
+  commits only the bookmark reaches is re-derived at apply and a saved plan is
+  refused if another bookmark has come to reach one of them. "Only the
+  bookmark reaches" counts every reacher the VCS knows -- other bookmarks,
+  tags, remote bookmarks, other workspaces' working copies -- and the plan
+  notes a `feature@origin` that still reaches the line. Refused for the
+  trunk, for a bookmark another live checkout works on, and when `--to`
+  names one; not undoable by tether (the CLI guide gives the three-step
+  recovery). New plan verbs `leave-bookmark`, `abandon-commit`,
+  `delete-bookmark`; precondition `bookmark_head`; `GcScope` for
+  `plan_gc(scope=)`; `VcsAdapter.exclusive_commits` / `remote_counterparts`
+  / `files_at_many` / `drop_bookmark`. The use-cases story's three
+  retirements are one line each now. `abandon REV [--gc]` stays as the
+  surgical form: commits off a bookmark you keep.
+
+### Fixed
+
+- `keep-store` is an informational plan action: a gc plan holding only
+  `keep-store` lines is empty, like one holding only `keep-branch`.
+
 ## [0.1.0b1] - 2026-09-15
 
 The alpha-exit release, and the first beta. Two security fixes, the engine

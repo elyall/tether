@@ -269,6 +269,28 @@ class ForgetWorkspaceReport:
 
 
 @dataclass
+class DropReport:
+    """What `Repo.drop` did: a bookmark, its commits, and its store leftovers,
+    gone in one step.
+
+    Attributes:
+        bookmark: The bookmark that was dropped.
+        left_for: The bookmark this checkout moved to first, when it was on
+            the dropped one (`None` otherwise).
+        abandoned: Commit ids that left visible history with it.
+        gc_report: The gc that released its pins, branches, and -- with
+            `delete_stores` -- the stores created on it.
+        plan: The plan that was applied.
+    """
+
+    bookmark: str
+    left_for: str | None = None
+    abandoned: list[str] = field(default_factory=list)
+    gc_report: GcReport | None = None
+    plan: Plan | None = None
+
+
+@dataclass
 class AbandonReport:
     """What `Repo.abandon` did.
 

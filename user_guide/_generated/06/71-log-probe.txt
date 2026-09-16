@@ -1,7 +1,0 @@
-@  rlvpxxsn 0aed347cebd2 (empty) (no description set)
-○  yrzoywwn d4756b6b8e3d probe probe: embeddings v2
-○  psozpoln 8e78d3cb811a sweep sweep: trial 4
-○  molrptzv f6b7dc3d4684 sweep: trial 1
-○  ptmkykpx 40fb50ebd8d3 main Track the sweep's scratch table
-│
-~

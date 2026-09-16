@@ -1,0 +1,9 @@
+plan: drop (5 write(s))
+      abandon-commit                bae316fbb4cc  Relabel plate1 with model v3
+     delete-bookmark                relabel-v3  jj: goes with its commits; git: the branch
+               unpin  features      [lance] tether.0a1b2c3d.9f8c161504d93a19  no manifest in history references it
+       delete-branch  features      [lance] tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head was committed by a dropped commit
+       delete-branch  zarr/imaging  [icechunk] tether.ws.0a1b2c3d.relabel-v3  bookmark relabel-v3 (gone); head is pinned
+                      keeping live bookmarks: main
+                      store actions are what gc will plan once the commits are gone; they are re-planned at apply
+(not applied; `--no-dry-run` drops it)

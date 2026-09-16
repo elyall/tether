@@ -1,3 +1,0 @@
-undid 7e225fca7bd0 (restore: restored zarr/imaging from 695fe286e11b)
-  restored   workspace.toml restored
-  IRREVERSIBLE zarr/imaging: tether.ws.0a1b2c3d.sweep was reset (was snapshot_id=4JV2FQGRZYNAGTXX…); `tether restore zarr/imaging --from REV` or `tether new --discard` puts it where you want

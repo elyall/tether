@@ -176,38 +176,38 @@ gets the very same pin id -- nothing new is created in that store -- and only
 {{< include _generated/06/20-log-landed.txt >}}
 
 Two lines of history describe the same data now, and the bookmark has done
-its job. Drop the commit -- `--gc` releases the one pin nothing else names,
-the Lance version on the branch (the imaging pin is also `main`'s) -- then the
-bookmark, and let `gc` judge the branches:
+its job. Throwing a bookmark away is the opposite of `promote`, and one
+command as well: `drop`. It is a plan first -- the commits only this bookmark
+reaches, the bookmark, and what `gc` will release once they are gone:
 
-{{< include _generated/06/21-abandon-relabel.sh >}}
+{{< include _generated/06/21-drop-relabel-plan.sh >}}
 
-{{< include _generated/06/21-abandon-relabel.txt >}}
+{{< include _generated/06/21-drop-relabel-plan.txt >}}
 
-{{< include _generated/06/22-delete-relabel.sh >}}
+{{< include _generated/06/22-drop-relabel.sh >}}
 
-{{< include _generated/06/22-delete-relabel.txt >}}
+{{< include _generated/06/22-drop-relabel.txt >}}
 
-{{< include _generated/06/23-gc-relabel.sh >}}
+The one pin nothing else names -- the Lance version on the branch (the
+imaging pin is also `main`'s) -- is released, and both branches go: Icechunk's
+head is `main`'s pin, and Lance's head is a state the dropped commit had
+pinned. That last rule is `drop`'s own: `gc --prune-bookmarks` would keep a
+branch whose pin was just released ("unpinned writes"), because it cannot
+tell an afternoon's forgotten work from a deliberate throw-away; `drop` can,
+because you named the commits. Writes nobody ever committed are still kept,
+and said so, unless you pass `--force-prune`.
 
-{{< include _generated/06/23-gc-relabel.txt >}}
+{{< include _generated/06/23-log-clean.sh >}}
 
-`gc` deletes a branch only when its head is pinned or nothing was written to
-it. Icechunk's branch head is `main`'s pin, so it goes; Lance's branch holds
-a version whose pin was just released, so it stays until you pass
-`--force-prune`. That is the guard against losing an afternoon -- here the
-data landed on `main` by hand, so forcing would be safe, and the clean-up at
-the end of the next section sweeps it.
+{{< include _generated/06/23-log-clean.txt >}}
 
-{{< include _generated/06/24-log-clean.sh >}}
-
-{{< include _generated/06/24-log-clean.txt >}}
-
-The other ending -- the attempt failed -- is the same three commands without
-the trunk commit in between: `tether abandon relabel-v3 --gc` releases the
-pins only it made, `jj bookmark delete` drops the name, and
-`gc --prune-bookmarks` keeps every branch that holds unpinned writes until
-you say `--force-prune`.
+The other ending -- the attempt failed -- is the same `drop` without the
+trunk commit in between. Run it from the bookmark itself and it leaves for
+the trunk first (`--to` picks another bookmark); the plan shows the leave as
+its first step. `drop` is not undoable by tether: `jj undo` brings the
+commits and the bookmark back, `tether repair` re-pins what they recorded
+while those states are still in the stores, and a `tether new` on the
+bookmark starts it from those pins (see [the CLI guide](07-cli.qmd#drop)).
 
 ::: {.callout-note title="Rehearsing a database migration"}
 The same flow rehearses a schema change on a Neon database: `tether new -b
@@ -232,64 +232,64 @@ each): **A** works in `analysis/`, **B** in `analysis-b/`.
 **Set up.** B's checkout is created from A's; each starts its own bookmark.
 From A:
 
-{{< include _generated/06/25-workspace-add.sh >}}
+{{< include _generated/06/24-workspace-add.sh >}}
 
-{{< include _generated/06/25-workspace-add.txt >}}
+{{< include _generated/06/24-workspace-add.txt >}}
 
-{{< include _generated/06/26-new-a.sh >}}
+{{< include _generated/06/25-new-a.sh >}}
 
-{{< include _generated/06/26-new-a.txt >}}
+{{< include _generated/06/25-new-a.txt >}}
 
 And in B:
 
-{{< include _generated/06/27-new-b.sh >}}
+{{< include _generated/06/26-new-b.sh >}}
 
-{{< include _generated/06/27-new-b.txt >}}
+{{< include _generated/06/26-new-b.txt >}}
 
 **Run and commit.** Each job labels the imaging store through its own
 handle; each `commit` pins its bookmark's branch, lands a dataset commit in
 the VCS, and moves the bookmark onto it. A:
 
-{{< include _generated/06/28-label-a.py >}}
+{{< include _generated/06/27-label-a.py >}}
 
-{{< include _generated/06/29-commit-a.sh >}}
+{{< include _generated/06/28-commit-a.sh >}}
 
-{{< include _generated/06/29-commit-a.txt >}}
+{{< include _generated/06/28-commit-a.txt >}}
 
 B:
 
-{{< include _generated/06/30-label-b.py >}}
+{{< include _generated/06/29-label-b.py >}}
 
-{{< include _generated/06/31-commit-b.sh >}}
+{{< include _generated/06/30-commit-b.sh >}}
 
-{{< include _generated/06/31-commit-b.txt >}}
+{{< include _generated/06/30-commit-b.txt >}}
 
 Two bookmarks, two lines of history, one fork point -- and the same shape in
 the Icechunk store, where `tether.ws.0a1b2c3d.a` and `tether.ws.0a1b2c3d.b`
 both branch off the snapshot `main` pins. From A, B's working copy shows as
 `analysis-b@`:
 
-{{< include _generated/06/32-log-ab.sh >}}
+{{< include _generated/06/31-log-ab.sh >}}
 
-{{< include _generated/06/32-log-ab.txt >}}
+{{< include _generated/06/31-log-ab.txt >}}
 
 **Compare** -- from either checkout, as datasets rather than directories. The
 two heads are on different branches, so Icechunk cannot diff one into the
 other directly; tether diffs each against the snapshot they diverged from and
 reports what either side changed:
 
-{{< include _generated/06/33-diff-ab.sh >}}
+{{< include _generated/06/32-diff-ab.sh >}}
 
-{{< include _generated/06/33-diff-ab.txt >}}
+{{< include _generated/06/32-diff-ab.txt >}}
 
 **Land A.** One command from A: `promote` moves Icechunk's `main` onto `a`'s
 branch (a fast-forward: `main` had not moved since the fork), skips the
 objects A never opened, and -- everything having landed -- moves the `main`
 bookmark onto A's dataset commit.
 
-{{< include _generated/06/34-promote-a.sh >}}
+{{< include _generated/06/33-promote-a.sh >}}
 
-{{< include _generated/06/34-promote-a.txt >}}
+{{< include _generated/06/33-promote-a.txt >}}
 
 B is untouched by this: its bookmark and branches are its own. If B's
 checkout later moves onto the new `main` (`jj new main`), `tether status`
@@ -297,40 +297,27 @@ says the working copy left bookmark `b` and how to return; `tether new b`
 returns, and a bookmark whose pins the dataset no longer names is re-forked
 (refused while it holds uncommitted writes).
 
-**Retire B**, in the order that keeps every step safe -- from A's checkout,
-since B's is about to stop being one. Forget B's checkout, drop B's dataset
-commit (`--gc` releases the pin only it referenced), delete the bookmark, and
-let `gc` judge its branch: its head was pinned by B's commit until the
-abandon, so with the commit gone it holds writes no pin covers and is kept
-unless you say otherwise.
+**Retire B** -- from A's checkout, since B's is about to stop being one.
+Forget B's checkout first: `drop` refuses a bookmark another live checkout is
+working on, and that is the guard you want. Then drop the bookmark:
 
-{{< include _generated/06/35-forget-b.sh >}}
+{{< include _generated/06/34-forget-b.sh >}}
 
-{{< include _generated/06/35-forget-b.txt >}}
+{{< include _generated/06/34-forget-b.txt >}}
 
-{{< include _generated/06/36-abandon-b.sh >}}
+{{< include _generated/06/35-drop-b.sh >}}
 
-{{< include _generated/06/36-abandon-b.txt >}}
-
-{{< include _generated/06/37-delete-b.sh >}}
-
-{{< include _generated/06/37-delete-b.txt >}}
-
-{{< include _generated/06/38-gc-b.sh >}}
-
-{{< include _generated/06/38-gc-b.txt >}}
+{{< include _generated/06/35-drop-b.txt >}}
 
 Nothing is left to run in `analysis-b/`; the directory can be deleted (`git
-worktree remove` already did, for git). Without `--force-prune`, `gc` keeps
-B's Icechunk branch and says so: B's labels are on it and nothing else holds
-them. Delete the bookmark *before* the abandon and `gc` sees a pinned head
-and deletes it without force -- the abandon then only releases the pin. The
-forced sweep also took the Lance branch section 2 left behind: its writes had
-landed on `main` by hand, so nothing was lost.
+worktree remove` already did, for git). B's Icechunk branch went with the
+commit that pinned its head -- B's labels were committed work being thrown
+away by name, which is the one case `drop` treats differently from
+`gc --prune-bookmarks`.
 
-{{< include _generated/06/39-log-final.sh >}}
+{{< include _generated/06/36-log-final.sh >}}
 
-{{< include _generated/06/39-log-final.txt >}}
+{{< include _generated/06/36-log-final.txt >}}
 
 B is gone from history, its pin from the store, and its branch from
 Icechunk. `a` and `main` point at the same commit; `jj bookmark delete a` and
@@ -349,21 +336,21 @@ than from a wrong result.*
 Back on the trunk, register the rest of the inventory -- by hand, or from the
 registry or spreadsheet that already lists it -- and commit it:
 
-{{< include _generated/06/40-new-main-4.sh >}}
+{{< include _generated/06/37-new-main-4.sh >}}
 
-{{< include _generated/06/40-new-main-4.txt >}}
+{{< include _generated/06/37-new-main-4.txt >}}
 
-{{< include _generated/06/41-import.sh >}}
+{{< include _generated/06/38-import.sh >}}
 
-{{< include _generated/06/41-import.txt >}}
+{{< include _generated/06/38-import.txt >}}
 
-{{< include _generated/06/42-commit-inventory.sh >}}
+{{< include _generated/06/39-commit-inventory.sh >}}
 
-{{< include _generated/06/42-commit-inventory.txt >}}
+{{< include _generated/06/39-commit-inventory.txt >}}
 
-{{< include _generated/06/43-log-inventory.sh >}}
+{{< include _generated/06/40-log-inventory.sh >}}
 
-{{< include _generated/06/43-log-inventory.txt >}}
+{{< include _generated/06/40-log-inventory.txt >}}
 
 Then schedule two commands. `status --snapshot` fingerprints every object
 concurrently and only *reports* -- on the trunk, `modified` means an upstream
@@ -371,42 +358,42 @@ branch moved, `behind` that a branch-less object's system has a newer state
 than the pin; nothing moves. `verify` checks that every pin still names what
 the manifest says. Both exit 1 when something is wrong. On a quiet night:
 
-{{< include _generated/06/44-nightly.sh >}}
+{{< include _generated/06/41-nightly.sh >}}
 
-{{< include _generated/06/44-nightly.txt >}}
+{{< include _generated/06/41-nightly.txt >}}
 
 **A raw file overwritten in place.** The instrument re-exports one well of a
 plate registered as `file = "immutable"` (the default). It is the *bytes*
 that count, not the timestamp; `status` stops at the snapshot and exits 1:
 
-{{< include _generated/06/45-overwrite.sh >}}
+{{< include _generated/06/42-overwrite.sh >}}
 
-{{< include _generated/06/46-status-immutable.sh >}}
+{{< include _generated/06/43-status-immutable.sh >}}
 
-{{< include _generated/06/46-status-immutable.txt >}}
+{{< include _generated/06/43-status-immutable.txt >}}
 
 That is deliberate: an "immutable" input silently changing is the worst kind
 of drift. Either something wrote where it should not have, or -- as here --
 the change is legitimate, and accepting it is a re-registration, not a pull:
 
-{{< include _generated/06/47-accept.sh >}}
+{{< include _generated/06/44-accept.sh >}}
 
-{{< include _generated/06/47-accept.txt >}}
+{{< include _generated/06/44-accept.txt >}}
 
 **Pins deleted by hand.** Someone "tidies up" the tags in two stores:
 
-{{< include _generated/06/48-delete-tags.py >}}
+{{< include _generated/06/45-delete-tags.py >}}
 
-{{< include _generated/06/49-verify-missing.sh >}}
+{{< include _generated/06/46-verify-missing.sh >}}
 
-{{< include _generated/06/49-verify-missing.txt >}}
+{{< include _generated/06/46-verify-missing.txt >}}
 
 `repair` recreates every missing pin from its recorded state, while the store
 still has that state:
 
-{{< include _generated/06/50-repair.sh >}}
+{{< include _generated/06/47-repair.sh >}}
 
-{{< include _generated/06/50-repair.txt >}}
+{{< include _generated/06/47-repair.txt >}}
 
 Lance gets its tag back under the same name. Icechunk keeps a tombstone for
 every deleted tag and never lets a name be reused, so tether creates the pin
@@ -415,13 +402,13 @@ id, which is what commits and `gc` key on, is unchanged; the manifest goes on
 saying `tether.<id>`, and every reader resolves a pin through whichever
 generation is live, so history needs no rewriting. `verify` says which one:
 
-{{< include _generated/06/51-verify-repaired.sh >}}
+{{< include _generated/06/48-verify-repaired.sh >}}
 
-{{< include _generated/06/51-verify-repaired.txt >}}
+{{< include _generated/06/48-verify-repaired.txt >}}
 
-{{< include _generated/06/52-open-after-repair.sh >}}
+{{< include _generated/06/49-open-after-repair.sh >}}
 
-{{< include _generated/06/52-open-after-repair.txt >}}
+{{< include _generated/06/49-open-after-repair.txt >}}
 
 (Between the deletion and the `repair`, reads at that commit worked too -- by
 snapshot id, since the manifest records it -- and a bookmark started there
@@ -432,13 +419,13 @@ makes the data unreachable while the store keeps the snapshot.)
 colleague commits to the code repository. On the trunk those branches *are*
 the working refs, so `status` sees them as `modified`:
 
-{{< include _generated/06/53-upstream-moves.py >}}
+{{< include _generated/06/50-upstream-moves.py >}}
 
-{{< include _generated/06/54-code-commit.sh >}}
+{{< include _generated/06/51-code-commit.sh >}}
 
-{{< include _generated/06/55-status-moved.sh >}}
+{{< include _generated/06/52-status-moved.sh >}}
 
-{{< include _generated/06/55-status-moved.txt >}}
+{{< include _generated/06/52-status-moved.txt >}}
 
 Nothing watches anything. Each run fingerprints the objects (an Icechunk
 snapshot id, a Lance version, a git sha, one `LIST` of the prefix) and
@@ -447,13 +434,13 @@ Neither command touches history. A third one does, when you want the dataset
 to *trail* the world rather than merely watch it: a nightly `tether pull` on
 `main` commits whatever moved, and leaves nothing when nothing did.
 
-{{< include _generated/06/56-pull.sh >}}
+{{< include _generated/06/53-pull.sh >}}
 
-{{< include _generated/06/56-pull.txt >}}
+{{< include _generated/06/53-pull.txt >}}
 
-{{< include _generated/06/57-log-pull.sh >}}
+{{< include _generated/06/54-log-pull.sh >}}
 
-{{< include _generated/06/57-log-pull.txt >}}
+{{< include _generated/06/54-log-pull.txt >}}
 
 Read next: [Pinning](03-pinning.qmd#drift), [Registries and SQL](10-registries-and-sql.qmd).
 
@@ -467,41 +454,41 @@ table gets `--pin record`: its state is recorded in every commit, but no tag
 is created, so the table's own retention decides how long each version lives.
 Commit the registration, then run the sweep on its own bookmark:
 
-{{< include _generated/06/58-add-scratch.sh >}}
+{{< include _generated/06/55-add-scratch.sh >}}
 
-{{< include _generated/06/58-add-scratch.txt >}}
+{{< include _generated/06/55-add-scratch.txt >}}
 
-{{< include _generated/06/59-new-sweep.sh >}}
+{{< include _generated/06/56-new-sweep.sh >}}
 
-{{< include _generated/06/59-new-sweep.txt >}}
+{{< include _generated/06/56-new-sweep.txt >}}
 
 (A `record` object gets its branch at `new` time rather than on first write:
 with no tag to fork from later, the recorded version is taken while it is
 known to exist.) Each trial relabels the imaging store and appends to the
 scratch table -- `sweep.py`:
 
-{{< include _generated/06/60-sweep-py.py >}}
+{{< include _generated/06/57-sweep-py.py >}}
 
-{{< include _generated/06/61-trials.sh >}}
+{{< include _generated/06/58-trials.sh >}}
 
-{{< include _generated/06/61-trials.txt >}}
+{{< include _generated/06/58-trials.txt >}}
 
-{{< include _generated/06/62-log-sweep.sh >}}
+{{< include _generated/06/59-log-sweep.sh >}}
 
-{{< include _generated/06/62-log-sweep.txt >}}
+{{< include _generated/06/59-log-sweep.txt >}}
 
 Four Icechunk tags the store must now keep. When the experiment is over, drop
 the commits that were only tries and release what only they pinned, in one
 step. Later commits keep their manifests exactly as they were (they are
 snapshots, not patches), so trial 4 still names its own pins:
 
-{{< include _generated/06/63-abandon-trials.sh >}}
+{{< include _generated/06/60-abandon-trials.sh >}}
 
-{{< include _generated/06/63-abandon-trials.txt >}}
+{{< include _generated/06/60-abandon-trials.txt >}}
 
-{{< include _generated/06/64-log-abandoned.sh >}}
+{{< include _generated/06/61-log-abandoned.sh >}}
 
-{{< include _generated/06/64-log-abandoned.txt >}}
+{{< include _generated/06/61-log-abandoned.txt >}}
 
 Trial 4 was rebased onto trial 1 (new commit id, same change id, same
 manifests), the `sweep` bookmark followed it, and `scratch/embeddings` freed
@@ -524,17 +511,17 @@ yet run against real S3 or a real second clone; the commands say so, and
 [Reclaiming Storage](05-reclaiming-storage.qmd#stores-tether-created) has the
 rules and the graduation criteria.)
 
-{{< include _generated/06/65-ls-before.sh >}}
+{{< include _generated/06/62-ls-before.sh >}}
 
-{{< include _generated/06/65-ls-before.txt >}}
+{{< include _generated/06/62-ls-before.txt >}}
 
-{{< include _generated/06/66-new-probe.sh >}}
+{{< include _generated/06/63-new-probe.sh >}}
 
-{{< include _generated/06/66-new-probe.txt >}}
+{{< include _generated/06/63-new-probe.txt >}}
 
-{{< include _generated/06/67-add-probe.sh >}}
+{{< include _generated/06/64-add-probe.sh >}}
 
-{{< include _generated/06/67-add-probe.txt >}}
+{{< include _generated/06/64-add-probe.txt >}}
 
 The store is created empty with an owner marker naming this dataset, and
 remembered in a repository-wide index outside history
@@ -544,64 +531,45 @@ working branch is forked at once -- no second `new` -- and the first writable
 `open` lands on it (from Python, `repo.create("scratch/probe", "icechunk",
 {"uri": ...})` does the `add` and the `open` in one call):
 
-{{< include _generated/06/68-probe-py.py >}}
+{{< include _generated/06/65-probe-py.py >}}
 
-{{< include _generated/06/69-commit-probe.sh >}}
+{{< include _generated/06/66-commit-probe.sh >}}
 
-{{< include _generated/06/69-commit-probe.txt >}}
+{{< include _generated/06/66-commit-probe.txt >}}
 
-{{< include _generated/06/70-status-probe.sh >}}
+{{< include _generated/06/67-status-probe.sh >}}
 
-{{< include _generated/06/70-status-probe.txt >}}
+{{< include _generated/06/67-status-probe.txt >}}
 
-{{< include _generated/06/71-log-probe.sh >}}
+{{< include _generated/06/68-log-probe.sh >}}
 
-{{< include _generated/06/71-log-probe.txt >}}
+{{< include _generated/06/68-log-probe.txt >}}
 
-The probe did not pan out. Leave the bookmark, drop its commit, delete the
-bookmark: the same three steps as for `relabel-v3` in section 2. Back on
-`sweep`, `new` still lists the probe's working ref -- for an object that does
-not exist at this revision, kept so `gc` can find the branch -- and `abandon`
-shows the gc plan it does not yet apply. That plan says nothing about the
-store: no manifest names it any more, and everything about created stores --
-their pins, their branches, the store itself -- is opt-in (`gc
---delete-stores`), because a deleted store has no `repair` and `gc` only knows
-the history this clone has fetched. tether does remember every store this
-clone forked or pinned in (`tether-touched.jsonl`, next to the created index),
-which is how the opt-in step finds the probe's pin. Its branch is only ever
-deleted under `--prune-bookmarks`:
+The probe did not pan out. One `drop`, from the bookmark itself: `--to sweep`
+says where to leave for (the trunk otherwise), and `--delete-stores` opts into
+the experimental step for the store the probe created -- a deleted store has
+no `repair`, and `gc` only knows the history this clone has fetched, so the
+store side of `drop` is exactly `gc --prune-bookmarks` for this bookmark plus
+whatever you opt into:
 
-{{< include _generated/06/72-new-sweep-again.sh >}}
+{{< include _generated/06/69-drop-probe.sh >}}
 
-{{< include _generated/06/72-new-sweep-again.txt >}}
+{{< include _generated/06/69-drop-probe.txt >}}
 
-{{< include _generated/06/73-abandon-probe.sh >}}
+{{< include _generated/06/70-ls-after.sh >}}
 
-{{< include _generated/06/73-abandon-probe.txt >}}
+{{< include _generated/06/70-ls-after.txt >}}
 
-{{< include _generated/06/74-delete-probe.sh >}}
-
-{{< include _generated/06/74-delete-probe.txt >}}
-
-{{< include _generated/06/75-gc-probe.sh >}}
-
-{{< include _generated/06/75-gc-probe.txt >}}
-
-{{< include _generated/06/76-ls-after.sh >}}
-
-{{< include _generated/06/76-ls-after.txt >}}
-
-Unpin, delete the branch, and -- with nothing left in the store but the owner
-marker -- delete the store, in that order and only then. The data directory is
-as it was before the probe. (The sweep table's `probe` branch is kept: a
-`record` object's branch holds a pin-less recorded state, and `gc` will not
-delete that without `--force-prune`.) A store tether *adopted* is never
-deleted this way, and a clone of the dataset cannot make it happen by editing
-a manifest: only the marker in the store and the index in your own repository
-say a store is tether's to remove. Had another checkout or clone forked its
-own branch in the store meanwhile -- a bookmark this clone never had -- the
-plan would have kept the store whole, that branch and your pins alike, and
-said so.
+Leave, drop the commit, unpin, delete the branches (the sweep table's, too:
+its recorded state was the dropped commit's), and -- with nothing left in the
+store but the owner marker -- delete the store, in that order and only then.
+The data directory is as it was before the probe. A store tether *adopted* is
+never deleted this way, and a clone of the dataset cannot make it happen by
+editing a manifest: only the marker in the store and the index in your own
+repository say a store is tether's to remove. Had another checkout or clone
+forked its own branch in the store meanwhile -- a bookmark this clone never
+had -- the plan would have kept the store whole, that branch and your pins
+alike, and said so.
 
 Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
 
@@ -612,17 +580,17 @@ Read next: [Reclaiming Storage](05-reclaiming-storage.qmd).
 **An unwanted `new`** -- you started a bookmark you did not mean to, and
 `--eager` forked every branch at once. The op log knows what was created:
 
-{{< include _generated/06/77-new-scratch.sh >}}
+{{< include _generated/06/71-new-scratch.sh >}}
 
-{{< include _generated/06/77-new-scratch.txt >}}
+{{< include _generated/06/71-new-scratch.txt >}}
 
-{{< include _generated/06/78-ops.sh >}}
+{{< include _generated/06/72-ops.sh >}}
 
-{{< include _generated/06/78-ops.txt >}}
+{{< include _generated/06/72-ops.txt >}}
 
-{{< include _generated/06/79-undo-new.sh >}}
+{{< include _generated/06/73-undo-new.sh >}}
 
-{{< include _generated/06/79-undo-new.txt >}}
+{{< include _generated/06/73-undo-new.txt >}}
 
 Five branches deleted, the workspace file and the VCS working copy put back,
 the bookmark gone: the checkout is on `sweep` again as if nothing happened.
@@ -633,13 +601,13 @@ even from a commit whose branches already sit exactly at the pins.
 `zarr/imaging` should go back to what an older commit pinned. `restore`
 resets the current bookmark's branch for that object, and nothing else:
 
-{{< include _generated/06/80-restore.sh >}}
+{{< include _generated/06/74-restore.sh >}}
 
-{{< include _generated/06/80-restore.txt >}}
+{{< include _generated/06/74-restore.txt >}}
 
-{{< include _generated/06/81-status-restored.sh >}}
+{{< include _generated/06/75-status-restored.sh >}}
 
-{{< include _generated/06/81-status-restored.txt >}}
+{{< include _generated/06/75-status-restored.txt >}}
 
 The other branches, the manifests, and the working copy stay put; the next
 `commit` would pin what you restored. Here it was a demonstration. `undo`
@@ -647,41 +615,41 @@ does not guess where a branch it *reset* should go -- the store may not allow
 re-pointing, and which head you want is your call -- so it restores the
 workspace record, says what the branch was, and leaves the move to you:
 
-{{< include _generated/06/82-undo-restore.sh >}}
+{{< include _generated/06/76-undo-restore.sh >}}
 
-{{< include _generated/06/82-undo-restore.txt >}}
+{{< include _generated/06/76-undo-restore.txt >}}
 
 `restore` is its own undo: name the commit whose state you want. The branch
 holds the demonstration's state, which this workspace never committed, so
 `restore` asks for `--discard` before it throws that away:
 
-{{< include _generated/06/83-restore-back.sh >}}
+{{< include _generated/06/77-restore-back.sh >}}
 
-{{< include _generated/06/83-restore-back.txt >}}
+{{< include _generated/06/77-restore-back.txt >}}
 
 **Several things in a row.** A restore you did not mean, then a bookmark you
 did not mean. `undo` reverses the newest operation each time; run it once
 per slip:
 
-{{< include _generated/06/84-restore-features.sh >}}
+{{< include _generated/06/78-restore-features.sh >}}
 
-{{< include _generated/06/84-restore-features.txt >}}
+{{< include _generated/06/78-restore-features.txt >}}
 
-{{< include _generated/06/85-new-again.sh >}}
+{{< include _generated/06/79-new-again.sh >}}
 
-{{< include _generated/06/85-new-again.txt >}}
+{{< include _generated/06/79-new-again.txt >}}
 
-{{< include _generated/06/86-ops-again.sh >}}
+{{< include _generated/06/80-ops-again.sh >}}
 
-{{< include _generated/06/86-ops-again.txt >}}
+{{< include _generated/06/80-ops-again.txt >}}
 
-{{< include _generated/06/87-undo-again.sh >}}
+{{< include _generated/06/81-undo-again.sh >}}
 
-{{< include _generated/06/87-undo-again.txt >}}
+{{< include _generated/06/81-undo-again.txt >}}
 
-{{< include _generated/06/88-undo-restore-features.sh >}}
+{{< include _generated/06/82-undo-restore-features.sh >}}
 
-{{< include _generated/06/88-undo-restore-features.txt >}}
+{{< include _generated/06/82-undo-restore-features.txt >}}
 
 The restore had *created* `features`' branch on `sweep` (nothing had written
 to `features` there yet), so undoing it deletes that branch again; `sweep`
@@ -702,9 +670,9 @@ None of this touched history: the `scratch` and `again` bookmarks came and
 went without a commit, and `restore` acts on the stores. The log is what
 section 5 left, and the workspace is back on `sweep`:
 
-{{< include _generated/06/89-log-recovered.sh >}}
+{{< include _generated/06/83-log-recovered.sh >}}
 
-{{< include _generated/06/89-log-recovered.txt >}}
+{{< include _generated/06/83-log-recovered.txt >}}
 
 The boundary: `jj undo` and `git reset` move the manifests, never the stores;
 tether's `undo` and `repair` cover tether's side and say exactly what they
@@ -724,26 +692,26 @@ Push the history into Postgres -- after every commit to `main`, typically
 from CI. Every commit on every bookmark goes, with its parents, refs, and
 one row per object per commit:
 
-{{< include _generated/06/90-publish.sh >}}
+{{< include _generated/06/84-publish.sh >}}
 
-{{< include _generated/06/90-publish.txt >}}
+{{< include _generated/06/84-publish.txt >}}
 
 Consumers join their own run log against `tether.objects` -- the per-commit
 table; `tether.object_states` is the distinct (system, state) pairs a
 catalog keys on. A training run recorded which dataset commit it read, and
 the join says what that meant for every input:
 
-{{< include _generated/06/91-consumer-join.py >}}
+{{< include _generated/06/85-consumer-join.py >}}
 
-{{< include _generated/06/91-consumer-join.txt >}}
+{{< include _generated/06/85-consumer-join.txt >}}
 
 `pin_id` is null for the recorded-only objects (the raw plates, the
 `--pin record` scratch table); their `state_json` is still the exact state.
 For a provenance dashboard, `tether export` writes the same tables as files:
 
-{{< include _generated/06/92-export.sh >}}
+{{< include _generated/06/86-export.sh >}}
 
-{{< include _generated/06/92-export.txt >}}
+{{< include _generated/06/86-export.txt >}}
 
 And when the registry -- not the repository -- is where objects are declared,
 run the other direction: `tether import` from a query, `commit`, and the
@@ -754,9 +722,9 @@ publishes, the consumer's pipeline verifies the commit it is about to read
 and refuses to start on a pin that is gone (`--deep` opens each recorded
 state, which is the only way to check a `record`-pinned object):
 
-{{< include _generated/06/93-verify-rev.sh >}}
+{{< include _generated/06/87-verify-rev.sh >}}
 
-{{< include _generated/06/93-verify-rev.txt >}}
+{{< include _generated/06/87-verify-rev.txt >}}
 
 `publish` and `export` write to Postgres and to files, not to the repository,
 so the story ends where section 5 left it: the sweep on its bookmark, `main`
@@ -765,8 +733,8 @@ scratch table and hold the imaging store, so `promote zarr/imaging` lands the
 labels on purpose and the scratch rows, which are scratch, stay on their
 branch.
 
-{{< include _generated/06/94-log-end.sh >}}
+{{< include _generated/06/88-log-end.sh >}}
 
-{{< include _generated/06/94-log-end.txt >}}
+{{< include _generated/06/88-log-end.txt >}}
 
 Read next: [Registries and SQL](10-registries-and-sql.qmd).

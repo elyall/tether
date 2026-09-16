@@ -134,7 +134,9 @@ jj squash --from krlwtmzy::ptnwqsyu --into vqmxzkwl
 while -- but once `gc` runs, a restored commit will point at pins that are
 gone, and `verify` will say so.
 
-To drop a whole side branch, delete its bookmark and abandon its commits:
+To drop a whole side branch, `tether drop try-model-v2` does the VCS half
+(`jj abandon` of the commits only it reaches, then the bookmark) and the
+store half in one step -- see [`drop`](07-cli.qmd#drop). By hand it is:
 
 ```bash
 jj bookmark delete try-model-v2
@@ -153,9 +155,10 @@ git log --oneline main..HEAD
 git rebase -i a1b2c3d      # mark the two middle commits `fixup`/`drop`
 ```
 
-To drop a whole side branch: `git branch -D try-model-v2`. `gc` walks
-`rev-list --all`, so anything unreachable from a ref is gone as far as tether
-is concerned; git's own reflog and `git gc` are independent of that.
+To drop a whole side branch: `tether drop try-model-v2`, or by hand `git
+branch -D try-model-v2`. `gc` walks `rev-list --all`, so anything unreachable
+from a ref is gone as far as tether is concerned; git's own reflog and `git
+gc` are independent of that.
 
 :::
 
