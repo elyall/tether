@@ -1,102 +1,236 @@
 ---
 title: "Getting Started"
+guide-section: "Start Here"
 ---
 
-tether ties heterogeneous data objects -- files and object-store prefixes,
-Icechunk repositories, Neon Postgres databases, Iceberg / Delta / DuckLake
-tables, Lance datasets, lakeFS repositories, Dolt databases, git/jj
-repositories -- to the commits of an existing git or jj repository. A commit
-records every object's state and, where the system supports it, creates a
-durable native reference (a tag, a branch at an LSN) so that state can be read
-back and branched from later.
+Ten minutes, no cloud account: a local Icechunk repository and a directory of
+files, registered in a fresh repository, committed, changed on a branch, and
+landed. Every command below was run as shown; ids will differ on your machine.
 
 ## Install
 
 ```bash
-pip install tether-vcs[cli]                 # core + CLI
-pip install tether-vcs[cli,icechunk,neon]   # add the backends you use
-pip install tether-vcs[all]                 # everything
+pip install "tether-vcs[cli,icechunk]"      # what this page needs
+pip install "tether-vcs[cli,icechunk,neon]"  # add the backends you use
+pip install "tether-vcs[all]"                # everything
 ```
 
-The distribution is `tether-vcs` (PyPI reserves the bare name); the package you
-import and the command you run are both `tether`. Python 3.11 or newer; the
-experimental `tether add --create` on an Icechunk store needs icechunk 2.x,
-which needs 3.12.
+The distribution is `tether-vcs` (PyPI reserves the bare name); the package
+you import and the command you run are both `tether`. Python 3.11 or newer.
 
-Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`, `azure`
-are aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`,
-`ducklake`, `dolt`. `git` and/or `jj` must be on `PATH`: tether stores its
-history inside your repository rather than keeping its own.
+Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`,
+`azure` are aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`,
+`lakefs`, `ducklake`, `dolt`.
 
-## A dataset in five commands
+::: {.callout-note title="Before you start"}
+- `git` or `jj` on `PATH`. tether keeps its history in *your* repository, not
+  its own.
+- Remote objects (S3, Neon, a catalog) need credentials. They never go in the
+  repository -- see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml).
+- Backends marked *experimental* in [Backends](09-backends.qmd) have run
+  against a fake of the service, not the service itself.
+:::
 
-Run these inside any git or jj repository (a new one is fine):
+## Some data to track
+
+Use anything you have, or make a small sample: an Icechunk repository with one
+array, and a directory of three files.
+
+```python
+import pathlib, icechunk, zarr
+
+data = pathlib.Path("data")
+storage = icechunk.local_filesystem_storage(str(data / "imaging.icechunk"))
+repo = icechunk.Repository.create(storage)
+session = repo.writable_session("main")
+root = zarr.create_group(store=session.store)
+root.create_array("labels", shape=(4, 8, 8), chunks=(1, 8, 8), dtype="u1")[:] = 0
+session.commit("plate1: empty labels")
+
+raw = data / "raw" / "plate1"
+raw.mkdir(parents=True)
+for i in range(3):
+    (raw / f"well_{i}.tif").write_bytes(bytes([i]) * 64)
+```
+
+## Register and commit
+
+tether lives inside a git or jj repository. Make one next to the data:
 
 ```bash
+jj git init my-dataset && cd my-dataset      # or: git init my-dataset
 tether init
-tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk --branch main
-tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
-tether add raw/plate1   --kind file s3://bucket/raw/plate1/
+tether add zarr/imaging --kind icechunk ../data/imaging.icechunk
+tether add raw/plate1   --kind file     ../data/raw/plate1/
 tether status
 ```
 
 ```
-dataset 0f2e9c7a11b3; on trunk bookmark main
-       new  db/metrics  [neon/forkable]
-       new  raw/plate1  [file/observed] unrecoverable
-       new  zarr/imaging  [icechunk/forkable]
+dataset 61d0206e8d81; on trunk bookmark main
+        new  raw/plate1  [file/observed]
+        new  zarr/imaging  [icechunk/forkable]
 ```
 
-This first `status` fanned out to all three systems concurrently (a Neon LSN,
-an Icechunk snapshot id, an etag digest over the prefix) because the workspace
-had no snapshot yet. From now on `tether status` is local -- the last snapshot
-with its age -- and `tether status --snapshot` contacts the systems again.
-Nothing has been recorded yet; `init` and `add` only wrote small TOML
-manifests under `.tether/`.
+`init` and `add` wrote small TOML manifests under `.tether/` and put the
+working copy on `main`, the dataset's *trunk*. `status` was the first command
+to touch the data: it fingerprinted both objects (an Icechunk snapshot id, a
+digest over the files). The bracket names each object's *tier* -- what
+tether can do with it. Icechunk is *forkable*: it can be pinned and branched.
+A directory is *observed*: tether can tell you it changed, nothing more.
 
 ```bash
-tether commit -m "Baseline imaging + metrics"
+tether commit -m "Baseline: plate1 imaging and raw files"
 ```
 
 ```
-  pinned zarr/imaging -> tether.0a1b2c3d.6674305d5e1fe5f6
-  pinned db/metrics -> tether.0a1b2c3d.a91f0e2b77c3e5f6
+  pinned zarr/imaging -> tether.4e9503fc.73e341e966c83d38
   recorded raw/plate1 (not recoverable)
-committed 8d5719841a09
+committed b55326ca55a0
 ```
 
-That one command created an Icechunk tag and a protected Neon branch (the
-*pins*), wrote the states into the manifests, made a jj/git commit of those
-manifests, and moved the `main` bookmark onto it -- `init` put the working
-copy on `main`, the dataset's trunk, where every object's working ref is its
-own `main`. The commit id is the handle for this exact combination of states,
-forever.
+One command did three things: created an Icechunk tag (the *pin*) holding the
+snapshot, wrote both states into the manifests, and made a jj/git commit of
+those manifests with the `main` bookmark on it. `b55326ca55a0` is now the
+handle for this exact combination of states.
 
-Where to next:
+## Read it back
 
-- [Pinning](03-pinning.qmd) walks through recording state, reproducing reads
-  from a past commit, drift detection, verification, and garbage collection.
-- [Branching and writing](04-branching-and-writing.qmd) covers bookmarks
-  (`tether new -b`), writable handles, committing, and `promote`.
-- [Reclaiming storage](05-reclaiming-storage.qmd) covers plans (`--dry-run`),
-  pin-less forks, dropping history, and `gc`.
-- [Registries and SQL](10-registries-and-sql.qmd) exports history as tables,
-  publishes them to Postgres, and imports the object set from a registry.
-- [Concepts](02-concepts.qmd) explains the model (tiers, pins, forks, stale
-  working copies) in one page.
+Any process can open an object *as it was* at a commit:
 
-## Layout
-
-```
-<dataset-root>/
-  tether.toml                 # committed config, including the dataset id
-  .tether/
-    .gitignore                # ignores the untracked per-checkout files: workspace.toml,
-                              #   ops.jsonl, secrets.toml, cache/, lock
-    objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin
-    listings/<hash>.jsonl     # committed per-file listings for directory/prefix states
-    workspace.toml            # untracked: workspace id, bookmark, working refs, base states, fork points
-    ops.jsonl                 # untracked: the operation log (`tether ops`, `undo`)
+```bash
+tether open zarr/imaging --rev b55326ca55a0
 ```
 
-Everything committed is small, text, and reviewable in `jj diff` / `git diff`.
+```
+/path/to/data/imaging.icechunk#tether.4e9503fc.73e341e966c83d38
+```
+
+```python
+from tether import Repo
+
+repo = Repo.find(".")
+h = repo.open("zarr/imaging", rev="b55326ca55a0")   # read-only IcechunkHandle at the tag
+zarr.open_group(h.session.store, mode="r")
+```
+
+For a whole job, set `TETHER_REV=b55326ca55a0` and every `repo.open(key)` in
+it resolves read-only at that commit's pins -- no code change. The directory
+cannot be opened at a revision: its state is a digest, not an address, which
+is what `not recoverable` meant above.
+
+## Change it on a branch
+
+A *bookmark* is a branch of the dataset and, with it, a branch in every
+system that has them. Start one:
+
+```bash
+tether new -b relabel
+```
+
+```
+on bookmark relabel; working refs set up
+  zarr/imaging -> tether.ws.4e9503fc.relabel  (created on first writable open)
+```
+
+Nothing was written yet. The branch appears in the Icechunk repository the
+first time you open the object writable, forked from the pin `main` holds:
+
+```python
+import zarr
+from tether import Repo
+
+repo = Repo.find(".")
+h = repo.open("zarr/imaging")             # writable: this forks tether.ws.4e9503fc.relabel
+group = zarr.open_group(h.session.store, mode="a")
+group["labels"][:] = 1
+h.session.commit("Relabel plate1")        # an Icechunk commit on the branch
+```
+
+`main` -- the bookmark and the Icechunk branch -- is untouched. Record the
+result and compare it with the trunk:
+
+```bash
+tether commit -m "Relabel plate1"
+tether diff main relabel --content
+```
+
+```
+  pinned zarr/imaging -> tether.4e9503fc.89c7e63509153c4f
+committed 7eb84262ce1b
+```
+
+```
+    changed  zarr/imaging  [+0 -0 ~1 nodes]
+               modified  /labels  4 chunks
+```
+
+`commit` pinned the branch head and moved the `relabel` bookmark onto the new
+commit. Both commits stay readable: `open --rev b55326ca55a0` still gives the
+zeros.
+
+## Land it
+
+`promote` makes each system's upstream branch point at what the bookmark
+pinned, then moves the `main` bookmark to the commit. Every command that
+writes to a store takes `--dry-run`, so look first:
+
+```bash
+tether promote --dry-run
+```
+
+```
+plan: promote (1 write(s))
+        fast-forward  zarr/imaging  [icechunk] main  main snapshot_id=SHS2X3EVBHMYV1BQ… -> snapshot_id=TY7E8S29CEP987JJ… (base unchanged since fork)
+                      raw/plate1: not forkable; nothing to promote
+```
+
+```bash
+tether promote
+tether verify --all-history
+```
+
+```
+  fast-forwarded zarr/imaging -> {'snapshot_id': 'TY7E8S29CEP987JJ1VX0'}
+  skipped        raw/plate1
+main -> 7eb84262ce1b
+```
+
+```
+        ok  1609e5dbca9d:zarr/imaging
+        ok  7eb84262ce1b:zarr/imaging
+        ok  b55326ca55a0:zarr/imaging
+```
+
+Icechunk's `main` was fast-forwarded (nothing else had moved it since the
+fork), `main` the bookmark now names the relabel commit, and `verify` confirms
+every pin any commit ever made still resolves -- the check to put in CI.
+
+## What was written
+
+Everything committed is small, text, and reviewable in `jj diff` / `git diff`:
+`tether.toml` (the dataset's id and config) and `.tether/objects/<key>.toml`
+(one manifest per object: kind, locator, state, pin). Per-checkout files --
+`.tether/workspace.toml` (which bookmark you are on, which branches you write
+through) and `.tether/ops.jsonl` (what tether did to the stores, for `undo`)
+-- are untracked. The full layout is in
+[Configuration](08-configuration.qmd#layout).
+
+## Next
+
+Remote systems register the same way; only the locator changes:
+
+```bash
+tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk
+tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
+tether add features     --kind lance s3://bucket/features.lance
+tether add code         --kind git ../analysis-code
+```
+
+- [Pinning](03-pinning.qmd): commit, reproduce, catch drift, verify.
+- [Branching and Writing](04-branching-and-writing.qmd): bookmarks, native
+  handles, `promote`, `pull`, `drop`, and what happens when a promote is
+  refused.
+- [Worked Examples](06-use-cases.qmd): seven situations, run end to end with
+  real output.
+- [Concepts](02-concepts.qmd): the model in one page, and where it maps onto
+  jj.

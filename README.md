@@ -9,148 +9,69 @@
 
 **Version control (fingerprints, pins, & forks) for heterogeneous datasets.**
 
-> Status: alpha. See the [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md).
->
-> State: vibe coded with Claude Fable 5.1. **USE AT YOUR OWN RISK.**
+A dataset rarely lives in one place: an Icechunk repository, a directory of raw
+files, a Postgres database, an Iceberg table, and the code that produced them.
+tether tracks all of them from one git or jj repository. Each commit records
+every object's exact state -- and, where the system allows it, *pins* that
+state with a native ref so it stays readable, and *forks* a writable branch
+off it when you want to change things without touching `main`.
 
-Think of `tether` as **DVC for *branchable* systems**: like DVC it commits small
-manifests into your git/jj repo, but where DVC only fingerprints files, tether
-also *pins* and *forks* live systems. Every backend is fingerprinted; what
-else tether can do with each depends on what the system offers:
+Think of it as **DVC for branchable systems**: like DVC it commits small
+manifests to your repository, but where DVC only fingerprints files, tether
+also pins and forks live systems.
 
-| Backend | Recover | Pin | Fork | Promote | Merge | Diff | History |
-| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| local files and directories; object-store prefixes (S3, GCS, Azure) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| single object-store objects with versioning enabled | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| git / [jj](https://jj-vcs.dev) repositories | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [Icechunk](https://icechunk.io) repositories | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| [Neon](https://neon.com) Postgres databases *(experimental)* | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| [Apache Iceberg](https://iceberg.apache.org) tables *(experimental)* | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| [Delta Lake](https://delta.io) tables | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| [Lance](https://lance.org) datasets | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
-| [lakeFS](https://lakefs.io) repositories *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [DuckLake](https://ducklake.select) catalogs *(experimental)* | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| [Dolt](https://www.dolthub.com) databases *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-**Recover**: can a committed state be opened again later? ✅ held by a pin;
-🟡 reopenable by version id for as long as the system keeps that version
-(object versioning, Delta/DuckLake snapshots) -- tether records it but has no
-ref of its own to hold it; ❌ tether can only tell you it changed. **Pin**: a
-durable native ref (tag, protected branch) tether creates at commit time.
-**Fork**: a writable branch off a pin for `tether new`. **Promote**:
-fast-forward the base branch to the fork; **Merge**: a native three-way merge
-when it is not a fast-forward. **Diff**: `tether diff --content` describes
-what changed inside the object. **History**: `tether log` lists the object's
-own snapshots/versions/commits. The full matrix -- state fields, flags,
-per-backend caveats -- is in the
-[backends guide](https://evanlyall.com/tether/user-guide/backends.html).
-*Experimental* 🧪: `tether add --create` makes a store tether then owns
-(Icechunk, git, a local directory) and `tether gc --delete-stores` removes it
-once nothing references it -- see
-[reclaiming storage](https://evanlyall.com/tether/user-guide/reclaiming-storage.html).
-What graduates, what is tested against real services, and what goes before
-0.1.0 is in [ROADMAP.md](https://github.com/elyall/tether/blob/main/ROADMAP.md).
-
-Documentation: <https://evanlyall.com/tether/> --
-[getting started](https://evanlyall.com/tether/user-guide/getting-started.html),
-[concepts](https://evanlyall.com/tether/user-guide/concepts.html),
-[pinning](https://evanlyall.com/tether/user-guide/pinning.html),
-[branching and writing](https://evanlyall.com/tether/user-guide/branching-and-writing.html),
-[reclaiming storage](https://evanlyall.com/tether/user-guide/reclaiming-storage.html),
-[use cases](https://evanlyall.com/tether/user-guide/use-cases.html),
-[CLI](https://evanlyall.com/tether/user-guide/cli.html),
-[configuration](https://evanlyall.com/tether/user-guide/configuration.html),
-[backends](https://evanlyall.com/tether/user-guide/backends.html),
-[registries and SQL](https://evanlyall.com/tether/user-guide/registries-and-sql.html),
-[writing a backend](https://evanlyall.com/tether/user-guide/extending.html),
-[caveats and performance](https://evanlyall.com/tether/user-guide/caveats-and-performance.html),
-plus the generated API and CLI reference.
-
-## The model
-
-A dataset is a git/jj repository with one small manifest per object, and its
-bookmarks and the stores' branches are one shape:
-
-- **Commits hold references.** Each dataset commit records, per object, an
-  exact state and -- where the system allows it -- a *pin*: a native,
-  GC-proof ref (an Icechunk tag, a protected Neon branch, a git tag) that
-  holds that state. A commit is a complete, reproducible position for every
-  object at once; `tether open KEY --rev C` reads it.
-- **Bookmarks hold branches.** The trunk bookmark (`main`) stands for every
-  object's upstream branch: working on it writes there. Any other bookmark
-  stands for one branch per system, named after it (`tether.ws.<dataset>.feature`),
-  forked from the pins of the commit it started at -- decided by
-  `tether new -b feature`, created on the first write. A working copy on no
-  bookmark is read-only.
-
-`commit` pins the heads of your bookmark's branches and moves the bookmark to
-the new commit, the way a git branch follows its commits. `promote` lands a
-bookmark on the trunk: each system's upstream branch fast-forwards (or
-merges) to the bookmark's branch, then `main` moves to the bookmark's commit.
-`pull` is the fetch: on `main` it reads every object's upstream branch (and,
-for systems without branches, the object itself) and commits what moved.
-
-Everything history-shaped (commits, bookmarks, workspaces, sharing, undo of
-the manifests) is the VCS's. What the VCS cannot see -- what tether did to
-the *stores* -- is in tether's own operation log (`tether ops`, `tether
-undo`).
-
-## Why this exists (prior art)
-
-Every existing tool versions a single layer:
-
-| Tool | Scope | Relationship to tether |
-| --- | --- | --- |
-| lakeFS, Quilt, Oxen, DataChain | objects / files | analog of our `file` objects; lakeFS is also a backend |
-| **DVC** (lakeFS-owned) | files/objects in git | closest structural analog; no pin/fork of live systems |
-| Dolt, pgGit, Neon, Databricks Lakebase | one database | vendor-bound; no external-object pins; Dolt and Neon are backends |
-| Nessie, Bauplan | Iceberg catalog branching | Iceberg-only |
-| Icechunk, Lance, Delta, DuckLake | one dataset / table / catalog | we use them as backends |
-| [Yggdrasil](https://github.com/replikativ/yggdrasil) (replikativ) | cross-system: Clojure protocol stack (snapshot / branch / merge / watch) over Git, ZFS, Btrfs, IPFS, Iceberg, Datahike, lakeFS, Dolt, Podman, with an HLC-coordinated workspace | the closest conceptual sibling; not adoptable from Python (JVM library; its own README marks the Python binding as unmaintained since the initial release) |
-| Dagster observable assets | staleness detection | analog of our snapshot/drift step; no branching |
-
-Nothing provides unified version control *across* files + Icechunk + Postgres +
-Iceberg with pinning and forking. So tether borrows jj's working-copy and
-operation-log ideas (`new REV`, stale-working-copy detection, `undo`), DVC's
-manifests-in-VCS layout, and [Yggdrasil](https://github.com/replikativ/yggdrasil)'s
-observe-then-record shape (a workspace that watches independent systems and
-records their snapshots, rather than a store that holds the data).
+> Status: pre-release (`0.1.0` betas). See the
+> [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md) and
+> [ROADMAP.md](https://github.com/elyall/tether/blob/main/ROADMAP.md) for
+> what is tested against real services and what is still experimental.
+> Vibe coded with Claude Fable 5.1. **USE AT YOUR OWN RISK.**
 
 ## Install
 
 ```bash
-pip install tether-vcs[cli]                 # core + CLI
-pip install tether-vcs[cli,icechunk,neon]   # add backends you need
-pip install tether-vcs[all]                 # everything
+pip install "tether-vcs[cli]"                 # core + CLI
+pip install "tether-vcs[cli,icechunk,lance]"  # add the backends you use
+pip install "tether-vcs[all]"                 # everything
 ```
 
-Python 3.11 or newer. (`tether add --create` on an Icechunk store needs
-icechunk 2.x, which needs 3.12.)
-
-Extras: `cli`, `objectstore` (S3/GCS/Azure for `file`; `s3`/`gcs`/`azure` are
-aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`, `lakefs`, `ducklake`,
-`dolt`, `postgres` (`tether publish` / `import` against Postgres), `all`.
-`git`/`jj` must be on `PATH`.
+The distribution is `tether-vcs`; the package you import and the command you
+run are both `tether`. Python 3.11 or newer; `git` and/or `jj` on `PATH`.
+Extras: `objectstore` (S3/GCS/Azure for `file`), `icechunk`, `neon`,
+`iceberg`, `delta`, `lance`, `lakefs`, `ducklake`, `dolt`, `postgres`, `all`.
 
 ## Quickstart
 
-tether lives *inside* a git or jj repository and commits small manifests
-there; that repository's history, branches, and workspaces are the dataset's
-too. Nothing is contacted until you ask for a state.
+tether lives *inside* a git or jj repository. Nothing below needs a cloud
+account: point it at an Icechunk repository and a directory you have on disk.
 
 ```bash
 jj git init my-dataset && cd my-dataset      # or: git init my-dataset
 tether init
-tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk
-tether add db/metrics   --kind neon --project-id prj-123 --database neondb --role runner
-tether add raw/plate1   --kind file s3://bucket/raw/plate1/
+tether add zarr/imaging --kind icechunk ../data/imaging.icechunk
+tether add raw/plate1   --kind file     ../data/raw/plate1/
 
-tether status                       # clean / modified / drifted per object (local; --snapshot re-fingerprints)
-tether commit -m "Baseline"         # on main: pin each object's upstream branch, write the manifests, jj/git commit
-tether new -b relabel               # a bookmark: one branch per system, named after it, forked on first write
-tether open db/metrics              # postgresql://... on the relabel branch
-tether commit -m "Relabel plate1"   # pins the branches' heads and moves the bookmark
-tether promote                      # land it: each system's main fast-forwards (or merges), then main moves to the commit
+tether status                       # new / clean / modified per object
+tether commit -m "Baseline"         # pin the Icechunk snapshot; record the directory; jj/git commit
+```
+
+```
+  pinned zarr/imaging -> tether.4e9503fc.73e341e966c83d38
+  recorded raw/plate1 (not recoverable)
+committed b55326ca55a0
+```
+
+That commit id names the exact state of every object, forever:
+`tether open zarr/imaging --rev b55326ca55a0` opens the pinned snapshot
+read-only, and `TETHER_REV=b55326ca55a0 python report.py` makes every
+`repo.open()` in a script do the same.
+
+To change data without touching `main`, work on a bookmark:
+
+```bash
+tether new -b relabel               # one branch per system, created on first write
+python relabel.py                   # writes through repo.open("zarr/imaging")
+tether commit -m "Relabel plate1"   # pin the branch head; move the bookmark
+tether promote                      # fast-forward main in every system, then move the main bookmark
 tether verify --all-history         # every pin any commit ever named still resolves
 ```
 
@@ -159,30 +80,76 @@ from tether import Repo
 
 repo = Repo.find(".")
 h = repo.open("zarr/imaging")  # writable IcechunkHandle on this bookmark's branch
-ro = repo.open(
-    "zarr/imaging", rev="main"
-)  # read-only at main's pin; TETHER_REV=<rev> makes this the default
+ro = repo.open("zarr/imaging", rev="main")  # read-only at main's pin
 ```
 
 Every command that writes to a store takes `--dry-run` (and `--plan FILE` /
 `--from-plan FILE`) so the writes can be reviewed first. The
-[getting started guide](https://evanlyall.com/tether/user-guide/getting-started.html)
-walks through this with output; the
-[CLI guide](https://evanlyall.com/tether/user-guide/cli.html) has every
-command.
+[Getting Started guide](https://evanlyall.com/tether/user-guide/getting-started.html)
+runs this walkthrough with full output; the
+[user guide](https://evanlyall.com/tether/user-guide/) takes it from there.
+
+## How it works
+
+- **A dataset is a git/jj repository** with one small manifest per object.
+  History, branching, workspaces, and sharing are the VCS's.
+- **Commits hold pins.** Each dataset commit records, per object, an exact
+  state and -- where the system allows -- a *pin*: a native, GC-proof ref (an
+  Icechunk tag, a protected Neon branch, a git tag) that holds that state.
+  `tether open KEY --rev C` reads it back.
+- **Bookmarks hold branches.** The trunk bookmark (`main`) stands for every
+  object's upstream branch; working on it writes there. Any other bookmark
+  stands for one branch per system, `tether.ws.<dataset>.<bookmark>`, forked
+  from the pins where it started and created on the first write.
+- **`commit`, `promote`, `pull`** are the three verbs: pin the bookmark's
+  branch heads and move the bookmark; fast-forward (or merge) each system's
+  upstream branch to the bookmark's and move `main`; read what upstream has
+  now and commit it.
+- **tether is never in the data path.** `open` returns the system's native
+  handle -- an Icechunk session, a Postgres URL, a `DeltaTable` -- and steps
+  aside.
+
+What the VCS cannot see -- what tether did to the *stores* -- is in tether's
+own operation log (`tether ops`, `tether undo`, `tether repair`).
+
+## What each backend can do
+
+Every backend is fingerprinted; the rest depends on what the system offers.
+
+| Backend | Recover | Pin | Fork | Promote | Merge | Diff | History |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| local files and directories; object-store prefixes (S3, GCS, Azure) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| single object-store objects with versioning enabled | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| git / [jj](https://jj-vcs.dev) repositories | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Icechunk](https://icechunk.io) repositories | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| [Lance](https://lance.org) datasets | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
+| [Delta Lake](https://delta.io) tables | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| [Neon](https://neon.com) Postgres databases *(experimental)* | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [Apache Iceberg](https://iceberg.apache.org) tables *(experimental)* | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| [lakeFS](https://lakefs.io) repositories *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [DuckLake](https://ducklake.select) catalogs *(experimental)* | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| [Dolt](https://www.dolthub.com) databases *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Recover**: can a committed state be opened again later? ✅ held by a pin;
+🟡 re-openable by version id for as long as the system keeps that version;
+❌ tether can only tell you it changed. **Pin**: a durable native ref created
+at commit time. **Fork**: a writable branch off a pin for `tether new`.
+**Promote** / **Merge**: fast-forward, or three-way merge, the upstream branch
+to the fork. **Diff**: `tether diff --content` describes what changed inside
+the object. **History**: `tether log` lists the object's own snapshots.
+*Experimental* backends have run against a fake of the service, not the
+service itself. The full matrix -- state fields, flags, per-backend caveats --
+is in the [backends guide](https://evanlyall.com/tether/user-guide/backends.html).
 
 ## jj or tether?
 
 A tether command exists where an operation has two halves -- one in the VCS,
-one in the stores -- that must happen together: `commit` (pin, commit, move
-the bookmark), `new` (create or join a bookmark, then its branches), `pull`,
+one in the stores -- that must happen together: `commit`, `new`, `pull`,
 `promote`, `restore`, `abandon`, `drop`, `forget-workspace`, and `undo` /
-`repair`
-for what tether itself did. Everything that only touches files and history --
-describe, squash, rebase, push, `jj undo` of a non-tether operation -- is the
-VCS's, and tether notices what it needs to: a bookmark deleted, renamed, or
-moved by hand shows up in `status` with what to do, as does a vanished dataset
-commit. The
+`repair` for what tether itself did. Everything that only touches files and
+history -- describe, squash, rebase, push -- is the VCS's, and tether notices
+what it needs to: a bookmark deleted, renamed, or moved by hand shows up in
+`status` with what to do. The
 [concepts guide](https://evanlyall.com/tether/user-guide/concepts.html#jj-or-tether)
 has the table.
 
@@ -193,9 +160,39 @@ has the table.
 - Running between commands: no daemon, no watcher; states are compared when
   a command asks.
 - Reimplementing history, branching, or sharing: that is the VCS's job.
-  `tether ops` / `undo` / `repair` cover only what tether did to the stores,
-  which the VCS cannot see.
+  `tether ops` / `undo` / `repair` cover only what tether did to the stores.
 - Cross-system transactions or a query layer.
+
+## Documentation
+
+<https://evanlyall.com/tether/> --
+[getting started](https://evanlyall.com/tether/user-guide/getting-started.html),
+[concepts](https://evanlyall.com/tether/user-guide/concepts.html),
+[worked examples](https://evanlyall.com/tether/user-guide/use-cases.html),
+[CLI guide](https://evanlyall.com/tether/user-guide/cli.html),
+[backends](https://evanlyall.com/tether/user-guide/backends.html),
+and the generated API and CLI reference.
+
+## Why this exists
+
+Every existing tool versions a single layer:
+
+| Tool | Scope | Relationship to tether |
+| --- | --- | --- |
+| **DVC** (lakeFS-owned) | files/objects in git | closest structural analog; no pin/fork of live systems |
+| lakeFS, Quilt, Oxen, DataChain | objects / files | analog of our `file` objects; lakeFS is also a backend |
+| Dolt, pgGit, Neon, Databricks Lakebase | one database | vendor-bound; no external-object pins; Dolt and Neon are backends |
+| Nessie, Bauplan | Iceberg catalog branching | Iceberg-only |
+| Icechunk, Lance, Delta, DuckLake | one dataset / table / catalog | we use them as backends |
+| [Yggdrasil](https://github.com/replikativ/yggdrasil) | cross-system snapshot / branch / merge over Git, ZFS, IPFS, Iceberg, lakeFS, Dolt, ... | the closest conceptual sibling; a JVM library, not adoptable from Python |
+| Dagster observable assets | staleness detection | analog of our snapshot/drift step; no branching |
+
+Nothing provides unified version control *across* files + Icechunk + Postgres +
+Iceberg with pinning and forking. So tether borrows jj's working-copy and
+operation-log ideas (`new REV`, stale-working-copy detection, `undo`), DVC's
+manifests-in-VCS layout, and Yggdrasil's observe-then-record shape: a
+workspace that watches independent systems and records their snapshots,
+rather than a store that holds the data.
 
 ## Development
 
@@ -209,7 +206,8 @@ uv run pytest
 The `publish` / `import` tests start an ephemeral PostgreSQL cluster through
 `pytest-postgresql`; they need `pg_ctl` on `PATH` or a Homebrew / Debian
 install (`brew install postgresql@16`; GitHub's Ubuntu runners ship it) and
-skip otherwise.
+skip otherwise. The use-cases story (`tests/test_use_cases.py`) regenerates
+the guide's command output with `TETHER_UPDATE_DOCS=1`.
 
 ## License
 
