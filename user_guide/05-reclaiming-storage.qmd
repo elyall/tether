@@ -1,14 +1,15 @@
 ---
 title: "Reclaiming Storage"
+guide-section: "Core Workflows"
 ---
 
 Version control for data is not free the way it is for code. A pin is a native
 ref, and a native ref holds storage: an Icechunk tag keeps every chunk its
 snapshot references, a Neon branch keeps its history window, an Iceberg tag
-blocks snapshot expiry, a lakeFS tag keeps its objects. Each commit adds one
-per changed object, and each fork adds a branch. This page shows the three
-levers for keeping that bill in check -- and how to preview every store write
-before it happens.
+blocks snapshot expiry. Each commit adds one pin per changed object, and each
+fork adds a branch. This page is the canonical home for two things: how to
+**preview every store write** before it happens, and the three levers for
+keeping the storage bill in check.
 
 The rule underneath all of it: **tether's VCS history is the reference set.**
 A pin, branch, or listing stays alive as long as some manifest in some commit
@@ -17,8 +18,8 @@ names it. Drop the commit and `gc` releases what it held.
 ## Preview before you write: plans
 
 Every command that touches an external system -- `commit`, `new`, `gc`,
-`promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace` --
-is a read-only *plan* followed by an *apply*:
+`promote`, `restore`, `drop`, `import`, `repair`, `upgrade`,
+`forget-workspace` -- is a read-only *plan* followed by an *apply*:
 
 ```bash
 tether commit -m "Relabel plate1" --dry-run
@@ -46,13 +47,40 @@ tether commit --from-plan /tmp/commit.json                   # apply it
 Apply re-fingerprints the planned objects first. If any moved since the plan
 was made, or if the manifest set changed, the apply is refused with
 `StalePlanError` and nothing is written -- re-plan and look again. The same
-three flags exist on `new` (`--dry-run`, `--plan`, `--from-plan`) and on `gc`,
-which is a dry run by default and prints its plan.
+three flags exist on every planned command; `gc` and `drop` are dry runs by
+default and need `--no-dry-run` (or `--from-plan`) to apply.
 
 From Python the split is explicit: `repo.plan_commit(...)` /
 `repo.apply_commit(plan)`, `repo.plan_new(...)` / `repo.apply_new(plan)`,
-`repo.plan_gc(...)` / `repo.apply_gc(plan)`. `Plan.to_json()` and
-`Plan.from_json()` round-trip.
+`repo.plan_gc(...)` / `repo.apply_gc(plan)`, and so on. `Plan.to_json()` and
+`Plan.from_json()` round-trip. The convenience forms (`tether commit`,
+`Repo.new()`, ...) plan and apply under one lock and verify at apply all the
+same.
+
+### What a plan checks before it applies
+
+What a plan saw is recorded on the plan itself as typed `preconditions`
+(`Plan.preconditions`, visible in a saved plan's JSON): the manifest hash,
+this workspace's id, the head of every branch the plan will keep, reset, or
+create afresh, a gc plan's VCS head and a digest of *every* visible commit (a
+bookmark committed in another workspace may reference a pin it would
+release), a promote's base-branch state and the state its source names. Every
+`apply_*` runs them all before its first action, and the first mismatch stops
+the whole apply with `StalePlanError` carrying the plan's own message -- so a
+stale plan does nothing at all. A saved plan from before 0.1.0b1 (plan format
+1) carries no preconditions and is refused with "re-run the plan".
+
+What is *not* a precondition is a race during apply, handled per action: a
+branch that moves after gc's preflight is kept and reported while the rest of
+the plan finishes; `commit` re-fingerprints each object against one snapshot;
+`promote` lands the *state* the plan reviewed, not the source branch's head at
+apply time, so a fork write that slips in between is not promoted by accident;
+a lazy fork on first writable `open` resets an existing branch only onto the
+head `new` reviewed and agreed to reset.
+
+The one store write without a dry run of its own is that lazy fork: `open`
+creates the branch `new` decided on. `new --eager --dry-run` previews what
+would be created.
 
 ## Lever 1: do not pin what you will not need -- `--pin record`
 
@@ -396,14 +424,13 @@ throw the store away.
   `--from-plan FILE` applies them and refuses if anything moved.
 - `--pin record` skips the native ref on any backend and forks from the
   recorded state; cheaper, retention-bound.
-- Drop commits with `jj squash` / `jj abandon` / `git rebase -i`; tether reads
-  the VCS's idea of history, so what you cannot see it does not protect.
+- Drop commits with `tether abandon`, `tether drop`, or the VCS's own
+  `squash` / `abandon` / `rebase -i`; tether reads the VCS's idea of history,
+  so what you cannot see it does not protect.
 - `gc` releases orphaned pins and listings and never deletes a branch on its
   own; `--prune-bookmarks` deletes gone bookmarks' branches only when a tag
-  already holds their head (or nothing was written), `--force-prune` deletes
-  them regardless; reclaiming the bytes is the system's own expiry/cleanup
-  step.
+  already holds their head (or nothing was written); `--force-prune` deletes
+  them regardless. Reclaiming the bytes is the system's own expiry step.
 - A store `add --create` made is deleted by `gc --delete-stores` once nothing
-  references it, every branch in it is one this clone can account for, and
-  only tether's own refs remain; the owner marker in the store and the
-  untracked index in your repository decide, never a manifest.
+  references it and only tether's own refs remain; the owner marker in the
+  store and the untracked index in your repository decide, never a manifest.
