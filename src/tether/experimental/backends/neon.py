@@ -240,13 +240,16 @@ class NeonBackend(ObjectBackend):
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
-        # `role` is how you connect, not what you pin: a branch at an LSN is
-        # the same snapshot whichever role reads it, so it must not change
-        # pin ids. `database` stays: it names what the object *is*.
+        # What Neon pins and forks is a project timeline point: a branch at
+        # an LSN is a snapshot of every database and role in the project.
+        # `database` and `role` are how you connect to that snapshot, not
+        # what it is, so neither changes pin ids. Two objects on two
+        # databases of one project at one commit therefore share one pin
+        # branch (and, through `branch_scope`, one working branch) instead
+        # of cutting two identical ones off the same LSN.
         return {
             "project_id": self._project(locator),
             "branch": self._source_branch(locator),
-            "database": locator.get("database"),
         }
 
     def branch_scope(self, locator: Locator) -> str:

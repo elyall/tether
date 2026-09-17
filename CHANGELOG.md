@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Experimental
+
+- `neon`: `database` is out of the object identity, as `role` already was. A
+  Neon branch at an LSN is a snapshot of the whole project, so two objects on
+  two databases of one project are one snapshot to tether: one pin branch per
+  commit instead of two identical ones cut off the same LSN, one working
+  branch per bookmark (as `branch_scope` already arranged), and `open` on
+  each connects to its own database through them. No migration: existing
+  pins keep their recorded ids and refs, stay referenced by the history that
+  made them, and verify and repair as before; the next `commit` of content
+  already pinned under an old id pins it once more under the new one.
+
+### Fixed
+
+- `commit` pins once per pin id. Two objects with one identity and one
+  content state name one snapshot; the second is now recorded at the state
+  the pin was cut at instead of its own fingerprint of the same content,
+  whose volatile address (a Neon LSN) could differ and made the backend
+  refuse the second pin as hanging off the wrong LSN.
+
 ## [0.1.0b2] - 2026-09-17
 
 ### Added

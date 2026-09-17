@@ -42,7 +42,10 @@ and flags are defined in
   identity + state. Backends treat the id as opaque; the engine keeps `gc`
   inside its own dataset's namespace.
 - `identity` is the subset of the locator that names the system; two objects
-  of one dataset with the same identity and state share one pin.
+  of one dataset with the same identity and state share one pin, and `commit`
+  cuts it once: the second object is recorded at the state the pin was taken
+  at, not at its own fingerprint of the same content (whose volatile address,
+  a Neon LSN, may differ).
 - Locators are committed and read from every directory and every clone, so a
   *relative* local path (`file` `uri`/`path`, `git` `path`,
   `icechunk`/`lance`/`delta` `uri`, `ducklake` `data_path`) is resolved
@@ -181,7 +184,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | --- | --- |
 | Locator | `project_id` (required), `branch` (default `main`), `database`, `role` (used for connection URIs) |
 | Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2), `protected_pins` (default `true`; set `false` on the free tier, where protected branches are unavailable) -- `.tether/secrets.toml` only; a committed value is refused |
-| Identity | `{project_id, branch, database}` -- `role` is how you connect, not what you pin, so changing it does not change pin ids |
+| Identity | `{project_id, branch}` -- a Neon branch at an LSN is a snapshot of the whole project, so `database` and `role` are how you connect, not what you pin: neither changes pin ids, and two objects on two databases of one project share one pin per commit and (via `branch_scope`) one working branch per bookmark |
 | State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
 | Fork | a child branch of the pin. Re-forking an existing working branch restores it onto the source (Neon branch restore, always -- a branch's `parent_id` says where it was created, not where its head is). Once a pin has been taken on the working branch that pin is its child and Neon will not restore it in place, so the fork lands on a sibling (`<name>.2`, `.3`, ...) and the old branch stays as the pins' parent; the engine records the returned name. `open` writable creates a `read_write` endpoint lazily; time-travel reads (`open` at a recorded state) ensure a `read_only` one |

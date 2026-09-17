@@ -166,7 +166,8 @@ class FakeNeon:
 
     def _connection_uri(self, request: httpx.Request) -> httpx.Response:
         bid = request.url.params.get("branch_id")
-        return httpx.Response(200, json={"uri": f"postgresql://neon/{bid}"})
+        db = request.url.params.get("database_name") or "neondb"
+        return httpx.Response(200, json={"uri": f"postgresql://neon/{bid}?dbname={db}"})
 
 
 @pytest.fixture
@@ -349,6 +350,53 @@ def test_lsn_motion_without_writes_is_not_a_change(
         assert content_state(backend, before) != content_state(backend, moved)
 
 
+def test_two_databases_of_one_project_share_pins_and_branches(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Neon branch at an LSN is a snapshot of the whole project, so two
+    objects on two databases of one project are one snapshot to tether: one
+    pin branch per commit, one working branch per bookmark, and `open` on
+    each connects to its own database through them."""
+    from tether.repo import Repo
+
+    monkeypatch.setenv("NEON_API_KEY", "secret")
+    fake = FakeNeon()
+    probe = _Probe(fake)
+    with respx.mock as router:
+        fake.install(router)
+        repo = Repo.init(vcs_root)
+        (vcs_root / ".tether" / "secrets.toml").write_text(
+            f'[backends.neon]\napi_url = "{BASE}"\n'
+        )
+        (vcs_root / ".tether" / "secrets.toml").chmod(0o600)
+        repo = Repo.find(vcs_root)
+        backend = repo.backend_for("neon")
+        monkeypatch.setattr(backend, "_probe", probe)
+        monkeypatch.setattr(backend, "_active_writers", lambda uri: 0)
+        assert backend.identity(LOCATOR) == backend.identity(
+            {**LOCATOR, "database": "analytics", "role": "reader"}
+        )
+        repo.add("app", "neon", dict(LOCATOR))
+        repo.add("analytics", "neon", {**LOCATOR, "database": "analytics"})
+
+        pins_before = len(backend.list_pins(LOCATOR))
+        res = repo.commit("baseline")
+        assert res.pinned["app"] is not None and res.pinned["analytics"] is not None
+        assert res.pinned["app"].id == res.pinned["analytics"].id
+        assert len(backend.list_pins(LOCATOR)) == pins_before + 1  # one branch
+
+        repo.new(bookmark="work", eager=True)
+        refs = repo.workspace.working_refs
+        assert refs["app"] == refs["analytics"]  # one fork, the other shares
+        assert sum(1 for b in fake.branches.values() if b["name"] == refs["app"]) == 1
+        app = repo.open("app", read_only=False)
+        analytics = repo.open("analytics", read_only=False)
+        assert isinstance(app, NeonHandle) and isinstance(analytics, NeonHandle)
+        assert app.url.endswith("?dbname=neondb")
+        assert analytics.url.endswith("?dbname=analytics")
+        assert app.branch == analytics.branch == refs["app"]
+
+
 def test_fork_onto_an_existing_branch_restores_it(backend: NeonBackend) -> None:
     fake = FakeNeon()
     with respx.mock as router:
@@ -499,7 +547,7 @@ class _Probe:
         self.history[bid].append((self.lsn[bid], self.xid[bid]))
 
     def __call__(self, uri: str) -> tuple[str, str]:
-        bid = uri.rsplit("/", 1)[-1]
+        bid = uri.split("?", 1)[0].rsplit("/", 1)[-1]
         self._advance(bid, 0x100, 0)  # a checkpoint: LSN moves, content does not
         return f"0/{self.lsn[bid]:X}", str(self.xid[bid])
 
