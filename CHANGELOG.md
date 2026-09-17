@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0b2] - 2026-09-17
+
 ### Added
 
 - `tether drop BOOKMARK` (`Repo.plan_drop` / `apply_drop` / `drop`): throwing
