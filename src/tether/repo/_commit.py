@@ -9,7 +9,7 @@ try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tether.backends.base import (
     Capability,
@@ -262,6 +262,13 @@ class CommitOps(RepoCore):
             }
             op = self._begin_op("pull" if is_pull else "commit", plan=plan, pre=pre)
             written_listings: list[str] = []
+            # One pin per pin id per commit. Two objects with one identity
+            # and one content state (two databases of a Neon project, two
+            # keys on one Icechunk store) name one snapshot; the second is
+            # recorded at the state the pin was actually cut at, not its own
+            # fingerprint of the same content, whose volatile address (a
+            # Neon LSN) may differ and would not match the pin.
+            pinned_by_id: dict[str, tuple[dict[str, Any], Pin]] = {}
             try:
                 for a in object_actions:
                     m = self.objects.get(a.key)
@@ -273,8 +280,13 @@ class CommitOps(RepoCore):
                         )
                     backend = self.backend_for(m.kind)
                     state = dict(a.params["state"])
-                    if a.op == "pin":
+                    if a.op == "pin" and str(a.params["pin_id"]) in pinned_by_id:
+                        state, pin = pinned_by_id[str(a.params["pin_id"])]
+                        outcomes[a.key] = (dict(state), pin, True)
+                        result.pinned[a.key] = pin
+                    elif a.op == "pin":
                         pin = backend.pin(m.locator, state, str(a.params["pin_id"]))
+                        pinned_by_id[str(a.params["pin_id"])] = (state, pin)
                         self._note_touched(a.key, m.kind, m.locator)
                         # Roll back only what this commit created: a pin the
                         # backend found already carrying the state belongs to
