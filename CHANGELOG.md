@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0b3] - 2026-09-18
+
 ### Experimental
 
 - `neon`: `database` is out of the object identity, as `role` already was. A
