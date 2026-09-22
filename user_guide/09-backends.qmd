@@ -293,7 +293,7 @@ MySQL catalog with an object-store `data_path`.
 | | |
 | --- | --- |
 | Locator | `host` (default `127.0.0.1`), `port` (default 3306), `database` (required), `branch` (default `main`), `user`; or `url = mysql://user@host:port/database` |
-| Config | `password_env` (default `DOLT_PASSWORD`), `user_env` (default `DOLT_USER`, used when the locator has no `user`) -- `.tether/secrets.toml` only: a clone must not pick which of your environment variables is sent as a password |
+| Credentials | the server's `[uris."mysql://host:port"]` entry in `.tether/secrets.toml` (a `mysql://host:port/database` entry beats it): `user` and `password`, or `user_env` and `password_env` naming environment variables. A manifest chooses the host, so a server with no entry gets no password (and user `root` unless the locator names one) |
 | Identity | `{host, port, database}` |
 | State | `commit` (branch head hash), plus `dirty = true` when `dolt_branches.dirty` reports uncommitted working-set changes (refused at pin time) |
 | Pin | `CALL DOLT_TAG('tether.<id>', commit)` |

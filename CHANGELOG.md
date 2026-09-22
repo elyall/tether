@@ -17,6 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `import`: `[import] query` is read from `.tether/secrets.toml`, not
   `tether.toml`, and runs as one read-only statement; a committed query could
   write, even under `--dry-run`.
+- `dolt`: credentials come only from the server's `[uris."mysql://host:port"]`
+  entry in `.tether/secrets.toml` (`password_env` / `user_env` move there);
+  `$DOLT_PASSWORD` went to any host a manifest named.
 
 ### Fixed
 

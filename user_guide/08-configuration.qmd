@@ -180,6 +180,10 @@ profile = "lab-a"                          # an AWS shared-config profile ...
 [objects."zarr/imaging"]                  # one object; beats a URI prefix
 profile = "imaging"
 
+[uris."mysql://dolt.internal:3306"]       # a Dolt server: the only one sent this password
+user = "svc"
+password_env = "DOLT_PASSWORD"
+
 [import]                                  # the default SQL for `tether import`
 query = "SELECT name AS key, 'file' AS kind, uri FROM catalog"
 ```
@@ -292,7 +296,7 @@ each entry holds, and how the journal survives an interrupted command:
 | --- | --- |
 | `TETHER_REV` | `Repo.open` / `tether open` default revision |
 | `NEON_API_KEY` (or `[backends.neon] api_key_env`) | neon |
-| `DOLT_PASSWORD`, `DOLT_USER` (or `password_env` / `user_env`) | dolt |
+| whatever `user_env` / `password_env` name in a `[uris."mysql://host:port"]` entry | dolt |
 | AWS / GCP / Azure credential chains | file (obstore), icechunk, delta, lance |
 | `LAKECTL_*` or `~/.lakectl.yaml` | lakefs |
 | pyiceberg catalog properties / env | iceberg |

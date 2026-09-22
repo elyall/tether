@@ -8,6 +8,9 @@ exact statements it issues via a recording connection.
 from __future__ import annotations
 
 import hashlib
+import socket
+import struct
+import threading
 import uuid
 from dataclasses import dataclass, field
 
@@ -466,22 +469,129 @@ def test_sql_client_statements() -> None:
     ]
 
 
-def test_backend_builds_client_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _login(client: object) -> dict:
+    assert isinstance(client, SqlDoltClient)
+    return {k: client._kwargs[k] for k in ("host", "port", "user", "password")}
+
+
+def test_credentials_come_from_the_servers_secrets_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `[uris."mysql://host:port"]` entry in `.tether/secrets.toml` holds the
+    user and password (literal, or the environment variable to read) for that
+    server alone. A kind-wide `password_env` is not an entry for any server,
+    and a server with no entry gets none."""
     pytest.importorskip("pymysql")
     monkeypatch.setenv("DOLT_PASSWORD", "s3cret")
     monkeypatch.setenv("DOLT_USER", "svc")
-    b = DoltBackend()
-    client = b._client({"host": "dolt.test", "database": "d"})
-    assert isinstance(client, SqlDoltClient)
-    assert client._kwargs == {
+    loc = {"host": "dolt.test", "database": "d"}
+    b = DoltBackend({"password_env": "DOLT_PASSWORD", "user_env": "DOLT_USER"})
+    assert _login(b._client(loc)) == {
+        "host": "dolt.test",
+        "port": 3306,
+        "user": "root",
+        "password": "",
+    }
+    b.configure_secrets(
+        {"password_env": "DOLT_PASSWORD"},
+        {
+            "mysql://dolt.test:3306": {
+                "user_env": "DOLT_USER",
+                "password_env": "DOLT_PASSWORD",
+            },
+            "mysql://dolt.test:33060": {"password": "not this one"},
+            "mysql://dolt.test": {"password": "nor this"},
+        },
+    )
+    assert _login(b._client(loc)) == {
         "host": "dolt.test",
         "port": 3306,
         "user": "svc",
         "password": "s3cret",
-        "database": "d",
-        "autocommit": True,
     }
     # The URL handle never carries the password.
-    handle = b.open({"host": "dolt.test", "database": "d"}, None, read_only=True)
+    handle = b.open(loc, None, read_only=True)
     assert isinstance(handle, DoltHandle)
     assert handle.url == "mysql://svc@dolt.test:3306/d/main"
+    # A literal, and a `url` locator naming its own user.
+    b.configure_secrets({}, {"mysql://dolt.test:3306/": {"password": "lit"}})
+    assert _login(b._client({"url": "mysql://ro@dolt.test/d"})) == {
+        "host": "dolt.test",
+        "port": 3306,
+        "user": "ro",
+        "password": "lit",
+    }
+
+
+def _mysql_packet(seq: int, payload: bytes) -> bytes:
+    return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
+
+
+def _read_packet(conn: socket.socket) -> bytes:
+    head = b""
+    while len(head) < 4:
+        head += conn.recv(4 - len(head))
+    n = int.from_bytes(head[:3], "little")
+    data = b""
+    while len(data) < n:
+        data += conn.recv(n - len(data))
+    return data
+
+
+def _password_catcher() -> tuple[int, dict[str, bytes]]:
+    """A MySQL server that switches the client to `mysql_clear_password`,
+    keeps what it sends, and refuses the login."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    sock.settimeout(10)
+    caught: dict[str, bytes] = {}
+
+    def serve() -> None:
+        with sock:
+            conn, _ = sock.accept()
+            with conn:
+                caps = 0x0200 | 0x8000 | 0x80000 | 0x0008
+                salt = b"12345678901234567890"
+                conn.sendall(
+                    _mysql_packet(
+                        0,
+                        b"\x0a8.0.0-fake\x00"
+                        + struct.pack("<I", 1)
+                        + salt[:8]
+                        + b"\x00"
+                        + struct.pack("<H", caps & 0xFFFF)
+                        + b"\x21"
+                        + struct.pack("<H", 2)
+                        + struct.pack("<H", caps >> 16)
+                        + bytes([21])
+                        + b"\x00" * 10
+                        + salt[8:]
+                        + b"\x00mysql_native_password\x00",
+                    )
+                )
+                _read_packet(conn)
+                conn.sendall(_mysql_packet(2, b"\xfemysql_clear_password\x00"))
+                caught["password"] = _read_packet(conn).rstrip(b"\x00")
+                conn.sendall(
+                    _mysql_packet(4, b"\xff" + struct.pack("<H", 1045) + b"#28000no")
+                )
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock.getsockname()[1], caught
+
+
+def test_a_server_a_manifest_names_gets_no_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed manifest chooses `host`, and PyMySQL answers a server's
+    switch to `mysql_clear_password` with the password in cleartext: a
+    password taken from the environment whatever the host went to any server
+    a clone named."""
+    pytest.importorskip("pymysql")
+    monkeypatch.setenv("DOLT_PASSWORD", "s3cret")
+    port, caught = _password_catcher()
+    locator = {"host": "127.0.0.1", "port": port, "database": "ledger"}
+    with pytest.raises(BackendError):
+        DoltBackend().fingerprint(locator, None)
+    assert caught["password"] == b""

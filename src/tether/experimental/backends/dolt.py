@@ -11,10 +11,11 @@ Uncommitted working-set changes on a branch are not part of any commit; a dirty
 branch is reported in the state and refused at pin time.
 
 Locator: ``host``, ``port`` (3306), ``database``, ``branch`` (``main``), optional
-``user``; or a ``url`` (``mysql://user@host:port/database``). The password comes
-from the environment variable named by ``[backends.dolt] password_env``
-(default ``DOLT_PASSWORD``); ``user_env`` (default ``DOLT_USER``) supplies the
-user when the locator has none. Nothing secret is written to manifests.
+``user``; or a ``url`` (``mysql://user@host:port/database``). Credentials come
+from the server's ``[uris."mysql://host:port"]`` entry in
+``.tether/secrets.toml``: ``user`` / ``password``, or ``user_env`` /
+``password_env`` naming environment variables. A manifest chooses the host, so a
+server without an entry gets none. Nothing secret is written to manifests.
 
 The SQL surface is isolated behind :class:`DoltClient` so tests (and other
 transports, e.g. the ``dolt`` CLI) can substitute an implementation.
@@ -239,7 +240,7 @@ class SqlDoltClient:
 class DoltBackend(ObjectBackend):
     kind = "dolt"
     MATURITY = "experimental"
-    SAFE_CONFIG_KEYS = frozenset()  # user_env / password_env: secrets.toml only
+    SAFE_CONFIG_KEYS = frozenset()  # credentials: a secrets.toml [uris] entry only
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE
@@ -280,8 +281,29 @@ class DoltBackend(ObjectBackend):
             user = locator.get("user")
         if not database:
             raise BackendError("dolt locator needs 'database' (or a url)", kind="dolt")
-        user = user or os.environ.get(str(self._config.get("user_env", "DOLT_USER")))
+        user = user or self._server_secrets(host, port, database).get("user")
         return host, port, database, str(user) if user else None
+
+    def _server_secrets(self, host: str, port: int, database: str) -> dict[str, str]:
+        """`user` and `password` for one server, from its
+        `[uris."mysql://host:port"]` entry (a `.../database` entry beats it):
+        literal, or through `user_env` / `password_env`. The manifest chooses
+        the host, so nothing else -- no kind-wide default, no environment
+        variable by convention -- may supply them."""
+        rules = {
+            str(k).rstrip("/"): v
+            for k, v in (getattr(self, "_secret_rules", None) or {}).items()
+        }
+        server = f"mysql://{host}:{port}"
+        entry = {**rules.get(server, {}), **rules.get(f"{server}/{database}", {})}
+        found: dict[str, str] = {}
+        for name in ("user", "password"):
+            value = entry.get(name)
+            if value is None and entry.get(f"{name}_env"):
+                value = os.environ.get(str(entry[f"{name}_env"]))
+            if value is not None:
+                found[name] = str(value)
+        return found
 
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", MAIN))
@@ -298,9 +320,7 @@ class DoltBackend(ObjectBackend):
                 kind="dolt",
             ) from exc
         host, port, database, user = self._endpoint(locator)
-        password = os.environ.get(
-            str(self._config.get("password_env", "DOLT_PASSWORD"))
-        )
+        password = self._server_secrets(host, port, database).get("password")
         return SqlDoltClient(
             pymysql.connect,
             host=host,

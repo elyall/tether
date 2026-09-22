@@ -178,8 +178,9 @@ SQLite, and MySQL catalogs have no such limit. Snapshots are catalog-wide;
 ### Dolt working sets
 
 Uncommitted changes on a branch are not in any commit; a dirty branch is
-reported and refused at `commit`. The password comes from `$DOLT_PASSWORD`
-(configurable via `[backends.dolt] password_env`), never the manifest. Dirty
+reported and refused at `commit`. Credentials come from the server's
+`[uris."mysql://host:port"]` entry in `.tether/secrets.toml`, never the
+manifest, and a server without one gets none. Dirty
 detection needs a Dolt with the `dirty` column on `dolt_branches`; older
 servers report clean.
 
