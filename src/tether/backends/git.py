@@ -3,7 +3,8 @@
 Lets a dataset commit pin the *code* that produced it. A branch (or detached
 sha) is the working ref, the commit ``sha`` is the state, a lightweight tag
 ``tether.<pin_id>`` is the pin, and a branch off that tag is a fork. When the
-locator names a ``remote``, pins are pushed there so they survive beyond a single
+locator names a ``remote`` (one the repository has configured, or any URL from
+``.tether/secrets.toml``), pins are pushed there so they survive beyond a single
 clone; otherwise they are durable only locally (documented).
 """
 
@@ -128,6 +129,30 @@ class GitBackend(ObjectBackend):
         if path is not None:
             _guard(str(path), "path")
             self._path(locator)
+        remote = locator.get("remote")
+        if remote is not None:
+            self._configured_remote(locator, str(remote))
+
+    def _configured_remote(self, locator: Locator, remote: str) -> str:
+        _guard(remote, "remote")
+        if remote not in self._run(locator, "remote").splitlines():
+            raise BackendError(
+                f"{remote!r} is not a remote configured in {self._path(locator)}. "
+                "A committed locator arrives with every clone, so it names a "
+                "remote the repository already has (`git remote add`); a URL "
+                'goes in .tether/secrets.toml, as [objects."<key>"] remote',
+                kind="git",
+            )
+        return remote
+
+    def _remote(self, locator: Locator) -> str | None:
+        """Where pins are pushed: any URL `.tether/secrets.toml` gives the
+        object, else a configured remote the committed locator names."""
+        local = self.secrets_for(locator).get("remote")
+        if local:
+            return _guard(str(local), "remote")
+        remote = locator.get("remote")
+        return self._configured_remote(locator, str(remote)) if remote else None
 
     def _proc(
         self, locator: Locator, *args: str, env: dict[str, str] | None = None
@@ -214,6 +239,7 @@ class GitBackend(ObjectBackend):
             )
         ref = ref_for_pin(pin_id)
         sha = _sha(state["sha"])
+        remote = self._remote(locator)
         existing = self._run(
             locator,
             "rev-parse",
@@ -229,18 +255,13 @@ class GitBackend(ObjectBackend):
             raise BackendError(
                 f"tag {ref} already points at {existing}, not {sha}", kind="git"
             )
-        remote = locator.get("remote")
         if remote:
             # The pin is only durable once it is on the remote. A push that
             # fails must fail the pin -- and not leave a local tag that would
             # make the two diverge silently.
             try:
                 self._run(
-                    locator,
-                    "push",
-                    "--end-of-options",
-                    _guard(str(remote), "remote"),
-                    f"refs/tags/{ref}",
+                    locator, "push", "--end-of-options", remote, f"refs/tags/{ref}"
                 )
             except BackendError as exc:
                 if not existing:
@@ -251,7 +272,7 @@ class GitBackend(ObjectBackend):
         return Pin(id=pin_id, ref=ref, created=not existing)
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
-        remote = locator.get("remote")
+        remote = self._remote(locator)
         if remote:
             # Remote first: if the remote still has the tag the pin still
             # exists, and gc must hear about it rather than believe it gone.
@@ -260,7 +281,7 @@ class GitBackend(ObjectBackend):
                 "push",
                 "--delete",
                 "--end-of-options",
-                _guard(str(remote), "remote"),
+                remote,
                 f"refs/tags/{pin.ref}",
             )
             if out.returncode != 0 and "remote ref does not exist" not in out.stderr:

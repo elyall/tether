@@ -12,6 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   git runs no fsmonitor, hook, `ext::` transport or implicit bare repository.
 - git calls ignore an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`
   or `GIT_CONFIG_*`, which retargeted tether run from a git hook.
+- `git`: a committed `remote` must name a remote the repository has
+  configured; a URL goes in `.tether/secrets.toml` (`[objects."<key>"] remote`).
 
 ### Fixed
 

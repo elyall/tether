@@ -334,7 +334,8 @@ def test_pin_fails_when_the_remote_push_fails(tmp_path: Path) -> None:
 
     # A remote that does not exist: the push fails, so the pin fails and no
     # local tag is left behind to diverge from it.
-    bad = {"path": str(repo), "remote": str(tmp_path / "nowhere.git")}
+    _git(repo, "remote", "add", "nowhere", str(tmp_path / "nowhere.git"))
+    bad = {"path": str(repo), "remote": "nowhere"}
     state = b.fingerprint(bad, None)
     with pytest.raises(BackendError, match="was not pushed"):
         b.pin(bad, state, "d5d5d5d5.0000000000000001")
@@ -343,7 +344,8 @@ def test_pin_fails_when_the_remote_push_fails(tmp_path: Path) -> None:
     # A real (bare) remote: pin pushes, unpin deletes there first.
     bare = tmp_path / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
-    good = {"path": str(repo), "remote": str(bare)}
+    _git(repo, "remote", "add", "origin", str(bare))
+    good = {"path": str(repo), "remote": "origin"}
     pin = b.pin(good, state, "d5d5d5d5.0000000000000002")
     remote_tags = subprocess.run(
         ["git", "-C", str(bare), "tag", "--list"], capture_output=True, text=True
@@ -355,6 +357,71 @@ def test_pin_fails_when_the_remote_push_fails(tmp_path: Path) -> None:
     ).stdout.split()
     assert pin.ref not in remote_tags and pin.id not in b.list_pins(good)
     b.unpin(good, pin)  # already gone everywhere: still fine
+
+
+def _tags(bare: Path) -> list[str]:
+    return _git(bare, "tag", "--list").split()
+
+
+def test_a_committed_remote_names_a_configured_remote_not_a_url(
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`commit` pushes each pin to the locator's `remote`. A manifest arrives
+    with every clone, so a URL there would let whoever wrote it make `commit`
+    push your code to their host. A committed `remote` must name a remote the
+    repository already has; a URL or a path comes from `.tether/secrets.toml`,
+    per object."""
+    from tether.manifest import ObjectManifest, Policy, write_object
+
+    outside = tmp_path_factory.mktemp("outside")
+    code = outside / "code"
+    _init_code_repo(code)
+    theirs = outside / "theirs.git"
+    _git(outside, "init", "-q", "--bare", str(theirs))
+    b = GitBackend()
+    state = b.fingerprint({"path": str(code)}, None)
+    for url in (
+        str(theirs),
+        f"file://{theirs}",
+        "git@evil.example:o/r.git",
+        "https://evil.example/r.git",
+    ):
+        loc = {"path": str(code), "remote": url}
+        with pytest.raises(BackendError, match="not a remote configured"):
+            b.validate_locator(loc)
+        with pytest.raises(BackendError, match="not a remote configured"):
+            b.pin(loc, state, "0a1b2c3d.0000000000000001")
+    assert _tags(theirs) == [] and b.list_pins({"path": str(code)}) == set()
+
+    # What a clone brings is refused at use, not only at `add`.
+    repo = Repo.init(vcs_root)
+    write_object(
+        vcs_root,
+        ObjectManifest(
+            key="code",
+            kind="git",
+            locator={"path": str(code), "remote": str(theirs)},
+            policy=Policy(),
+        ),
+    )
+    with pytest.raises(TetherError):
+        Repo.find(vcs_root).commit("pin code")
+    assert _tags(theirs) == []
+
+    # A remote the repository has configured may be named...
+    ours = outside / "ours.git"
+    _git(outside, "init", "-q", "--bare", str(ours))
+    _git(code, "remote", "add", "origin", str(ours))
+    pin = b.pin({"path": str(code), "remote": "origin"}, state, "0a1b2c3d.02")
+    assert _tags(ours) == [pin.ref]
+    # ...and secrets.toml may give one object any URL.
+    repo.remove("code")
+    repo.add("code", "git", {"path": str(code)})
+    secrets = vcs_root / ".tether" / "secrets.toml"
+    secrets.write_text(f'[objects."code"]\nremote = "{ours}"\n')
+    secrets.chmod(0o600)
+    pinned = Repo.find(vcs_root).commit("pin code").pinned["code"]
+    assert pinned is not None and pinned.ref in _tags(ours)
 
 
 def _bare_shaped(where: Path, marker: Path) -> Path:

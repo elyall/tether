@@ -187,7 +187,9 @@ servers report clean.
 
 With `remote` set, a pin is only a pin once the tag push succeeds: a failed
 push fails the `pin` and removes the local tag, and `unpin` deletes on the
-remote first.
+remote first. A committed `remote` names a remote the repository has
+configured; a URL goes in `.tether/secrets.toml` as `[objects."<key>"]
+remote`.
 
 ## Performance
 

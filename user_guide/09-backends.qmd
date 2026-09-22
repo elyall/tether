@@ -200,7 +200,7 @@ jj repositories work through their `.git`.
 
 | | |
 | --- | --- |
-| Locator | `path` (local checkout, stored absolute, and outside the dataset's own checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
+| Locator | `path` (local checkout, stored absolute, and outside the dataset's own checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there: the name of a remote the repository has configured; a URL or path only as `[objects."<key>"] remote` in `.tether/secrets.toml`), `allow_dirty` (pin despite uncommitted changes) |
 | Config | `git_path`, `jj_path` -- `.tether/secrets.toml` `[vcs]` or `TETHER_GIT`/`TETHER_JJ` only; a committed value is refused |
 | Identity | `{path}` (resolved absolute) |
 | State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available. Both `dirty` and `change_id` are volatile: the same sha is the same state -- and pins identically -- whether or not jj is installed or the checkout has stray files; `pin` still reads the full state and refuses a dirty tree |
