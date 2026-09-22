@@ -80,7 +80,7 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     assert isinstance(handle, LanceHandle) and not handle.read_only
     _append(handle.dataset, 3)
     forked = b.fingerprint(loc, wref)
-    assert forked == {"branch": wref, "version": 2}
+    assert forked == {"branch": wref, "version": 2, "branch_id": forked["branch_id"]}
     assert b.fingerprint(loc, None) == state
 
     # Pin the fork's state: the tag names (branch, version) on the fork.
@@ -121,6 +121,52 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     )
     with pytest.raises(BackendError):
         b.fingerprint({"uri": str(tmp_path / "absent.lance")}, None)
+
+
+def test_lance_recreated_branch_is_a_new_state(tmp_path: Path) -> None:
+    # A branch deleted and forked again under its name restarts its version
+    # numbers, so (branch, version) alone names two contents.
+    b = LanceBackend()
+    uri = str(tmp_path / "d.lance")
+    lance.write_dataset(pa.table({"a": [1]}), uri)
+    loc = {"uri": uri}
+    base = b.fingerprint(loc, None)
+    name = working_ref_name("d5d5d5d5", "feat")
+
+    def rows(state: dict) -> list[int]:
+        handle = b.open(loc, state, read_only=True)
+        assert isinstance(handle, LanceHandle)
+        return handle.dataset.to_table()["a"].to_pylist()
+
+    w1 = b.fork(loc, base, name)
+    _append(lance.dataset(uri).checkout_version((w1, None)), 2)
+    s1 = b.fingerprint(loc, w1)
+    assert rows(s1) == [1, 2]
+    b.delete_working_ref(loc, w1)
+
+    w2 = b.fork(loc, base, name)
+    assert w2 == w1
+    lance.write_dataset(
+        pa.table({"a": [777, 888]}),
+        lance.dataset(uri).checkout_version((w2, None)),
+        mode="append",
+    )
+    s2 = b.fingerprint(loc, w2)
+    assert (s2["branch"], s2["version"]) == (s1["branch"], s1["version"])
+    assert s2 != s1 and rows(s2) == [1, 777, 888]
+
+    for deep in (False, True):
+        report = b.verify(loc, s1, None, deep=deep)
+        assert report.status is VerifyStatus.MISSING and "re-created" in report.message
+    assert b.verify(loc, s2, None, deep=True).ok
+    for use in (
+        lambda: b.open(loc, s1, read_only=True),
+        lambda: b.fork(loc, s1, working_ref_name("d5d5d5d5", "other")),
+        lambda: b.pin(loc, s1, "aaaa1111bbbb"),
+        lambda: b.diff(loc, base, s1),
+    ):
+        with pytest.raises(BackendError, match="re-created"):
+            use()
 
 
 def test_lance_diff_reports_fragments_and_columns(tmp_path: Path) -> None:

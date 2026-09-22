@@ -9,9 +9,12 @@ Two Lance specifics shape the mapping:
 
 * Version numbers are *branch-scoped* and a fresh branch starts at its parent's
   version number, so ``{"branch", "version"}`` is the state (a bare version
-  would collide across branches). An untouched fork reports its *parent's*
-  address, so a fork's fingerprint equals the pinned state and a no-op commit
-  after ``tether new`` stays a no-op.
+  would collide across branches). A branch deleted and forked again under its
+  name restarts its numbers too, so a state on any branch but ``main`` also
+  carries that branch's ``branch_id`` (Lance's UUID for this life of it). An
+  untouched fork reports its *parent's* address, so a fork's fingerprint
+  equals the pinned state and a no-op commit after ``tether new`` stays a
+  no-op.
 * Lance refuses to delete a branch that a tag references. A working branch that
   has been pinned therefore outlives the workspace (``delete_working_ref`` is a
   no-op for it) until ``gc`` drops the tag.
@@ -49,6 +52,21 @@ Ref = tuple[str | None, int | None]
 def _tag_target(meta: dict[str, Any]) -> tuple[str, int]:
     """Normalize tag/branch metadata to ``(branch, version)`` with main explicit."""
     return str(meta.get("branch") or MAIN), int(meta["version"])
+
+
+def _branch_id(branches: dict[str, Any], branch: str) -> str | None:
+    """Lance's UUID for the current life of ``branch`` (None for main)."""
+    if branch == MAIN:
+        return None
+    lineage = (branches.get(branch) or {}).get("branch_identifier") or []
+    return str(lineage[-1][1]) if lineage else None
+
+
+def _state(branches: dict[str, Any], branch: str, version: int) -> State:
+    state: State = {"branch": branch, "version": version}
+    if (branch_id := _branch_id(branches, branch)) is not None:
+        state["branch_id"] = branch_id
+    return state
 
 
 class LanceBackend(ObjectBackend):
@@ -138,6 +156,25 @@ class LanceBackend(ObjectBackend):
     def _state_ref(state: State) -> Ref:
         return str(state.get("branch") or MAIN), int(state["version"])
 
+    @staticmethod
+    def _check_branch_life(ds: Any, state: State) -> None:
+        """Refuse a state recorded on an earlier life of its branch."""
+        recorded = state.get("branch_id")
+        if recorded is None:
+            return
+        branch = str(state.get("branch") or MAIN)
+        if _branch_id(ds.branches.list(), branch) != str(recorded):
+            raise BackendError(
+                f"lance branch {branch} was deleted and re-created since this "
+                f"state was recorded; its version {state['version']} is gone",
+                kind="lance",
+            )
+
+    @staticmethod
+    def _checkout_state(ds: Any, state: State) -> Any:
+        LanceBackend._check_branch_life(ds, state)
+        return LanceBackend._checkout(ds, LanceBackend._state_ref(state))
+
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
         return {"uri": canonical_uri(self._uri(locator))}
@@ -147,24 +184,24 @@ class LanceBackend(ObjectBackend):
         if working_ref is None and (at := base_at(locator)) is not None:
             branch, version = self._resolve_at(ds, locator, at)
             self._checkout(ds, (branch, version))  # validate it exists
-            return {"branch": branch, "version": version}
+            return _state(ds.branches.list() if branch != MAIN else {}, branch, version)
         branch = working_ref or self._base_branch(locator)
         version = int(self._at_branch(ds, branch).version)
-        if branch != MAIN:
-            meta = ds.branches.list().get(branch)
-            if meta is not None and int(meta.get("parent_version", -1)) == version:
-                # Untouched fork: same content as the parent's version, which is
-                # the address tags point at. Report that so forks compare equal.
-                return {
-                    "branch": str(meta.get("parent_branch") or MAIN),
-                    "version": version,
-                }
-        return {"branch": branch, "version": version}
+        if branch == MAIN:
+            return {"branch": branch, "version": version}
+        branches = ds.branches.list()
+        meta = branches.get(branch)
+        if meta is not None and int(meta.get("parent_version", -1)) == version:
+            # Untouched fork: same content as the parent's version, which is
+            # the address tags point at. Report that so forks compare equal.
+            return _state(branches, str(meta.get("parent_branch") or MAIN), version)
+        return _state(branches, branch, version)
 
     def pin(self, locator: Locator, state: State, pin_id: str) -> Pin:
         ds = self._dataset(locator)
         ref = ref_for_pin(pin_id)
         target = self._state_ref(state)
+        self._check_branch_life(ds, state)
         try:
             ds.tags.create(ref, target)
         except _LANCE_ERRORS:
@@ -206,6 +243,10 @@ class LanceBackend(ObjectBackend):
     ) -> VerifyReport:
         ds = self._dataset(locator)
         target = self._state_ref(state)
+        try:
+            self._check_branch_life(ds, state)
+        except BackendError as exc:
+            return VerifyReport(VerifyStatus.MISSING, str(exc))
         if pin is not None:
             meta = ds.tags.list().get(pin.ref)
             if meta is None:
@@ -242,6 +283,8 @@ class LanceBackend(ObjectBackend):
         origin: str | Ref = (
             source.ref if isinstance(source, Pin) else self._state_ref(source)
         )
+        if not isinstance(source, Pin):
+            self._check_branch_life(ds, source)
         existing = ds.branches.list()
         target = name
         if name in existing:
@@ -308,8 +351,8 @@ class LanceBackend(ObjectBackend):
                 tag=target.ref,
             )
         if isinstance(target, dict):
-            branch, version = self._state_ref(target)
-            checked = self._checkout(ds, (branch, version))
+            branch, _ = self._state_ref(target)
+            checked = self._checkout_state(ds, target)
             return LanceHandle(
                 key=uri,
                 read_only=True,
@@ -392,11 +435,10 @@ class LanceBackend(ObjectBackend):
     ) -> ObjectDiff:
         """Fragment- and schema-level diff from two manifests (no data read)."""
         out = ObjectDiff(unit="fragments")
-        ref_a, ref_b = self._state_ref(a), self._state_ref(b)
-        if ref_a == ref_b:
+        if a == b:
             return out
         ds = self._dataset(locator)
-        da, db = self._checkout(ds, ref_a), self._checkout(ds, ref_b)
+        da, db = self._checkout_state(ds, a), self._checkout_state(ds, b)
         fa = {int(f.fragment_id): f for f in da.get_fragments()}
         fb = {int(f.fragment_id): f for f in db.get_fragments()}
 

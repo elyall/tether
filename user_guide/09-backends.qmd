@@ -246,7 +246,7 @@ against a catalog service.
 | Locator | `uri` (positional), `branch` (default `main`) |
 | Config | `storage_options = {...}` passed to `lance.dataset`; committed for non-secret options, `.tether/secrets.toml` for endpoints and credentials (per URI prefix or object) |
 | Identity | `{uri}` |
-| State | `branch`, `version` (Lance version numbers are branch-scoped; `--at N` therefore means version `N` of the locator's `branch` -- it is a *base* coordinate and is never consulted once a working branch exists; use a tag to name a version on another branch) |
+| State | `branch`, `version`, and on any branch but `main` its `branch_id` (Lance version numbers are branch-scoped and restart when a branch is deleted and re-created, so the id tells two lives of one name apart; `--at N` means version `N` of the locator's `branch` -- it is a *base* coordinate and is never consulted once a working branch exists; use a tag to name a version on another branch) |
 | Pin | `tags.create("tether.<id>", (branch, version))`; tagged versions are exempt from `cleanup_old_versions()` |
 | Fork | `create_branch(name, tag)`. Lance refuses to delete a branch a tag references, so a pinned working branch outlives its workspace and a re-fork under the same name picks `name.2`, `name.3`, ... |
 | Handle | `LanceHandle(uri, dataset, version, branch, tag)`; append with `lance.write_dataset(table, handle.dataset, mode="append")` |

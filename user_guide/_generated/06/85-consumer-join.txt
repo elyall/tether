@@ -4,5 +4,5 @@ train-2026-09-14 qc/focus 0a1b2c3d.e1d708f361c4f9cf {'branch': 'main', 'version'
 train-2026-09-14 raw/plate1 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': '5e98f0e256dee8240f20f6068ad30a5b'}
 train-2026-09-14 raw/plate2 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': '36828d436e87dff0e9f9d701fbff1798'}
 train-2026-09-14 raw/plate3 None {'size': 192, 'type': 'dir', 'count': 3, 'digest': '994805fb5a2c6ae0f836331a7671bfe2'}
-train-2026-09-14 scratch/embeddings None {'branch': 'tether.ws.0a1b2c3d.sweep', 'version': 5}
+train-2026-09-14 scratch/embeddings None {'branch': 'tether.ws.0a1b2c3d.sweep', 'version': 5, 'branch_id': '4d8fb8dc9e04813054191ecd485e8b06'}
 train-2026-09-14 zarr/imaging 0a1b2c3d.37522ceba6ebd89c {'snapshot_id': '4JV2FQGRZYNAGTXXRJER'}

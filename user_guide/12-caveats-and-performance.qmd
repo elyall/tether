@@ -165,8 +165,11 @@ verifies as drifted, not re-addressed.
 
 ### Lance versions are branch-scoped
 
-State is `(branch, version)`; an untouched fork reports its parent's address
-so no-op commits stay no-ops. Lance refuses to delete a branch a tag
+State is `(branch, version)`, plus the branch's id off `main`: a branch
+deleted and re-created under its name restarts its version numbers, and a
+state recorded on its earlier life verifies as missing rather than opening
+the new one. An untouched fork reports its parent's address so no-op commits
+stay no-ops. Lance refuses to delete a branch a tag
 references, so a pinned working branch outlives its bookmark until `gc` drops
 the tag (a re-fork picks `name.2`); `gc` reports that branch as a failed
 `delete-branch` rather than a deletion. `--at N` is version `N` of the
