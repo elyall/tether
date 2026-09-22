@@ -576,7 +576,9 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     r = runner.invoke(app, ["undo", "nope0000dead"])
     assert r.exit_code == 1 and "no operation" in r.output
-    # A partial undo exits 2 and says what could not be reversed.
+    # A partial undo exits 3 (Click's usage errors own 2) and says what could
+    # not be reversed.
+    assert runner.invoke(app, ["undo", "--bogus"]).exit_code == 2
     assert runner.invoke(app, ["commit", "-m", "again"]).exit_code == 0
     backend = Repo.find(vcs_root).backend_for("memory")
     ds = Repo.find(vcs_root).config.dataset_id
@@ -597,7 +599,7 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["undo"])
-    assert r.exit_code == 2, r.output
+    assert r.exit_code == 3, r.output
     assert "IRREVERSIBLE" in r.output and "pin(s) deleted" in r.output
     assert "branch(es) deleted" in r.output and "repair" in r.output
     assert stray not in store.system(system).branches  # gc's deletions stand
@@ -1032,3 +1034,33 @@ def test_status_labels_an_unreadable_object_and_exits_1(
         assert "bad:" in r.stderr and "deleted" in r.stderr
     finally:
         default_store().deleted.discard(systems["bad"])
+
+
+def test_init_json_prints_only_json(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(vcs_root)
+    r = runner.invoke(app, ["init", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.stdout)
+    assert payload["root"] == str(vcs_root.resolve()) and payload["dataset_id"]
+
+
+def test_help_keeps_bracketed_text_and_names_each_kinds_maturity() -> None:
+    """Rich markup would eat `[snapshot]` and `[experimental]` as style tags;
+    `--kind` help reads maturity from each backend class."""
+    from tether.backends.base import build_backend, known_kinds
+
+    status = runner.invoke(app, ["status", "--help"]).stdout
+    assert "[snapshot] auto" in " ".join(status.split())
+    assert "[new] fork" in " ".join(
+        runner.invoke(app, ["new", "--help"]).stdout.split()
+    )
+    assert "[experimental]" in runner.invoke(app, ["export", "--help"]).stdout
+    kind_help = " ".join(runner.invoke(app, ["add", "--help"]).stdout.split())
+    experimental = [
+        k for k in known_kinds() if build_backend(k).MATURITY == "experimental"
+    ]
+    assert {"neon", "iceberg", "ducklake", "dolt"} <= set(experimental)
+    assert f"experimental: {', '.join(experimental)}" in kind_help
+    assert "Backend kind: delta, file, git, icechunk, lance;" in kind_help

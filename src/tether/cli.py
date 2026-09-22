@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 try:
     import typer
+    from typer.core import TyperCommand, TyperOption
 except ImportError as exc:  # pragma: no cover - optional dep
     raise SystemExit(
         "the tether CLI requires the 'cli' extra: pip install tether-vcs[cli]"
@@ -50,7 +51,13 @@ app = typer.Typer(
     help="jj-style version control for heterogeneous datasets.",
     no_args_is_help=True,
     add_completion=False,
+    # Rich markup would take `[snapshot]` or `[experimental]` for style tags.
+    rich_markup_mode=None,
 )
+
+PARTIAL = 3
+"""Exit status when a command did part of its job and a store refused the
+rest. Not 2: Click exits 2 on a usage error."""
 
 
 def _show_version(value: bool) -> None:
@@ -196,26 +203,59 @@ def init(
         repo = Repo.init(path)
     except TetherError as exc:
         _fail(exc)
+    if json_out:
+        _emit(
+            {"root": str(repo.root), "dataset_id": repo.config.dataset_id},
+            as_json=True,
+        )
+        return
     typer.echo(
         f"initialized tether dataset at {repo.root} (dataset id "
         f"{repo.config.dataset_id}: its pins and working branches are "
         f"tether.{repo.config.dataset_id}.* / tether.ws.{repo.config.dataset_id}.*)"
     )
-    _emit(
-        {"root": str(repo.root), "dataset_id": repo.config.dataset_id},
-        as_json=json_out,
-    )
 
 
-@app.command()
+def _kind_help() -> str:
+    """`add --kind` help, each kind's maturity read from its class."""
+    from tether.backends.base import build_backend, known_kinds
+
+    by_maturity: dict[str, list[str]] = {}
+    for kind in known_kinds():
+        if kind == "memory":  # the in-process reference backend, for tests
+            continue
+        try:
+            maturity = build_backend(kind).MATURITY
+        except TetherError:
+            maturity = "not installed"
+        by_maturity.setdefault(maturity, []).append(kind)
+    stable = ", ".join(by_maturity.pop("stable", []))
+    rest = "".join(f"; {m}: {', '.join(k)}" for m, k in by_maturity.items())
+    return f"Backend kind: {stable}{rest}."
+
+
+class _AddCommand(TyperCommand):
+    """`add`, whose `--kind` help names each kind's maturity. Reading it
+    imports every backend module, so it happens only when help is shown."""
+
+    def resolve_help(self) -> None:
+        for param in self.params:
+            if param.name == "kind" and isinstance(param, TyperOption):
+                param.help = _kind_help()
+
+    def format_help(self, ctx: Any, formatter: Any) -> None:
+        self.resolve_help()
+        super().format_help(ctx, formatter)
+
+
+@app.command(cls=_AddCommand)
 def add(
     key: str = typer.Argument(..., help="Object key (may contain '/')."),
     locator: str | None = typer.Argument(None, help="Primary locator (uri / path)."),
     kind: str = typer.Option(
         ...,
         "--kind",
-        help="Backend kind: file, icechunk, neon, git, iceberg, delta, lance; "
-        "experimental: ducklake, dolt.",
+        help="Backend kind; `tether backends` lists each with its maturity.",
     ),
     project_id: str | None = typer.Option(None, "--project-id", help="Neon project."),
     database: str | None = typer.Option(None, "--database", help="Neon/Dolt database."),
@@ -1092,7 +1132,7 @@ def undo(
     promote: refused, with the previous base heads printed. drop, and the
     `new` and `gc` it runs: refused (the VCS's undo brings the commits back,
     `repair` the branches and pins). An older operation, named by id, gets
-    back only the workspace fields it changed. Exit code 2 when part of the
+    back only the workspace fields it changed. Exit code 3 when part of the
     work could not be reversed; the rest was.
     """
     repo = _repo()
@@ -1121,7 +1161,7 @@ def undo(
         for line in report.irreversible:
             typer.secho(f"  IRREVERSIBLE {line}", err=True)
     if not report.complete:
-        raise typer.Exit(2)
+        raise typer.Exit(PARTIAL)
 
 
 @app.command()
@@ -1148,7 +1188,7 @@ def repair(
     (an undone `gc`, a ref deleted by hand) but the state is still reachable in
     the store, `repair` recreates it; a working branch this workspace expects
     but the store lost is forked again from the manifest. Pins that exist but
-    point elsewhere are reported, not overwritten. Exit code 2 if something
+    point elsewhere are reported, not overwritten. Exit code 3 if something
     could not be rebuilt.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
@@ -1185,7 +1225,7 @@ def repair(
         for target, why in sorted(report.failed.items()):
             typer.secho(f"FAILED    {target}: {why}", err=True)
     if report.failed:
-        raise typer.Exit(2)
+        raise typer.Exit(PARTIAL)
 
 
 @app.command()
@@ -1268,7 +1308,7 @@ def forget_workspace(
     the directory). Store branches belong to bookmarks, not workspaces, so
     none are touched -- delete the bookmark and `gc --prune-bookmarks` for
     that. Forgetting the current workspace means the next tether command here
-    starts a fresh one. Exit code 2 if a step failed.
+    starts a fresh one. Exit code 3 if a step failed.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
@@ -1303,7 +1343,7 @@ def forget_workspace(
         for target, why in sorted(report.failed.items()):
             typer.secho(f"  FAILED   {target}: {why}", err=True)
     if report.failed:
-        raise typer.Exit(2)
+        raise typer.Exit(PARTIAL)
 
 
 @app.command()
@@ -1483,7 +1523,7 @@ def upgrade(
     Rewriting history changes commit ids: every other clone must re-sync
     afterwards. Run `--dry-run` first. A failed store rename stops the upgrade
     before anything else changes (renames already made are skipped on the next
-    run); exit code 2 marks a partially applied step.
+    run); exit code 3 marks a partially applied step.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo(allow_outdated=True)
@@ -1537,7 +1577,7 @@ def upgrade(
         for target, why in sorted(report.failed.items()):
             typer.secho(f"  FAILED  {target}: {why}", err=True)
     if report.failed:
-        raise typer.Exit(2)
+        raise typer.Exit(PARTIAL)
 
 
 @app.command()

@@ -70,6 +70,8 @@ def _convert_param(param: Any) -> click.Parameter:
 
 
 def _convert_command(name: str, command: Any) -> click.Command:
+    if hasattr(command, "resolve_help"):  # help filled in at render time
+        command.resolve_help()
     params = [_convert_param(p) for p in command.params if p.name != "help"]
     return click.Command(
         name=name,

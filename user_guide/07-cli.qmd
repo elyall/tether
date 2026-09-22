@@ -54,9 +54,10 @@ are experimental and print a note saying so.
 `verify` also exits `1` when any report is not `ok`, `status` when any
 object is `error`, and `promote` when anything was refused, which makes them
 natural CI gates. `undo`, `repair`,
-`upgrade`, and `forget-workspace` exit `2` when they did part of the job and
+`upgrade`, and `forget-workspace` exit `3` when they did part of the job and
 the store would not allow the rest (each such part is printed as
-`IRREVERSIBLE` / `FAILED`). Failures in one object's backend during a fan-out
+`IRREVERSIBLE` / `FAILED`). `2` is a usage error (an unknown option, a
+missing argument), as in every Click program. Failures in one object's backend during a fan-out
 are aggregated into one message listing each object.
 
 ## Revisions
@@ -576,9 +577,9 @@ undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
 | Undoing a... | Does | Refused when |
 | --- | --- | --- |
 | `commit` | uncommits it (jj: squash into `@`; git: `reset --soft`); manifests become working-tree edits; pins stay | it is no longer the working copy's parent; under jj, other commits are built on it (squashing it away would rewrite them -- `jj backout` instead) |
-| `new`, lazy fork, `restore` | deletes the branches it *created*, restores the `workspace.toml` fields it changed, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made; a branch it *reset* is reported with its old head (`IRREVERSIBLE`, exit `2`) -- `restore KEY --from REV` or `new --discard` puts it where you want | a created branch gained writes since, or holds a state a manifest records with no pin of its own (a `pin = "record"` object committed on it): commit or undo those, or `--discard` |
+| `new`, lazy fork, `restore` | deletes the branches it *created*, restores the `workspace.toml` fields it changed, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made; a branch it *reset* is reported with its old head (`IRREVERSIBLE`, exit `3`) -- `restore KEY --from REV` or `new --discard` puts it where you want | a created branch gained writes since, or holds a state a manifest records with no pin of its own (a `pin = "record"` object committed on it): commit or undo those, or `--discard` |
 | `pull` | uncommits it like a `commit`; pins stay | it is no longer the working copy's parent |
-| `gc` | restores forgotten working refs and deleted listings; deleted *branches* and *pins* stay deleted and print as `IRREVERSIBLE` (exit `2`) -- `repair` recreates a bookmark's branches from its manifests, and pins while the state is reachable | -- |
+| `gc` | restores forgotten working refs and deleted listings; deleted *branches* and *pins* stay deleted and print as `IRREVERSIBLE` (exit `3`) -- `repair` recreates a bookmark's branches from its manifests, and pins while the state is reachable | -- |
 | `add`, `remove`, `set`, `import` | restores the manifests (and `undo add` removes a store `--create` made while it is still empty) | -- |
 | `promote` | -- | always; the previous upstream heads are printed (the trunk bookmark: `jj bookmark set main -r <before>`) |
 | `repair`, `upgrade`, `abandon`, `drop`, `forget-workspace` | -- | always |
