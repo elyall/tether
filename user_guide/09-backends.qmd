@@ -217,9 +217,9 @@ against a catalog service.
 | Locator | `identifier` (`ns.table`; `table` accepted), `branch` (default `main`), `catalog_name` (default `default`), `catalog` (dict of pyiceberg catalog properties, or set once in config) |
 | Config | `catalog = {...}` pyiceberg properties. Committed: `type`, `warehouse` and other non-secret properties; `uri`, `token`, `credential` only in `.tether/secrets.toml` (`[backends.iceberg] catalog` or per identifier), in the file or the locator alike |
 | Identity | `{identifier, branch, catalog_name}` |
-| State | `snapshot_id` (nothing else: `metadata_location` changes on every table commit on any branch) |
-| Pin | `--pin native` (default): tag `tether.<id>`; `--pin record`: no native ref, the snapshot id alone (drops `PIN`; recoverable only within snapshot retention -- for S3 Tables and other catalogs where user refs disable maintenance) |
-| Fork | `create_branch(name, snapshot_id)`; re-forking an existing name re-points it (a `set-snapshot-ref` update) |
+| State | `snapshot_id` (nothing else: `metadata_location` changes on every table commit on any branch). A new table with no snapshot yet has `snapshot_id = -1`, Iceberg's "no current snapshot" |
+| Pin | `--pin native` (default): tag `tether.<id>`; `--pin record`: no native ref, the snapshot id alone (drops `PIN`; recoverable only within snapshot retention -- for S3 Tables and other catalogs where user refs disable maintenance). The empty state needs no tag: its pin verifies as held and opens at `snapshot_id = -1`, which pyiceberg's scans refuse rather than read today's data |
+| Fork | `create_branch(name, snapshot_id)`; re-forking an existing name re-points it (a `set-snapshot-ref` update). A table with no snapshot cannot be forked -- pyiceberg writes no branch before the first snapshot -- so write it on the trunk bookmark first. Needs pyiceberg 0.11 or newer (`promote` onto `main` uses `set_current_snapshot`) |
 | Handle | `IcebergHandle(table, ref, snapshot_id)` |
 | Diff | `snapshots`: one entry per snapshot on `b`'s ancestry back to `a`, from snapshot summaries (`append: +5 rows, +1 files`); when `a` is not an ancestor, `total-*` counters are compared instead |
 

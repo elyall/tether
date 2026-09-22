@@ -6,6 +6,12 @@ recorded snapshot id (``pin = record``). The ``record`` strategy exists for
 catalogs such as S3 Tables where creating user refs disables automated
 maintenance; recorded snapshots are only recoverable within the table's snapshot
 retention window (hence ``RETENTION_BOUND``).
+
+A new table has no snapshot, so no ``main`` ref: its state is ``snapshot_id =
+-1`` (Iceberg's own "no current snapshot"), which needs no tag to hold. A
+handle opened there carries that id, which pyiceberg's scans refuse rather
+than read the table's current data. pyiceberg writes no branch until the
+first snapshot exists, so such a table cannot be forked yet.
 """
 
 from __future__ import annotations
@@ -29,7 +35,18 @@ from tether.backends.base import (
 )
 from tether.errors import BackendError
 from tether.handles import Handle, IcebergHandle
-from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
+from tether.manifest import (
+    WORKING_REF_PREFIX,
+    Locator,
+    Pin,
+    State,
+    compute_pin_id,
+    pin_dataset,
+    ref_for_pin,
+)
+
+EMPTY = -1
+"""The snapshot id of a table with no snapshot yet."""
 
 
 @wrap_library_errors
@@ -146,9 +163,32 @@ class IcebergBackend(ObjectBackend):
                     return wanted
         raise BackendError(f"no snapshot for ref {ref!r}", kind="iceberg")
 
+    def _is_empty(self, table: Any, locator: Locator, ref: str) -> bool:
+        return ref == self._base_branch(locator) and not table.snapshots()
+
+    def _holds_empty(self, locator: Locator, pin: Pin) -> bool:
+        """Whether `pin` was cut at the empty state. There is nothing to tag
+        there, so its ref never exists; its content-addressed id says what it
+        holds."""
+        dataset = pin_dataset(pin.id)
+        empty = {"snapshot_id": EMPTY}
+        return dataset is not None and pin.id == compute_pin_id(
+            self.kind, self.identity(locator), empty, dataset
+        )
+
+    def _no_fork_of_empty(self, locator: Locator) -> BackendError:
+        return BackendError(
+            f"iceberg table {self._identifier(locator)} had no snapshot yet; "
+            "pyiceberg writes no branch before the first snapshot -- write it "
+            "on the trunk bookmark first",
+            kind="iceberg",
+        )
+
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         table = self._table(locator)
         ref = working_ref or base_at(locator) or self._base_branch(locator)
+        if self._is_empty(table, locator, ref):
+            return {"snapshot_id": EMPTY}
         # Only the snapshot identifies the data. `metadata_location` changes on
         # every table commit on any branch, so it must not be in the state.
         return {"snapshot_id": self._resolve(table, ref)}
@@ -160,9 +200,10 @@ class IcebergBackend(ObjectBackend):
         limit: int = 20,
     ) -> list[HistoryEntry]:
         table = self._table(locator)
-        start = self._resolve(
-            table, ref or base_at(locator) or self._base_branch(locator)
-        )
+        name = ref or base_at(locator) or self._base_branch(locator)
+        if self._is_empty(table, locator, name):
+            return []
+        start = self._resolve(table, name)
         by_id = {int(s.snapshot_id): s for s in table.snapshots()}
         pointing: dict[int, list[str]] = {}
         for name, r in self._refs(table).items():
@@ -197,6 +238,8 @@ class IcebergBackend(ObjectBackend):
         table = self._table(locator)
         ref = ref_for_pin(pin_id)
         sid = int(state["snapshot_id"])
+        if sid == EMPTY:
+            return Pin(id=pin_id, ref=ref, created=False)  # nothing to hold
         existing = self._refs(table).get(ref)
         if existing is not None:
             if int(existing.snapshot_id) != sid:
@@ -236,6 +279,8 @@ class IcebergBackend(ObjectBackend):
     ) -> VerifyReport:
         table = self._table(locator)
         sid = int(state["snapshot_id"])
+        if sid == EMPTY:
+            return VerifyReport(VerifyStatus.OK, "no snapshot yet: nothing to hold")
         if pin is not None:
             ref = self._refs(table).get(pin.ref)
             if ref is None:
@@ -264,8 +309,12 @@ class IcebergBackend(ObjectBackend):
         if isinstance(source, Pin):
             ref = self._refs(table).get(source.ref)
             if ref is None:
+                if self._holds_empty(locator, source):
+                    raise self._no_fork_of_empty(locator)
                 raise BackendError(f"pin {source.ref} missing", kind="iceberg")
             sid = int(ref.snapshot_id)
+        elif int(source["snapshot_id"]) == EMPTY:
+            raise self._no_fork_of_empty(locator)
         else:
             # Recorded state (no tag): the snapshot must not have been expired.
             sid = self._resolve(table, str(source["snapshot_id"]))
@@ -318,6 +367,8 @@ class IcebergBackend(ObjectBackend):
     ) -> bool | None:
         table = self._table(locator)
         wanted = int(ancestor["snapshot_id"])
+        if wanted == EMPTY:
+            return True  # every snapshot starts from the empty table
         sid: int | None = self._source_sid(table, descendant)
         seen: set[int] = set()
         while sid is not None and sid not in seen:
@@ -372,6 +423,13 @@ class IcebergBackend(ObjectBackend):
         table = self._table(locator)
         if isinstance(target, Pin):
             ref = self._refs(table).get(target.ref)
+            if ref is None and self._holds_empty(locator, target):
+                return IcebergHandle(
+                    key=self._identifier(locator),
+                    read_only=True,
+                    table=table,
+                    snapshot_id=EMPTY,
+                )
             if ref is None:
                 # No coordinate to open: say so rather than hand back a handle
                 # that reads the table's head under a pin's name.
@@ -435,7 +493,7 @@ class IcebergBackend(ObjectBackend):
             chain.append(cursor)
             parent = getattr(cursor, "parent_snapshot_id", None)
             cursor = by_id.get(int(parent)) if parent is not None else None
-        if cursor is None:  # a is not an ancestor of b (or expired)
+        if cursor is None and sid_a != EMPTY:  # a is not an ancestor of b (or expired)
             out.note = f"{sid_a} is not an ancestor of {sid_b}; comparing totals"
             ta = _summary(by_id.get(sid_a))
             tb = _summary(by_id.get(sid_b))

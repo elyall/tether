@@ -8,9 +8,10 @@ from pyiceberg.table.refs import SnapshotRef, SnapshotRefType
 from pyiceberg.table.snapshots import Operation, Summary
 
 from tether.backends.base import Capability, VerifyStatus
+from tether.errors import BackendError
 from tether.experimental.backends.iceberg import IcebergBackend
 from tether.handles import IcebergHandle
-from tether.manifest import Policy, ref_for_pin
+from tether.manifest import Pin, Policy, compute_pin_id, ref_for_pin
 
 LOCATOR = {"identifier": "ns.t", "branch": "main", "catalog_name": "t"}
 
@@ -94,7 +95,8 @@ class FakeTable:
         return _Snap(ref.snapshot_id) if ref else None
 
     def current_snapshot(self):
-        return _Snap(self._store.refs["main"].snapshot_id)
+        main = self._store.refs.get("main")
+        return _Snap(main.snapshot_id) if main else None
 
     def snapshots(self):
         return list(self._store.snapshots.values())
@@ -211,6 +213,46 @@ def test_unrelated_table_commits_do_not_change_the_state(
     assert store.metadata_location.endswith("/1.json")
     assert backend.fingerprint(LOCATOR, None) == before
     assert "metadata_location" not in before
+
+
+def test_empty_table_commits_and_reads_empty(
+    backend: IcebergBackend, store: _Store
+) -> None:
+    """A new table has no snapshot, so no `main` ref and nothing to tag;
+    pyiceberg also refuses branch writes until the first snapshot exists."""
+    store.snapshots.clear()
+    store.refs.clear()
+    state = backend.fingerprint(LOCATOR, None)
+    assert state == {"snapshot_id": -1}
+    pin_id = compute_pin_id("iceberg", backend.identity(LOCATOR), state, "d5d5d5d5")
+    pin = backend.pin(LOCATOR, state, pin_id)
+    assert not pin.created and pin.ref not in store.refs
+    assert backend.verify(LOCATOR, state, pin, deep=True).ok
+    assert backend.verify(LOCATOR, state, None, deep=True).ok
+    assert backend.history(LOCATOR, None, 5) == []
+    for source in (pin, state):
+        handle = backend.open(LOCATOR, source, read_only=True)
+        assert isinstance(handle, IcebergHandle) and handle.snapshot_id == -1
+        with pytest.raises(BackendError, match="no snapshot yet"):
+            backend.fork(LOCATOR, source, "tether.ws.dead.t")
+
+    # The first write lands on main; the empty state is where it started.
+    store.snapshots[1001] = _Snap(
+        1001, None, Summary(Operation.APPEND, **{"added-records": "10"})
+    )
+    store.refs["main"] = SnapshotRef(
+        snapshot_id=1001, snapshot_ref_type=SnapshotRefType.BRANCH
+    )
+    first = backend.fingerprint(LOCATOR, None)
+    assert backend.ancestor_of(LOCATOR, state, first) is True
+    diff = backend.diff(LOCATOR, state, first)
+    assert not diff.note
+    assert [(e.path, e.detail) for e in diff.entries] == [("1001", "append: +10 rows")]
+    handle = backend.open(LOCATOR, pin, read_only=True)  # still the empty baseline
+    assert isinstance(handle, IcebergHandle) and handle.snapshot_id == -1
+    other = compute_pin_id("iceberg", backend.identity(LOCATOR), first, "d5d5d5d5")
+    with pytest.raises(BackendError, match="not found"):
+        backend.open(LOCATOR, Pin(id=other, ref=ref_for_pin(other)), read_only=True)
 
 
 def test_fork_onto_an_existing_name_resets_it(
