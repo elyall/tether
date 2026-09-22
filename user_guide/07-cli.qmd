@@ -676,7 +676,7 @@ before `add`. Ids are valid `--at` values.
 
 ## `diff`
 
-No arguments: current commit vs working tree. One revision: that revision vs
+No arguments: the last commit (`HEAD` in git, `@-` in jj) vs working tree. One revision: that revision vs
 nothing (everything `removed`). Two: `REV_A → REV_B`. `--content` adds each
 changed object's native diff; `--limit` caps entries printed per object
 (counts stay exact).

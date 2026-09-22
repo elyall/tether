@@ -881,10 +881,15 @@ class ObjectOps(RepoCore):
         resolved_b = self.vcs.resolve(rev_b) if rev_b is not None else None
         a = self._objects_at(resolved_a) if resolved_a is not None else self.objects
         b = self._objects_at(resolved_b) if resolved_b is not None else None
-        # Default: compare working tree (a) against its parent commit.
+        # Default: compare working tree (a) against its parent commit. Under jj
+        # `@` is the working copy itself once anything has snapshotted it.
         if b is None and rev_a is None:
             try:
-                resolved_b = self.vcs.current_rev()
+                resolved_b = (
+                    self.vcs.resolve("@-")
+                    if self.vcs.kind == "jj"
+                    else self.vcs.current_rev()
+                )
                 b = self._objects_at(resolved_b)
             except VcsError:
                 b = {}

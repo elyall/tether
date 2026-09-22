@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -1729,6 +1730,19 @@ def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> 
     entries = {e.key: e for e in repo.diff(r1.vcs_commit)}
     assert entries["db"].change == "changed"
     assert entries["db"].a_pin is not None and entries["db"].b_pin is not None
+
+
+def test_diff_defaults_to_the_last_commit(vcs_root: Path) -> None:
+    """Plain `diff` compares the working tree with its parent commit, including
+    after jj has snapshotted the working copy into `@`."""
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    repo.commit("baseline")
+    _mem_object(repo, "extra")
+    if repo.vcs.kind == "jj":
+        subprocess.run(["jj", "status"], cwd=vcs_root, check=True, capture_output=True)
+    entries = {e.key: e.change for e in repo.diff()}
+    assert entries == {"db": "unchanged", "extra": "added"}
 
 
 def test_content_diff_reports_backend_failures_per_object(

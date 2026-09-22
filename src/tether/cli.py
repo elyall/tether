@@ -967,7 +967,9 @@ def verify(
 
 @app.command()
 def diff(
-    rev_a: str | None = typer.Argument(None, help="From revision (default: HEAD)."),
+    rev_a: str | None = typer.Argument(
+        None, help="From revision (default: the last commit, HEAD or jj's @-)."
+    ),
     rev_b: str | None = typer.Argument(
         None, help="To revision (default: working tree)."
     ),
