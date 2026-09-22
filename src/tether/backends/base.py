@@ -491,6 +491,17 @@ class ObjectBackend(Protocol):
         """
         return None
 
+    def configure_checkout(self, root: Path) -> None:
+        """Tell the backend where the dataset's VCS checkout is.
+
+        Called by the engine after construction. Every file under `root`
+        arrived with the clone, so a backend that would *run* something a
+        directory there configures -- the ``git`` backend reads a
+        repository's config -- refuses paths inside it; everything else
+        ignores the call.
+        """
+        return None
+
     def working_ref_blockers(self, locator: Locator, ref: str) -> str | None:
         """Why ``ref`` cannot be deleted right now, or ``None`` if it can.
 

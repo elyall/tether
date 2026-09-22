@@ -438,6 +438,7 @@ class RepoCore:
             )
             backend = build_backend(kind, {**committed, **local})
             backend.configure_cache(_m.tether_path(self.root) / _m.CACHE_DIR)
+            backend.configure_checkout(Path(self.vcs.root))
             backend.configure_secrets(
                 {**committed, **local}, self._secret_rules_for(kind, backend)
             )

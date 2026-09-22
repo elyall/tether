@@ -200,7 +200,7 @@ jj repositories work through their `.git`.
 
 | | |
 | --- | --- |
-| Locator | `path` (local checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
+| Locator | `path` (local checkout, stored absolute, and outside the dataset's own checkout; the positional locator works too: `tether add code --kind git ../code`), `ref` (default `HEAD`), `remote` (push pins there), `allow_dirty` (pin despite uncommitted changes) |
 | Config | `git_path`, `jj_path` -- `.tether/secrets.toml` `[vcs]` or `TETHER_GIT`/`TETHER_JJ` only; a committed value is refused |
 | Identity | `{path}` (resolved absolute) |
 | State | `sha`; `dirty` (only meaningful -- and only computed -- for the checked-out ref); `change_id` when jj is available. Both `dirty` and `change_id` are volatile: the same sha is the same state -- and pins identically -- whether or not jj is installed or the checkout has stray files; `pin` still reads the full state and refuses a dirty tree |
@@ -209,7 +209,7 @@ jj repositories work through their `.git`.
 | Handle | `GitHandle(path, sha, worktree)` |
 | Diff | `files`: `git diff --name-status -M` with `--numstat` line counts (`+a -d`) |
 | Create | `git init -b <ref>` plus one empty root commit with a fixed tree, author, and dates, so every store tether creates has the same root sha (`GitBackend.EMPTY_ROOT_SHA`) and the base branch exists to pin and fork from; the owner marker is `git config tether.owner`. Ref-empty: no branch or tag beyond the base, the base *at* that root sha (an amended root is not), and a clean working tree (`git status --porcelain --ignored`: an untracked, staged, or ignored file is data `delete_store` would take with the directory). `delete_store` re-checks both and removes the repository directory only then. |
-| Notes | remote-only (url) repositories are not supported yet. |
+| Notes | remote-only (url) repositories are not supported yet. Every git call runs with `core.fsmonitor`, hooks, and `ext::` transports off and `safe.bareRepository=explicit`, so a repository's config runs nothing. |
 
 ## `iceberg`: Apache Iceberg tables
 

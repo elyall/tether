@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import time
 import uuid
 from collections.abc import Iterator
@@ -1471,7 +1472,9 @@ def test_one_writer_per_checkout(vcs_root: Path) -> None:
 
 
 def test_relative_local_paths_are_pinned_down_at_add(
-    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+    vcs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """`add` from a subdirectory with a relative path stores the absolute path
     it meant, so every later command (and every clone) reads the same files
@@ -1490,9 +1493,11 @@ def test_relative_local_paths_are_pinned_down_at_add(
     repo.add("remote", "file", {"uri": "s3://bucket/prefix/"})
     assert repo.objects["remote"].locator["uri"] == "s3://bucket/prefix/"
     repo.remove("remote")
-    # The CLI's positional locator is `uri` for every kind, git included.
-    repo.add("code", "git", {"uri": "../data"})
-    assert repo.objects["code"].locator["uri"] == str(data.resolve())
+    # The CLI's positional locator is `uri` for every kind, git included (a
+    # git repository outside the checkout: one inside it came with the clone).
+    code = tmp_path_factory.mktemp("outside")
+    repo.add("code", "git", {"uri": os.path.relpath(code, sub)})
+    assert repo.objects["code"].locator["uri"] == str(code.resolve())
     repo.remove("code")
     monkeypatch.chdir(vcs_root)
     assert "raw" in repo.commit("from the root").unrecoverable  # recorded from here

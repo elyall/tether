@@ -9,7 +9,6 @@ clone; otherwise they are durable only locally (documented).
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -31,6 +30,22 @@ from tether.backends.base import (
 from tether.errors import BackendError, MergeConflict
 from tether.handles import GitHandle, Handle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
+from tether.vcs import git_env
+
+_HARDENED = (
+    "-c",
+    "core.fsmonitor=",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "safe.bareRepository=explicit",
+    "-c",
+    "protocol.ext.allow=never",
+)
+"""Config for every call. A repository's config may name commands to run
+(`core.fsmonitor`, hooks, `ext::` transports), and git takes any directory
+holding `HEAD`, `objects/` and `refs/` for a bare repository, which a clone
+can ship as plain files; tether needs none of it."""
 
 
 class GitBackend(ObjectBackend):
@@ -63,9 +78,13 @@ class GitBackend(ObjectBackend):
         self._config = config or {}
         configured = self._config.get("git_path")
         self._git: str = configured or shutil.which("git") or "git"
+        self._checkout: Path | None = None
+
+    def configure_checkout(self, root: Path) -> None:
+        self._checkout = root.resolve()
 
     # -- helpers --------------------------------------------------------- #
-    def _path(self, locator: Locator) -> Path:
+    def _local(self, locator: Locator) -> Path:
         # `path`, or the CLI's positional locator (`uri`) when it is a local path.
         path = locator.get("path") or locator.get("uri")
         if not path or "://" in str(path):
@@ -75,6 +94,27 @@ class GitBackend(ObjectBackend):
                 kind="git",
             )
         return Path(str(path))
+
+    def _path(self, locator: Locator) -> Path:
+        """The repository to run git in. A manifest arrives with every clone,
+        so it may not name a relative path (`add` stores an absolute one) or
+        one inside the checkout the clone made: that directory is the clone's
+        own files."""
+        path = self._local(locator)
+        if not path.is_absolute():
+            raise BackendError(
+                f"git path {str(path)!r} is not absolute; `add` stores an "
+                "absolute path, so this manifest was written by hand",
+                kind="git",
+            )
+        if self._checkout is not None and path.resolve().is_relative_to(self._checkout):
+            raise BackendError(
+                f"git path {path} is inside the dataset's checkout "
+                f"({self._checkout}), whose files came with the clone; point "
+                "it at a repository outside it",
+                kind="git",
+            )
+        return path
 
     def validate_locator(self, locator: Locator) -> None:
         # Manifests are committed: a `ref` or `at` that starts with `-` would
@@ -87,6 +127,17 @@ class GitBackend(ObjectBackend):
         path = locator.get("path") or locator.get("uri")
         if path is not None:
             _guard(str(path), "path")
+            self._path(locator)
+
+    def _proc(
+        self, locator: Locator, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self._git, *_HARDENED, "-C", str(self._path(locator)), *args],
+            capture_output=True,
+            text=True,
+            env=git_env(env),
+        )
 
     def _run(
         self,
@@ -95,12 +146,7 @@ class GitBackend(ObjectBackend):
         check: bool = True,
         env: dict[str, str] | None = None,
     ) -> str:
-        proc = subprocess.run(
-            [self._git, "-C", str(self._path(locator)), *args],
-            capture_output=True,
-            text=True,
-            env={**os.environ, **env} if env else None,
-        )
+        proc = self._proc(locator, *args, env=env)
         if check and proc.returncode != 0:
             raise BackendError(
                 f"git {' '.join(args)} failed: {proc.stderr.strip()}",
@@ -130,13 +176,15 @@ class GitBackend(ObjectBackend):
             cwd=str(self._path(locator)),
             capture_output=True,
             text=True,
+            env=git_env(),
         )
         return proc.stdout.strip() or None if proc.returncode == 0 else None
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
-        # Resolve to an absolute path so equal repos dedupe.
-        return {"path": str(self._path(locator).resolve())}
+        # Resolve to an absolute path so equal repos dedupe. Bookkeeping only:
+        # a path git may not run in still has an identity to group it by.
+        return {"path": str(self._local(locator).resolve())}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         ref = working_ref or self._base_ref(locator)
@@ -207,30 +255,20 @@ class GitBackend(ObjectBackend):
         if remote:
             # Remote first: if the remote still has the tag the pin still
             # exists, and gc must hear about it rather than believe it gone.
-            out = subprocess.run(
-                [
-                    self._git,
-                    "-C",
-                    str(self._path(locator)),
-                    "push",
-                    "--delete",
-                    "--end-of-options",
-                    _guard(str(remote), "remote"),
-                    f"refs/tags/{pin.ref}",
-                ],
-                capture_output=True,
-                text=True,
+            out = self._proc(
+                locator,
+                "push",
+                "--delete",
+                "--end-of-options",
+                _guard(str(remote), "remote"),
+                f"refs/tags/{pin.ref}",
             )
             if out.returncode != 0 and "remote ref does not exist" not in out.stderr:
                 raise BackendError(
                     f"pin {pin.ref} was not deleted on {remote}: {out.stderr.strip()}",
                     kind="git",
                 )
-        out = subprocess.run(
-            [self._git, "-C", str(self._path(locator)), "tag", "-d", pin.ref],
-            capture_output=True,
-            text=True,
-        )
+        out = self._proc(locator, "tag", "-d", pin.ref)
         if out.returncode != 0 and self._run(
             locator,
             "rev-parse",
@@ -307,18 +345,8 @@ class GitBackend(ObjectBackend):
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
-        out = subprocess.run(
-            [
-                self._git,
-                "-C",
-                str(self._path(locator)),
-                "branch",
-                "-D",
-                "--end-of-options",
-                _guard(ref, "branch"),
-            ],
-            capture_output=True,
-            text=True,
+        out = self._proc(
+            locator, "branch", "-D", "--end-of-options", _guard(ref, "branch")
         )
         if out.returncode != 0 and self._run(
             locator,
@@ -497,19 +525,13 @@ class GitBackend(ObjectBackend):
     def ancestor_of(
         self, locator: Locator, ancestor: State, descendant: str | Pin | State
     ) -> bool | None:
-        proc = subprocess.run(
-            [
-                self._git,
-                "-C",
-                str(self._path(locator)),
-                "merge-base",
-                "--is-ancestor",
-                "--end-of-options",
-                _sha(ancestor["sha"]),
-                _guard(self._source_ref(descendant), "source"),
-            ],
-            capture_output=True,
-            text=True,
+        proc = self._proc(
+            locator,
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            _sha(ancestor["sha"]),
+            _guard(self._source_ref(descendant), "source"),
         )
         if proc.returncode in (0, 1):
             return proc.returncode == 0
@@ -558,20 +580,14 @@ class GitBackend(ObjectBackend):
                 f"{base} has uncommitted changes; commit or stash them first",
                 kind="git",
             )
-        proc = subprocess.run(
-            [
-                self._git,
-                "-C",
-                str(self._path(locator)),
-                "merge",
-                "--no-ff",
-                "-m",
-                message,
-                "--end-of-options",
-                _guard(source_ref, "source"),
-            ],
-            capture_output=True,
-            text=True,
+        proc = self._proc(
+            locator,
+            "merge",
+            "--no-ff",
+            "-m",
+            message,
+            "--end-of-options",
+            _guard(source_ref, "source"),
         )
         if proc.returncode != 0:
             conflicts = self._run(

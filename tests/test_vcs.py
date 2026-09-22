@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tether.vcs import detect_vcs
 
@@ -103,6 +106,41 @@ def test_batched_reads_match_per_file_reads(vcs_root: Path) -> None:
     assert set(vcs.history_revs()) == set(history)
     assert history[c1] == at_c1
     assert history[c2] == vcs.files_at(c2, ".tether/objects")
+
+
+def test_an_inherited_git_environment_does_not_retarget_the_adapter(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tether run from a git hook (or anything else exporting `GIT_DIR` and
+    friends) must still commit to, and read history from, the repository it
+    found the dataset in."""
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
+    c1 = vcs.commit([".tether"], "first")
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    subprocess.run(
+        ["git", "-C", str(other), "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True,
+    )
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.bare'='true'")
+
+    vcs = detect_vcs(vcs_root)
+    assert vcs.files_at(c1, ".tether/objects") == {
+        ".tether/objects/a.toml": "key='a'\n"
+    }
+    _write(vcs_root, ".tether/objects/b.toml", "key='b'\n")
+    c2 = vcs.commit([".tether"], "second")
+    assert c1 in vcs.history_revs() and c2 in vcs.history_revs()
+    assert set(vcs.files_at(c2, ".tether/objects")) == {
+        ".tether/objects/a.toml",
+        ".tether/objects/b.toml",
+    }
 
 
 def test_git_object_reader_parses_trees(vcs_root: Path) -> None:

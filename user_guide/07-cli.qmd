@@ -77,6 +77,7 @@ the ones you are done with.
 | `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
 | `PATH`, `JJ_CONFIG`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
 | Backend credentials | Never stored in manifests; each backend reads them from the environment (`NEON_API_KEY`, `DOLT_PASSWORD`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...). See [Backends](09-backends.qmd). |
+| `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, ... | Ignored: tether clears the variables that point git at another repository or add config to it (the ones `git rev-parse --local-env-vars` lists), so running inside a git hook still commits to the repository the dataset is in. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are honoured. |
 
 ## Plans
 

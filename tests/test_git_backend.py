@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 
 from tether.backends.base import ObjectBackend
 from tether.backends.git import GitBackend
-from tether.errors import BackendError
+from tether.errors import BackendError, TetherError
 from tether.handles import GitHandle
 from tether.repo import Repo
 
@@ -176,7 +177,7 @@ def test_git_fork_onto_a_branch_at_the_source_leaves_it_alone(tmp_path: Path) ->
 
 
 def test_git_refuses_option_shaped_refs_from_manifests(
-    tmp_path: Path, vcs_root: Path
+    tmp_path_factory: pytest.TempPathFactory, vcs_root: Path
 ) -> None:
     """A manifest field that starts with `-` must never reach git as an option.
     `add` refuses it, and a manifest that arrives with a clone is refused at
@@ -184,6 +185,7 @@ def test_git_refuses_option_shaped_refs_from_manifests(
     `at = "--output=FILE"` writes no FILE."""
     from tether.manifest import ObjectManifest, Policy, write_object
 
+    tmp_path = tmp_path_factory.mktemp("outside")
     code = tmp_path / "code"
     _init_code_repo(code)
     b = GitBackend()
@@ -221,9 +223,11 @@ def test_git_backend_conformance(tmp_path: Path) -> None:
     run_conformance(GitHarness(tmp_path))
 
 
-def test_git_backend_lifecycle(vcs_root: Path) -> None:
+def test_git_backend_lifecycle(
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     repo = Repo.init(vcs_root)
-    code = vcs_root / "code"
+    code = tmp_path_factory.mktemp("outside") / "code"
     sha0 = _init_code_repo(code)
     repo.add("code", "git", {"path": str(code)})
 
@@ -282,12 +286,10 @@ def test_git_backend_lifecycle(vcs_root: Path) -> None:
     assert backend.fingerprint({"path": str(code), "at": sha0}, None)["sha"] == sha0
 
 
-def test_positional_locator_is_the_path(vcs_root: Path) -> None:
-    import pytest
-
-    from tether.errors import BackendError
-
-    code = vcs_root / "code"
+def test_positional_locator_is_the_path(
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    code = tmp_path_factory.mktemp("outside") / "code"
     sha0 = _init_code_repo(code)
     repo = Repo.init(vcs_root)
     backend = repo.backend_for("git")
@@ -353,3 +355,104 @@ def test_pin_fails_when_the_remote_push_fails(tmp_path: Path) -> None:
     ).stdout.split()
     assert pin.ref not in remote_tags and pin.id not in b.list_pins(good)
     b.unpin(good, pin)  # already gone everywhere: still fine
+
+
+def _bare_shaped(where: Path, marker: Path) -> Path:
+    """What a clone can ship: git refuses to track a `.git`, but a directory
+    holding `HEAD`, `objects/`, `refs/` and a `config` is only files, and
+    `git -C <it>` takes it for a repository and runs its `core.fsmonitor`."""
+    src = where.parent / f"{where.name}-src"
+    src.mkdir(parents=True)
+    (src / "x").write_text("x\n")
+    env = {**os.environ, "GIT_DIR": str(where), "GIT_WORK_TREE": str(src)}
+    for args in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-qm", "c"]):
+        subprocess.run(["git", *args], env=env, check=True, capture_output=True)
+    (where / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+        f"\tworktree = {src}\n\tfsmonitor = \"touch '{marker}'; false\"\n"
+    )
+    return where
+
+
+def test_a_hostile_clone_cannot_make_git_run_its_config(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed `path` must be absolute and outside the checkout: anything
+    inside it arrived with the clone. And git never discovers a bare
+    repository by itself, wherever one is."""
+    from tether.manifest import ObjectManifest, Policy, write_object
+
+    marker = tmp_path_factory.mktemp("marker") / "PWNED"
+    repo = Repo.init(vcs_root)
+    evil = _bare_shaped(vcs_root / "evil", marker)
+    b = repo.backend_for("git")
+
+    # Relative, as a hand-written manifest says it, run from the dataset root.
+    monkeypatch.chdir(vcs_root)
+    with pytest.raises(BackendError, match="absolute"):
+        b.fingerprint({"path": "evil"}, None)
+    # Absolute but inside the checkout: refused at `add`...
+    with pytest.raises(BackendError, match="inside the dataset's checkout"):
+        repo.add("code", "git", {"path": str(evil)})
+    # ...and at use, when a clone brings the manifest.
+    for path in (str(evil), "evil"):
+        write_object(
+            vcs_root,
+            ObjectManifest(
+                key="code", kind="git", locator={"path": path}, policy=Policy()
+            ),
+        )
+        with pytest.raises(TetherError):
+            Repo.find(vcs_root).snapshot()
+    # Outside the checkout, git itself refuses the bare-shaped directory.
+    outside = _bare_shaped(tmp_path_factory.mktemp("outside") / "evil", marker)
+    with pytest.raises(BackendError, match="bare repository"):
+        GitBackend().fingerprint({"path": str(outside)}, None)
+    assert not marker.exists()
+
+
+def test_git_runs_no_command_a_repository_config_names(tmp_path: Path) -> None:
+    """tether reads and tags the repository a locator names; it has no use for
+    its fsmonitor or hooks, and runs neither."""
+    code = tmp_path / "code"
+    _init_code_repo(code)
+    marker = tmp_path / "ran"
+    _git(code, "config", "core.fsmonitor", f"touch '{marker}'; false")
+    hook = code / ".git" / "hooks" / "reference-transaction"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    hook.chmod(0o755)
+    b = GitBackend()
+    loc = {"path": str(code)}
+    state = b.fingerprint(loc, None)  # `git status`: fsmonitor
+    b.pin(loc, state, "0a1b2c3d.0000000000000001")  # a ref update: the hook
+    assert not marker.exists()
+
+
+def test_an_inherited_git_environment_does_not_retarget_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run from a git hook, or anything else that exports `GIT_DIR`, every git
+    call would read and write that repository instead of the one the locator
+    names; `GIT_CONFIG_*` would add config of its own."""
+    code = tmp_path / "code"
+    sha = _init_code_repo(code)
+    other = tmp_path / "other"
+    _init_code_repo(other)
+    other_sha = _commit_on(other, _git(other, "branch", "--show-current"), "x\n")
+    marker = tmp_path / "ran"
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", f"touch '{marker}'; false")
+    b = GitBackend()
+    loc = {"path": str(code)}
+    state = b.fingerprint(loc, None)
+    assert state["sha"] == sha != other_sha and state["dirty"] is False
+    pin = b.pin(loc, state, "0a1b2c3d.0000000000000001")
+    assert b.list_pins(loc) == {pin.id}
+    assert b.list_pins({"path": str(other)}) == set()
+    assert not marker.exists()

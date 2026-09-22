@@ -88,6 +88,44 @@ def _digest_revs(revs: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(revs)).encode()).hexdigest()[:16]
 
 
+_GIT_REPO_ENV = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
+"""`git rev-parse --local-env-vars`: what git itself clears before it runs in
+another repository (a submodule). A git hook exports them for *its*
+repository; `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` choose the user's own
+config files and stay."""
+
+
+def git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment for a git (or jj) subprocess: this process's, without
+    the variables that point git at another repository or add config to it,
+    plus `extra`."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _GIT_REPO_ENV
+        and not k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    }
+    return {**env, **(extra or {})}
+
+
 def _run(
     argv: list[str],
     *,
@@ -103,7 +141,7 @@ def _run(
             capture_output=True,
             text=True,
             input=input_text,
-            env={**os.environ, **env} if env else None,
+            env=git_env(env),
         )
     except FileNotFoundError as exc:  # pragma: no cover - env dependent
         raise VcsError(f"executable not found: {argv[0]}") from exc
@@ -153,6 +191,7 @@ class GitObjectReader:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                env=git_env(),
             )
         except FileNotFoundError as exc:  # pragma: no cover - env dependent
             raise VcsError(f"executable not found: {git_exe}") from exc

@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- `git`: a manifest's `path` must be absolute and outside the checkout, and
+  git runs no fsmonitor, hook, `ext::` transport or implicit bare repository.
+- git calls ignore an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`
+  or `GIT_CONFIG_*`, which retargeted tether run from a git hook.
+
 ### Fixed
 
 - A saved `drop` plan applies only in the checkout that made it (0.1.0b3
