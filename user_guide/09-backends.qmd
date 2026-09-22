@@ -47,7 +47,8 @@ and flags are defined in
   a Neon LSN, may differ).
 - Locators are committed and read from every directory and every clone, so a
   *relative* local path (`file` `uri`/`path`, `git` `path`,
-  `icechunk`/`lance`/`delta` `uri`, `ducklake` `data_path`) is resolved
+  `icechunk`/`lance`/`delta` `uri`, `ducklake` `data_path` and the path in
+  `metadata`, after `ducklake:`, `ducklake:duckdb:`, or `ducklake:sqlite:`) is resolved
   against the directory `add` or `import` ran in and stored absolute. URLs
   and absolute paths are stored as given.
 - Objects that live in one native branch space -- two databases of a Neon
@@ -256,7 +257,7 @@ MySQL catalog with an object-store `data_path`.
 
 | | |
 | --- | --- |
-| Locator | `metadata` (positional `uri` accepted; the `ducklake:` prefix is added if missing, e.g. `ducklake:postgres:dbname=lake`), `data_path`, `table` (scopes the handle only -- snapshots are catalog-wide) |
+| Locator | `metadata` (positional `uri` accepted; the `ducklake:` prefix is added if missing, e.g. `ducklake:postgres:dbname=lake`; a relative DuckDB or SQLite file path in it is stored absolute, as `data_path` is), `data_path`, `table` (scopes the handle only -- snapshots are catalog-wide) |
 | Config | `init_sql = ["CREATE SECRET ...", ...]` run on every fresh connection -- `.tether/secrets.toml` only (it runs code); credentials there or in the environment, never in the locator |
 | Identity | `{metadata[, data_path]}` |
 | State | `snapshot_id`, `snapshot_time_us` (epoch microseconds; a recreated catalog verifies as drifted) |

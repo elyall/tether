@@ -286,6 +286,12 @@ class ObjectBackend(Protocol):
     (`add`, `import`), against the caller's working directory, so a committed
     locator means the same path from every directory and every clone."""
 
+    LOCAL_PATH_PREFIXES: tuple[str, ...] = ()
+    """Prefixes a :attr:`LOCAL_PATH_KEYS` value may carry before its path
+    (DuckLake's `ducklake:` or `ducklake:sqlite:`), which would otherwise read
+    as a URL scheme. The path after the longest matching prefix is resolved
+    like a bare one."""
+
     SAFE_CONFIG_KEYS: frozenset[str] = frozenset()
     """`[backends.<kind>]` keys the *committed* `tether.toml` may set. A clone
     arrives with that file, so anything that chooses an executable, an
@@ -1093,9 +1099,12 @@ def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> 
         value = out.get(key)
         if not isinstance(value, str) or not value:
             continue
-        if urlparse(value).scheme or Path(value).is_absolute():
+        prefixes = (p for p in backend.LOCAL_PATH_PREFIXES if value.startswith(p))
+        prefix = max(prefixes, key=len, default="")
+        path = value[len(prefix) :]
+        if not path or urlparse(path).scheme or Path(path).is_absolute():
             continue
-        out[key] = str((base / value).resolve())
+        out[key] = prefix + str((base / path).resolve())
     return out
 
 

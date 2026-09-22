@@ -187,6 +187,46 @@ def test_ducklake_diff_per_table(tmp_path: Path) -> None:
         b.fingerprint(dict(loc, at="999"), None)
 
 
+def test_relative_metadata_path_is_stored_absolute(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ducklake:cat.ducklake` reads like a URL scheme, but the path after the
+    prefix is local: registered relative, it attached nothing from any other
+    directory or clone."""
+    from tether.backends.base import absolutize_locator
+    from tether.repo import Repo
+
+    lakes = tmp_path_factory.mktemp("lakes")
+    _sql(_lake(lakes, "rel"), "CREATE TABLE w.t (a INTEGER)")
+    repo = Repo.init(vcs_root)
+    monkeypatch.chdir(lakes)
+    for n, metadata in enumerate(
+        ("ducklake:rel.ducklake", "ducklake:duckdb:rel.ducklake", "rel.ducklake")
+    ):
+        repo.add(f"t{n}", "ducklake", {"metadata": metadata, "data_path": "rel_files/"})
+    monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere"))
+    b = repo.backend_for("ducklake")
+    for n, prefix in enumerate(("ducklake:", "ducklake:duckdb:", "")):
+        loc = repo.objects[f"t{n}"].locator
+        assert loc["metadata"] == f"{prefix}{lakes / 'rel.ducklake'}"
+        assert b.fingerprint(loc, None)["snapshot_id"] == 1
+
+    base = Path("/work")
+    for given, stored in (
+        ("ducklake:sqlite:cat.db", f"ducklake:sqlite:{base / 'cat.db'}"),
+        (
+            "ducklake:postgres:dbname=lake host=db",
+            "ducklake:postgres:dbname=lake host=db",
+        ),
+        ("ducklake:/abs/cat.ducklake", "ducklake:/abs/cat.ducklake"),
+        ("ducklake:md:lake", "ducklake:md:lake"),
+    ):
+        got = absolutize_locator(b, {"metadata": given}, base)
+        assert got["metadata"] == stored, given
+
+
 def test_attach_sql_quotes_and_options() -> None:
     assert (
         attach_sql("ducklake:a'b.db", "x")
