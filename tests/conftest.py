@@ -95,6 +95,33 @@ def _env(monkeypatch: pytest.MonkeyPatch, _jj_config: Path) -> None:
     monkeypatch.delenv("TETHER_REV", raising=False)
 
 
+@pytest.fixture
+def hostile_vcs_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    """A user whose jj and git settings would break every id tether parses if
+    they reached its calls: colour forced on, `all()` aliased to the working
+    copy, new files never tracked and capped at 1 KiB, signatures shown,
+    paths quoted. Tests that take this fixture must behave exactly as under
+    the plain config."""
+    cfg = tmp_path_factory.mktemp("hostile")
+    (cfg / "jj.toml").write_text(
+        '[user]\nname = "tether tests"\nemail = "tests@tether.dev"\n'
+        '[ui]\ncolor = "always"\n'
+        '[revset-aliases]\n"all()" = "@"\n'
+        '[snapshot]\nauto-track = "none()"\nmax-new-file-size = "1KiB"\n',
+        encoding="utf-8",
+    )
+    (cfg / "gitconfig").write_text(
+        "[color]\n\tui = always\n[log]\n\tshowSignature = true\n"
+        "[core]\n\tquotePath = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JJ_CONFIG", str(cfg / "jj.toml"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg / "gitconfig"))
+    return cfg
+
+
 def _git_init(path: Path) -> None:
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "t@e.st"], cwd=path, check=True)

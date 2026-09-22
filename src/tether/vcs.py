@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
@@ -31,6 +33,7 @@ from typing import Any, Protocol, runtime_checkable
 from tether.errors import VcsError
 
 __all__ = [
+    "MIN_JJ_VERSION",
     "CommitInfo",
     "GitAdapter",
     "GitObjectReader",
@@ -40,10 +43,47 @@ __all__ = [
     "detect_vcs",
 ]
 
+MIN_JJ_VERSION = (0, 43, 0)
+"""The oldest jj tether runs on; the adapter checks once and refuses an older
+one. CI runs 0.45.1."""
+
 _TREE_MODE = "40000"
 _BLOB_MODES = frozenset({"100644", "100755"})
 _US = "\x1f"  # field separator for batched `git log` output
 _RS = "\x1e"  # record separator
+
+_JJ_ISOLATION = (
+    "--color=never",
+    "--no-pager",
+    "--config",
+    'ui.color="never"',
+    "--config",
+    'ui.paginate="never"',
+    "--config",
+    'snapshot.auto-track="none()"',
+    "--config",
+    'snapshot.max-new-file-size="1GiB"',
+)
+"""What every jj call gets, ahead of the user's config: plain output (a
+`ui.color = "always"` put escape codes into every commit id tether parsed),
+and a snapshot that tracks nothing on its own -- tether tracks its own paths
+by name (`JjAdapter._track`), so a `snapshot.auto-track = "none()"` cannot
+leave them out of the commit, and the user's new-file size limit does not
+apply to a listing. Their own new files are tracked by their next jj command,
+under their config, as before. Revsets use operator forms (`::`, `x::`) where
+one exists, so a `revset-aliases."all()"` cannot redefine what gc walks."""
+
+_GIT_ISOLATION = (
+    "-c",
+    "color.ui=never",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "core.quotePath=false",
+)
+"""What every git call gets: `log.showSignature = true` put the verification
+banner in front of the commit id `git log` printed; `core.quotePath` spelled
+a non-ASCII manifest path in octal."""
 
 
 @dataclass(frozen=True)
@@ -305,7 +345,7 @@ def _git_commit_info(
     revs = [r for r in revs if r.strip("0")]
     if not revs:
         return []
-    argv = [git_exe]
+    argv = [git_exe, *_GIT_ISOLATION]
     if git_dir is not None:
         argv += ["--git-dir", str(git_dir)]
     argv += [
@@ -401,9 +441,25 @@ class VcsAdapter(Protocol):
     def iter_history_files(self, reldir: str) -> Iterator[tuple[str, dict[str, str]]]:
         """Yield ``(commit id, files_at(commit, reldir))`` across all history.
 
+        A conflicted jj commit is yielded once per input of the conflict --
+        every side and base of its tree -- and last with the tree jj shows
+        for it, so a walk that collects references sees every manifest the
+        conflict may resolve to, and one that keeps a single answer per
+        commit keeps the same one as before.
+
         Implementations stream through one object-reader process rather than
         spawning per commit; callers should consume lazily.
         """
+
+    def conflicted_bookmarks(self) -> list[str]:
+        """Local bookmarks with several targets (jj, after a divergent move or
+        fetch). They are left out of `bookmarks()`, which has one commit per
+        name, so the commits they reach would otherwise count as unreferenced;
+        commands that judge references refuse while there are any. Always
+        empty under git, whose refs have one target."""
+
+    def conflicted_commits(self) -> list[str]:
+        """Visible commits whose tree holds a conflict (jj). Empty under git."""
 
     def commit_info(self, revs: list[str]) -> list[CommitInfo]:
         """Author, timestamps, message, and parents for many commits in one call."""
@@ -595,9 +651,33 @@ class JjAdapter:
         self.root = root
         self._exe = executable
         self._git_exe = git_executable or shutil.which("git")
+        self._version_checked = False
 
     def _jj(self, *args: str, check: bool = True) -> _Run:
-        return _run([self._exe, *args], cwd=self.root, check=check)
+        self._require_version()
+        return _run([self._exe, *_JJ_ISOLATION, *args], cwd=self.root, check=check)
+
+    def _require_version(self) -> None:
+        """Refuse a jj older than `MIN_JJ_VERSION`, once per adapter."""
+        if self._version_checked:
+            return
+        out = _run([self._exe, "--version"], cwd=self.root)
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", out.stdout)
+        # An unparseable banner (a custom build) is not refused.
+        if found and tuple(int(n) for n in found.groups()) < MIN_JJ_VERSION:
+            wanted = ".".join(str(n) for n in MIN_JJ_VERSION)
+            raise VcsError(
+                f"jj {found.group(0)} is too old: tether needs jj {wanted} or newer "
+                f"({self._exe})"
+            )
+        self._version_checked = True
+
+    def _track(self, relpaths: list[str]) -> None:
+        """Track tether's paths by name: tether's snapshots track nothing on
+        their own (see `_JJ_ISOLATION`), and a commit of untracked paths is an
+        empty commit that jj reports as a success."""
+        if relpaths:
+            self._jj("file", "track", *relpaths)
 
     def _git_store(self) -> tuple[Path, Path | None] | None:
         """Locate the git object store backing this jj repo.
@@ -691,7 +771,7 @@ class JjAdapter:
             "--no-graph",
             "--ignore-working-copy",
             "-r",
-            "all()",
+            "::",
             "-T",
             'commit_id ++ "\\n"',
         )
@@ -699,14 +779,14 @@ class JjAdapter:
 
     def history_digest(self) -> str:
         # Not the working-copy commits: jj re-snapshots them on any command,
-        # so a digest over `all()` would stale a saved gc plan after `jj log`.
+        # so a digest over `::` would stale a saved gc plan after `jj log`.
         # A commit that lands in any workspace still changes the set.
         out = self._jj(
             "log",
             "--no-graph",
             "--ignore-working-copy",
             "-r",
-            "all() ~ working_copies()",
+            ":: ~ working_copies()",
             "-T",
             'commit_id ++ "\\n"',
         )
@@ -730,8 +810,31 @@ class JjAdapter:
             return
         with reader:
             for rev in revs:
+                for files in self._conflict_inputs(reader, rev, reldir):
+                    yield rev, files
                 # jj's virtual root commit has no git object; it reads as missing.
                 yield rev, _prefixed(reldir, reader.files(_tree_spec(rev, reldir)))
+
+    _CONFLICT_TREES = (".jjconflict-side-", ".jjconflict-base-")
+    """Where jj keeps the inputs of a conflicted commit in its git tree: one
+    subtree per side and per base, beside the tree it shows for the commit
+    (side 0, in the versions tether supports)."""
+
+    def _conflict_inputs(
+        self, reader: GitObjectReader, rev: str, reldir: str
+    ) -> Iterator[dict[str, str]]:
+        """`reldir` as each input of a conflicted commit holds it."""
+        if reader.fetch(f"{rev}:{self._CONFLICT_TREES[0]}0") is None:
+            return  # not conflicted: the common case, one cheap miss
+        root = reader.fetch(f"{rev}^{{tree}}")
+        if root is None:  # pragma: no cover - the probe above just read it
+            return
+        sub = reldir.strip("/")
+        for mode, name, _sha in _parse_tree(root[2]):
+            if mode != _TREE_MODE or not name.startswith(self._CONFLICT_TREES):
+                continue
+            spec = f"{rev}:{name}" if sub in ("", ".") else f"{rev}:{name}/{sub}"
+            yield _prefixed(reldir, reader.files(spec))
 
     def _change_ids(self) -> dict[str, str]:
         out = self._jj(
@@ -739,7 +842,7 @@ class JjAdapter:
             "--no-graph",
             "--ignore-working-copy",
             "-r",
-            "all()",
+            "::",
             "-T",
             'commit_id ++ " " ++ change_id ++ "\\n"',
         )
@@ -814,6 +917,30 @@ class JjAdapter:
             if len(parts) == 2:
                 found[parts[0]] = parts[1]
         return found
+
+    def conflicted_bookmarks(self) -> list[str]:
+        out = self._jj(
+            "bookmark",
+            "list",
+            "--ignore-working-copy",
+            "-T",
+            'if(conflict, if(remote, "", name ++ "\\n"), "")',
+            check=False,
+        )
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+    def conflicted_commits(self) -> list[str]:
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            "conflicts()",
+            "-T",
+            'commit_id ++ "\\n"',
+            check=False,
+        )
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
     def bookmark_set(self, name: str, rev: str) -> None:
         self._jj("bookmark", "set", name, "-r", rev, "--allow-backwards")
@@ -983,6 +1110,9 @@ class JjAdapter:
         return None
 
     def dirty(self, relpaths: list[str]) -> bool:
+        # A new manifest is untracked until tracked, and `diff` does not show
+        # untracked files; git's `status --porcelain` counts them.
+        self._track(relpaths)
         out = self._jj("diff", "--summary", "-r", "@", *relpaths)
         return bool(out.stdout.strip())
 
@@ -994,13 +1124,12 @@ class JjAdapter:
         # current @ (which becomes @-) and opens a fresh empty @ on top. With
         # `advance`, jj's advance-bookmarks setting moves that bookmark from
         # the parent onto the new commit inside the same operation.
+        self._track(relpaths)
         args = ["commit", "-m", message]
         if advance is not None:
             args += [
                 "--config",
-                f"experimental-advance-branches.enabled-branches={[advance]!r}".replace(
-                    "'", '"'
-                ),
+                f"experimental-advance-branches.enabled-branches={json.dumps([advance])}",
             ]
         self._jj(*args, *relpaths)
         commit = self.resolve("@-")
@@ -1087,7 +1216,7 @@ class JjAdapter:
             "--no-graph",
             "--ignore-working-copy",
             "-r",
-            "all()",
+            "::",
             "-T",
             'change_id ++ "\\n"',
             check=False,
@@ -1121,7 +1250,7 @@ class JjAdapter:
             "--no-graph",
             "--reversed",
             "-r",
-            f"descendants({union}) ~ ({union})",
+            f"({union}):: ~ ({union})",
             "-T",
             'change_id ++ " " ++ commit_id ++ "\\n"',
         )
@@ -1189,7 +1318,7 @@ class JjAdapter:
             "log",
             "--no-graph",
             "-r",
-            f'descendants(files("{reldir}")) ~ root()',
+            f'files("{reldir}"):: ~ root()',
             "-T",
             'change_id ++ " " ++ commit_id ++ "\\n"',
         )
@@ -1250,7 +1379,7 @@ class GitAdapter:
         env: dict[str, str] | None = None,
     ) -> _Run:
         return _run(
-            [self._exe, *args],
+            [self._exe, *_GIT_ISOLATION, *args],
             cwd=self.root,
             check=check,
             input_text=input_text,
@@ -1342,11 +1471,25 @@ class GitAdapter:
         self, relpaths: list[str], message: str, *, advance: str | None = None
     ) -> str:
         self._git("add", "--", *relpaths)
-        self._git("commit", "-m", message, "--", *relpaths)
+        try:
+            self._git("commit", "-m", message, "--", *relpaths)
+        except VcsError:
+            # A hook or a missing identity refused the commit. The index still
+            # holds what `add` staged: manifests the caller is about to roll
+            # back, naming pins it is about to release. Left there, the user's
+            # next plain `git commit` records them.
+            self._git("reset", "-q", "--", *relpaths, check=False)
+            raise
         commit = self.current_rev()
         if advance is not None and self.bookmarks().get(advance) != commit:
             self.bookmark_set(advance, commit)
         return commit
+
+    def conflicted_bookmarks(self) -> list[str]:
+        return []  # a git ref has one target
+
+    def conflicted_commits(self) -> list[str]:
+        return []  # a merge in progress is the index's, not history's
 
     def position(self) -> dict[str, Any]:
         # An unborn branch (no commits yet) has a symbolic HEAD but no commit.

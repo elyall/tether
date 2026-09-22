@@ -25,6 +25,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- jj 0.43 is the minimum version; tether checks once and refuses an older one.
+- Every jj call gets `--color=never --no-pager` and overrides for `ui.color`,
+  `ui.paginate`, `snapshot.auto-track` and `snapshot.max-new-file-size`;
+  tether tracks its own paths by name before committing, and its revsets use
+  operator forms (`::`). A user config with colour forced on, `all()` aliased
+  or auto-tracking off put escape codes in every commit id, made empty
+  dataset commits, or shrank the history `gc` walks to one commit. Every git
+  call gets `-c color.ui=never -c log.showSignature=false -c core.quotePath=false`.
 - `file`, `icechunk`, `lance`, `delta`: `/p` and `file:///p` are one store to
   pin ids, listings and `gc`; spelled both ways, each spelling released the
   other's pins. No migration: pin ids of objects registered with a `file://`
@@ -35,6 +43,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `commit` raises when the new commit's tree lacks a manifest (a dataset under
+  an ignored directory made an empty commit that `status` called clean).
+- git: a `git commit` a hook refused left the manifests staged, naming the pins
+  the rollback released; the index is reset to what it was.
+- jj: the history walk reads every side and base of a conflicted commit, so
+  `gc` counts the pins each side names; it read only the side jj shows.
 - `file`: a local path holding `#` or `?` was cut short at that character, and
   `add --create` on a `file://` URI made a stray `file:` directory.
 

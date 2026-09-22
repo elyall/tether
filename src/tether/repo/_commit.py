@@ -9,6 +9,7 @@ try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tether.backends.base import (
@@ -20,11 +21,13 @@ from tether.backends.base import (
 from tether.errors import (
     StalePlanError,
     UnpinnedStateError,
+    VcsError,
 )
 from tether.manifest import (
     Pin,
     State,
     compute_pin_id,
+    key_to_relpath,
     listing_name,
     listings_dir,
     read_objects,
@@ -341,6 +344,7 @@ class CommitOps(RepoCore):
                         self._vcs_paths(), message, advance=self.workspace.bookmark
                     )
                     self._progress(op, "vcs-commit", commit=result.vcs_commit)
+                    self._require_committed(result.vcs_commit)
             except Exception as exc:
                 landed = self._vcs_commit_landed(pre["vcs"]) if vcs else None
                 if landed is not None:
@@ -448,6 +452,30 @@ class CommitOps(RepoCore):
             # No re-verification: a pin names the *state* the plan captured, so a
             # branch that moved since changes nothing about what lands.
             return self.apply_commit(plan, vcs=vcs, verify=False)
+
+    def _require_committed(self: Repo, commit: str) -> None:
+        """Every manifest in the working tree must be in the commit's tree.
+
+        jj commits what it tracks and reports success either way: a dataset
+        under an ignored directory made an empty dataset commit that `status`
+        then called clean and `verify` called ok. Raised after the commit
+        landed, so `apply_commit` keeps the pins and journals the failure.
+        """
+        reldir = self._objects_reldir()
+        committed = self.vcs.files_at(commit, reldir)
+        missing = sorted(
+            key
+            for key in self.objects
+            if f"{reldir}/{Path(*key_to_relpath(key).parts[1:]).as_posix()}"
+            not in committed
+        )
+        if missing:
+            shown = ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")
+            raise VcsError(
+                f"{self.vcs.kind} commit {commit[:12]} does not contain "
+                f"{len(missing)} of the dataset's manifest(s) ({shown}); is the "
+                "dataset directory ignored by the VCS? Fix that and commit again"
+            )
 
     def _rollback_pins(self, created: list[tuple[str, Pin]]) -> None:
         for key, pin in created:

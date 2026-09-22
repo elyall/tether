@@ -143,6 +143,164 @@ def test_an_inherited_git_environment_does_not_retarget_the_adapter(
     }
 
 
+def test_a_hostile_user_config_does_not_reach_the_adapter(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    """Colour forced on, `all()` aliased away, new files never auto-tracked
+    and capped at 1 KiB: every id still parses, history is still every
+    commit, and tether's own files -- a listing well over the cap included --
+    still land in the commit."""
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
+    _write(vcs_root, ".tether/listings/big.jsonl", "x" * 4096 + "\n")
+    assert vcs.dirty([".tether/objects", ".tether/listings"])
+    c1 = vcs.commit([".tether/objects", ".tether/listings"], "first")
+    assert len(c1) == 40 and int(c1, 16) >= 0
+    _write(vcs_root, ".tether/objects/b.toml", "key='b'\n")
+    c2 = vcs.commit([".tether/objects"], "second", advance="main")
+    assert vcs.resolve(c2) == c2 and vcs.bookmarks()["main"] == c2
+    assert set(vcs.files_at(c2, ".tether")) == {
+        ".tether/objects/a.toml",
+        ".tether/objects/b.toml",
+        ".tether/listings/big.jsonl",
+    }
+    assert {c1, c2} <= set(vcs.history_revs())
+    assert {c1, c2} <= set(vcs.alive_commits([c1, c2]))
+    assert dict(vcs.iter_history_files(".tether/objects"))[c1] == {
+        ".tether/objects/a.toml": "key='a'\n"
+    }
+    infos = {i.commit_id: i for i in vcs.commit_info([c1, c2])}
+    assert infos[c2].parents == (c1,) and infos[c1].message == "first"
+    assert not vcs.dirty([".tether/objects"])
+    # Untracked new files count as dirty, as git's `status --porcelain` says.
+    _write(vcs_root, ".tether/objects/c.toml", "key='c'\n")
+    assert vcs.dirty([".tether/objects"])
+
+
+def test_jj_below_the_minimum_version_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tether import vcs as vcs_module
+    from tether.errors import VcsError
+    from tether.vcs import MIN_JJ_VERSION, JjAdapter
+
+    calls: list[list[str]] = []
+    banner = {"text": "jj 0.30.0\n"}
+
+    def fake_run(argv: list[str], **kwargs: object) -> vcs_module._Run:
+        calls.append(argv)
+        if argv[1:] == ["--version"]:
+            return vcs_module._Run(0, banner["text"], "")
+        return vcs_module._Run(0, "abc\n", "")
+
+    monkeypatch.setattr(vcs_module, "_run", fake_run)
+    adapter = JjAdapter(tmp_path)
+    with pytest.raises(VcsError, match=r"jj 0\.30\.0 is too old"):
+        adapter.resolve("@")
+    assert calls == [["jj", "--version"]]
+    # Checked once per adapter; a supported version passes through and every
+    # later call carries the isolation flags.
+    banner["text"] = f"jj {'.'.join(str(n) for n in MIN_JJ_VERSION)}\n"
+    fresh = JjAdapter(tmp_path)
+    assert fresh.resolve("@") == "abc" and fresh.current_rev() == "abc"
+    version_calls = [c for c in calls if c[1:] == ["--version"]]
+    assert len(version_calls) == 2
+    assert all("--color=never" in c and "--no-pager" in c for c in calls[-2:]), calls[
+        -2:
+    ]
+
+
+def test_jj_history_walk_reads_every_side_of_a_conflicted_commit(
+    vcs_root: Path,
+) -> None:
+    """A rebase that conflicts on a manifest stores the inputs beside the tree
+    jj shows; the history walk yields each of them, so nothing a resolution
+    could keep is invisible to gc, and `conflicts()` names the commit."""
+    vcs = detect_vcs(vcs_root)
+    if vcs.kind != "jj":
+        pytest.skip("jj conflicts")
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'base'\n")
+    base = vcs.commit([".tether/objects"], "base")
+    vcs.bookmark_set("main", base)
+    assert vcs.conflicted_bookmarks() == [] and vcs.conflicted_commits() == []
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'feat'\n")
+    feat = vcs.commit([".tether/objects"], "feat", advance="main")
+    vcs.bookmark_set("feat", feat)
+    vcs.new(base)
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'trunk'\n")
+    trunk = vcs.commit([".tether/objects"], "trunk")
+    vcs.bookmark_set("main", trunk)
+    subprocess.run(
+        ["jj", "rebase", "-b", "feat", "-d", "main"],
+        cwd=vcs_root,
+        check=True,
+        capture_output=True,
+    )
+    conflicted = vcs.bookmarks()["feat"]
+    assert conflicted != feat
+    assert vcs.conflicted_commits() == [conflicted]
+    texts = {
+        files[".tether/objects/db.toml"]
+        for rev, files in vcs.iter_history_files(".tether/objects")
+        if rev == conflicted
+    }
+    assert texts == {"state = 'base'\n", "state = 'feat'\n", "state = 'trunk'\n"}
+    # The single-commit read keeps showing the tree jj materializes.
+    assert vcs.files_at(conflicted, ".tether/objects") == {
+        ".tether/objects/db.toml": "state = 'trunk'\n"
+    }
+    # A bookmark with two targets (a divergent move) is reported too.
+    op = subprocess.run(
+        ["jj", "op", "log", "--no-graph", "-n1", "-T", "id"],
+        cwd=vcs_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    vcs.bookmark_set("main", base)
+    subprocess.run(
+        ["jj", "--at-op", op, "bookmark", "set", "main", "-r", conflicted],
+        cwd=vcs_root,
+        check=True,
+        capture_output=True,
+    )
+    assert vcs.conflicted_bookmarks() == ["main"]
+    assert "main" not in vcs.bookmarks()  # what made the guard necessary
+
+
+def test_a_refused_git_commit_leaves_nothing_staged(vcs_root: Path) -> None:
+    """`git add` then `git commit`: when a hook refuses the commit, the index
+    must not keep the manifests `add` staged, or the user's next plain
+    `git commit` records them."""
+    from tether.errors import VcsError
+
+    vcs = detect_vcs(vcs_root)
+    if vcs.kind != "git":
+        pytest.skip("git hooks")
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
+    vcs.commit([".tether/objects"], "first")
+    hooks = vcs_root / "hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'lint failed' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)], cwd=vcs_root, check=True
+    )
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\npin='new'\n")
+    with pytest.raises(VcsError, match="lint failed"):
+        vcs.commit([".tether/objects"], "second")
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=vcs_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert staged == ""
+    assert vcs.dirty([".tether/objects"])  # the working-tree edit is untouched
+
+
 def test_git_object_reader_parses_trees(vcs_root: Path) -> None:
     from tether.vcs import GitObjectReader, _parse_tree
 
