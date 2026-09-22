@@ -37,36 +37,38 @@ class FakeNeon:
                 "last_reset_at": None,
             }
         }
-        self.endpoints: list[dict] = []
+        # The project's default branch comes with its primary compute.
+        self.endpoints: list[dict] = [
+            {"id": "ep-main", "branch_id": "br-main", "type": "read_write"}
+        ]
         self.listings = 0  # how often the branch list was fetched
         self.restores: list[tuple[str, dict]] = []
+        self.uris: list[dict[str, str]] = []  # connection_uri query params
+        self.busy: list[int] = []  # statuses the next requests get first
         self._n = 0
 
     def install(self, router: respx.MockRouter) -> None:
-        router.get(
-            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches(\?.*)?$"
-        ).mock(side_effect=self._list_branches)
-        router.post(url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches$").mock(
-            side_effect=self._create_branch
-        )
-        router.delete(
-            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+$"
-        ).mock(side_effect=self._delete_branch)
-        router.post(
-            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+/restore$"
-        ).mock(side_effect=self._restore_branch)
-        router.patch(
-            url__regex=rf"{re.escape(BASE)}/projects/{PID}/branches/[^/]+$"
-        ).mock(side_effect=self._patch_branch)
-        router.get(url__regex=rf"{re.escape(BASE)}/projects/{PID}/endpoints$").mock(
-            side_effect=self._list_endpoints
-        )
-        router.post(url__regex=rf"{re.escape(BASE)}/projects/{PID}/endpoints$").mock(
-            side_effect=self._create_endpoint
-        )
-        router.get(
-            url__regex=rf"{re.escape(BASE)}/projects/{PID}/connection_uri.*"
-        ).mock(side_effect=self._connection_uri)
+        def route(method: str, path: str, handler) -> None:
+            getattr(router, method)(
+                url__regex=rf"{re.escape(BASE)}/projects/{PID}/{path}"
+            ).mock(side_effect=self._maybe_busy(handler))
+
+        route("get", r"branches(\?.*)?$", self._list_branches)
+        route("post", "branches$", self._create_branch)
+        route("delete", "branches/[^/]+$", self._delete_branch)
+        route("post", "branches/[^/]+/restore$", self._restore_branch)
+        route("patch", "branches/[^/]+$", self._patch_branch)
+        route("get", "endpoints$", self._list_endpoints)
+        route("post", "endpoints$", self._create_endpoint)
+        route("get", "connection_uri.*", self._connection_uri)
+
+    def _maybe_busy(self, handler):
+        def respond(request: httpx.Request) -> httpx.Response:
+            if self.busy:
+                return httpx.Response(self.busy.pop(0), json={"message": "busy"})
+            return handler(request)
+
+        return respond
 
     # handlers
     PAGE = 2  # small pages, so every listing in the tests exercises pagination
@@ -165,8 +167,21 @@ class FakeNeon:
         return httpx.Response(201, json={"endpoint": record})
 
     def _connection_uri(self, request: httpx.Request) -> httpx.Response:
-        bid = request.url.params.get("branch_id")
-        db = request.url.params.get("database_name") or "neondb"
+        # As the real API: database and role are required, and without an
+        # `endpoint_id` the URI is the branch's read-write compute's.
+        params = dict(request.url.params)
+        self.uris.append(params)
+        bid = params.get("branch_id")
+        db, role = params.get("database_name"), params.get("role_name")
+        if not db or not role:
+            return httpx.Response(400, json={"message": "database_name, role_name"})
+        mine = [e for e in self.endpoints if e["branch_id"] == bid]
+        if "endpoint_id" in params:
+            ok = any(e["id"] == params["endpoint_id"] for e in mine)
+        else:
+            ok = any(e["type"] == "read_write" for e in mine)
+        if not ok:
+            return httpx.Response(400, json={"message": "no such endpoint"})
         return httpx.Response(200, json={"uri": f"postgresql://neon/{bid}?dbname={db}"})
 
 
@@ -184,7 +199,7 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         fake.install(router)
 
         state = backend.fingerprint(LOCATOR, None)
-        assert state == {"lsn": "0/16B3748", "next_xid": "742", "branch": "main"}
+        assert state == {"lsn": "0/16B3748", "commit_xid": "742", "branch": "main"}
 
         pin = backend.pin(LOCATOR, state, "abc123def456")
         assert pin.ref == ref_for_pin("abc123def456")
@@ -233,7 +248,7 @@ def test_pins_hang_off_the_branch_the_state_came_from(
         untouched = backend.fingerprint(LOCATOR, wref)
         assert untouched == {
             "lsn": "0/16B3748",
-            "next_xid": "742",
+            "commit_xid": "742",
             "branch": "main",
             "timeline": wref,
         }
@@ -244,7 +259,7 @@ def test_pins_hang_off_the_branch_the_state_came_from(
         forked = backend.fingerprint(LOCATOR, wref)
         assert forked == {
             "lsn": "0/2000000",
-            "next_xid": "900",
+            "commit_xid": "900",
             "branch": "main",
             "timeline": wref,
         }
@@ -327,7 +342,7 @@ def test_quiescence_check(
 def test_lsn_motion_without_writes_is_not_a_change(
     backend: NeonBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checkpoints move the LSN; only next_xid says the data changed."""
+    """Checkpoints move the LSN; only commit_xid says the data changed."""
     from tether.backends.base import content_state
     from tether.manifest import compute_pin_id
 
@@ -433,7 +448,7 @@ def test_fork_onto_an_existing_branch_restores_it(backend: NeonBackend) -> None:
         # Once a pin hangs off the working branch (a commit made there), Neon
         # cannot restore it in place. The pin keeps its parent; the fork lands
         # on a sibling name, which is what the engine records.
-        on_work = {"lsn": "0/4000000", "next_xid": "900", "branch": wref}
+        on_work = {"lsn": "0/4000000", "commit_xid": "900", "branch": wref}
         pin3 = backend.pin(LOCATOR, on_work, "000000000003")
         pin3_br = next(b for b in fake.branches.values() if b["name"] == pin3.ref)
         assert pin3_br["parent_id"] == work["id"]
@@ -493,7 +508,7 @@ def test_working_ref_blockers_names_the_pin_children(backend: NeonBackend) -> No
         # A commit on the working branch hangs a pin off it.
         child = backend.pin(
             LOCATOR,
-            {"lsn": "0/4000000", "next_xid": "900", "branch": wref},
+            {"lsn": "0/4000000", "commit_xid": "900", "branch": wref},
             "d5d5d5d5.0000000000000002",
         )
         why = backend.working_ref_blockers(LOCATOR, wref)
@@ -504,6 +519,92 @@ def test_working_ref_blockers_names_the_pin_children(backend: NeonBackend) -> No
         assert backend.working_ref_blockers(LOCATOR, wref) is None
         backend.delete_working_ref(LOCATOR, wref)
         assert wref not in backend.list_working_refs(LOCATOR)
+
+
+def test_locator_needs_database_and_role(vcs_root: Path) -> None:
+    """The API builds no connection URI without both; refuse at `add`."""
+    from tether.repo import Repo
+
+    b = NeonBackend({"api_url": BASE})
+    b.validate_locator(LOCATOR)
+    for missing in ("project_id", "database", "role"):
+        loc = {k: v for k, v in LOCATOR.items() if k != missing}
+        with pytest.raises(BackendError, match=missing):
+            b.validate_locator(loc)
+    repo = Repo.init(vcs_root)
+    with pytest.raises(BackendError, match="role"):
+        repo.add("db", "neon", {"project_id": PID, "database": "neondb"})
+
+
+def test_connections_name_the_endpoint_they_ensured(
+    backend: NeonBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins get a read-only compute and forks none until used; a connection
+    URI without `endpoint_id` means the branch's read-write compute."""
+    fake = FakeNeon()
+    monkeypatch.setattr(backend, "_active_writers", lambda uri: 0)
+    with respx.mock as router:
+        fake.install(router)
+        state = backend.fingerprint(LOCATOR, None)
+        pin = backend.pin(LOCATOR, state, "abc123def456")
+        pin_br = next(b for b in fake.branches.values() if b["name"] == pin.ref)
+        ro = backend.open(LOCATOR, pin, read_only=True)
+        assert isinstance(ro, NeonHandle) and ro.branch == pin.ref
+        (pin_ep,) = [e for e in fake.endpoints if e["branch_id"] == pin_br["id"]]
+        assert pin_ep["type"] == "read_only"
+        assert fake.uris[-1]["endpoint_id"] == pin_ep["id"]
+
+        # A fresh fork has no compute: fingerprinting it (eager `new`,
+        # `status --snapshot`) makes its read-write endpoint first.
+        wref = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.db")
+        work_br = next(b for b in fake.branches.values() if b["name"] == wref)
+        assert backend.fingerprint(LOCATOR, wref)["branch"] == "main"
+        (work_ep,) = [e for e in fake.endpoints if e["branch_id"] == work_br["id"]]
+        assert work_ep["type"] == "read_write"
+        assert fake.uris[-1]["endpoint_id"] == work_ep["id"]
+        backend.check_quiescence(LOCATOR, wref)
+        rw = backend.open(LOCATOR, wref, read_only=False)
+        assert isinstance(rw, NeonHandle) and rw.branch == wref
+        assert len(fake.endpoints) == 3  # reused, not created again
+        assert all(u.get("endpoint_id") for u in fake.uris)
+
+
+def test_api_retries_locked_and_throttled_responses(
+    backend: NeonBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neon answers 423 while another operation on the project runs, 429 when
+    throttled, and 503 when briefly unavailable; all are safe to retry."""
+    fake = FakeNeon()
+    waits: list[float] = []
+    monkeypatch.setattr("tether.experimental.backends.neon.time.sleep", waits.append)
+    with respx.mock as router:
+        fake.install(router)
+        state = backend.fingerprint(LOCATOR, None)
+        fake.busy = [423, 429, 503]
+        pin = backend.pin(LOCATOR, state, "abc123def456")
+        assert pin.ref in {b["name"] for b in fake.branches.values()}
+        assert len(waits) == 3 and waits == sorted(waits)
+
+        fake.busy = [423] * 50
+        with pytest.raises(BackendError, match="423"):
+            backend.unpin(LOCATOR, pin)
+
+
+def test_probe_ignores_xids_that_never_committed(pg_dsn: str) -> None:
+    """A Neon compute starting from a basebackup inherits a `nextXid` rounded
+    up past xids nobody used, so a restart moves it with no write. Those xids
+    never commit; rolled-back ones stand in for them here."""
+    psycopg = pytest.importorskip("psycopg")
+    b = NeonBackend({})
+    _, before = b._probe(pg_dsn)
+    with psycopg.connect(pg_dsn) as conn:
+        for _ in range(5):
+            with conn.transaction(force_rollback=True):
+                conn.execute("SELECT txid_current()")
+    assert b._probe(pg_dsn)[1] == before
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("CREATE TABLE t (a int)")
+    assert b._probe(pg_dsn)[1] != before
 
 
 # --------------------------------------------------------------------------- #

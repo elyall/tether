@@ -3,14 +3,15 @@
 Model:
 
 - **working ref**: a Neon branch (with a lazily-created ``read_write`` endpoint).
-- **state**: ``{lsn, next_xid}``. ``lsn`` (``pg_current_wal_flush_lsn``) is what we
-  pin; ``next_xid`` (``pg_snapshot_xmax``) only advances when a writing
-  transaction ran, so it is the reliable "changed" signal (LSN drifts on
-  checkpoints/autovacuum without user writes).
+- **state**: ``{lsn, commit_xid}``. ``lsn`` (``pg_current_wal_flush_lsn``) is what
+  we pin; ``commit_xid``, the newest committed transaction id, only moves when
+  a writing transaction committed, so it is the "changed" signal (LSN drifts
+  on checkpoints/autovacuum without user writes, and ``nextXid`` jumps when a
+  compute restarts).
 - **pin**: a child branch ``tether.<pin_id>`` (protected on request) created at
   ``parent_lsn=<lsn>`` with no compute endpoint -- durable and free to keep.
 - **fork**: a child branch off the pin; a ``read_write`` endpoint is created on
-  first :meth:`open`.
+  first use.
 
 Neon cannot merge or promote a child into its parent, so production writes
 should happen on the trunk bookmark (straight to ``main``); child pins deepen
@@ -20,6 +21,7 @@ the branch tree and can only be garbage-collected leaf-first.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,6 +40,24 @@ from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
 _DEFAULT_API = "https://console.neon.tech/api/v2"
 _WORKING_PREFIX = ref_for_pin("ws.")  # "tether.ws."
+
+# Locked (another operation on the project is running), throttled, briefly
+# unavailable: Neon applied nothing, so the request is safe to send again.
+_RETRY_STATUSES = frozenset({423, 429, 503})
+_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
+
+# How far below `nextXid` the probe looks for the newest committed xid. A
+# compute restart rounds `nextXid` up (to a multiple of 1024, 128 on newer
+# pageservers), so this spans many restarts with no write in between.
+_XID_WINDOW = 65536
+
+_PROBE_SQL = f"""
+SELECT pg_current_wal_flush_lsn()::text,
+       (SELECT max(x) FROM generate_series(greatest(n - {_XID_WINDOW}, 3), n - 1) x
+         WHERE pg_xact_status(x::text::xid8) = 'committed')::text,
+       n::text
+FROM (SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint AS n) s
+"""
 
 
 class _NeonApi:
@@ -73,21 +93,31 @@ class _NeonApi:
             kind="neon",
         )
 
+    def _send(self, method: str, path: str, **kwargs: Any) -> Any:
+        """One request, retried with backoff while Neon answers 423/429/503."""
+        for delay in (*_RETRY_DELAYS, None):
+            resp = self._client.request(method, path, **kwargs)
+            if resp.status_code not in _RETRY_STATUSES or delay is None:
+                return resp
+            after = resp.headers.get("Retry-After", "")
+            time.sleep(min(float(after), 60.0) if after.isdigit() else delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def get(self, path: str, **params: Any) -> dict:
-        resp = self._client.get(path, params={k: v for k, v in params.items() if v})
-        return self._ok(resp).json()
+        params = {k: v for k, v in params.items() if v}
+        return self._ok(self._send("GET", path, params=params)).json()
 
     def post(self, path: str, body: dict) -> dict:
         self.generation += 1
-        return self._ok(self._client.post(path, json=body)).json()
+        return self._ok(self._send("POST", path, json=body)).json()
 
     def delete(self, path: str) -> None:
         self.generation += 1
-        self._ok(self._client.delete(path), allow=(404,))
+        self._ok(self._send("DELETE", path), allow=(404,))
 
     def patch(self, path: str, body: dict) -> dict:
         self.generation += 1
-        return self._ok(self._client.patch(path, json=body)).json()
+        return self._ok(self._send("PATCH", path, json=body)).json()
 
 
 @wrap_library_errors
@@ -96,7 +126,7 @@ class NeonBackend(ObjectBackend):
     MATURITY = "experimental"
     SAFE_CONFIG_KEYS = frozenset()  # api_url / api_key_env: secrets.toml only
     # The LSN advances on checkpoints and autovacuum with no user write; it is
-    # where a pin branch is cut, not what identifies the data. `next_xid` is.
+    # where a pin branch is cut, not what identifies the data. `commit_xid` is.
     # `timeline` is the branch the state was read from -- needed to pin, fork,
     # and open (an LSN is only meaningful on its own timeline) but not part of
     # the content: an untouched fork reports its parent's `branch`, as a Lance
@@ -157,6 +187,16 @@ class NeonBackend(ObjectBackend):
             raise BackendError("neon locator needs 'project_id'", kind="neon")
         return str(pid)
 
+    def validate_locator(self, locator: Locator) -> None:
+        # The API builds no connection URI without a database and a role.
+        missing = [k for k in ("project_id", "database", "role") if not locator.get(k)]
+        if missing:
+            raise BackendError(
+                f"neon locator needs {', '.join(repr(k) for k in missing)} "
+                "(`--project-id`, `--database`, `--role`)",
+                kind="neon",
+            )
+
     def _source_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
 
@@ -204,28 +244,40 @@ class NeonBackend(ObjectBackend):
         eps = self._api.get(f"/projects/{project_id}/endpoints").get("endpoints", [])
         return [e for e in eps if e.get("branch_id") == branch_id]
 
-    def _connection_uri(self, project_id: str, branch_id: str, locator: Locator) -> str:
+    def _connection_uri(
+        self, project_id: str, branch_id: str, endpoint_id: str, locator: Locator
+    ) -> str:
+        # Without `endpoint_id` Neon answers with the branch's read-write
+        # compute, which pins never have and forks lack until first use.
         data = self._api.get(
             f"/projects/{project_id}/connection_uri",
             branch_id=branch_id,
+            endpoint_id=endpoint_id,
             database_name=locator.get("database"),
             role_name=locator.get("role"),
         )
         return str(data["uri"])
 
+    def _branch_uri(self, project_id: str, branch_id: str, locator: Locator) -> str:
+        endpoint = self._ensure_endpoint(project_id, branch_id, "read_write")
+        return self._connection_uri(project_id, branch_id, endpoint, locator)
+
     # Overridable seam: the live SQL probe (monkeypatched in tests).
     def _probe(self, conn_uri: str) -> tuple[str, str]:
+        """`(lsn, commit_xid)`: the WAL position and the newest committed xid.
+
+        With no commit in the window below `nextXid`, `commit_xid` is
+        `<nextXid`, which a later commit can never equal.
+        """
         import psycopg
 
         with psycopg.connect(conn_uri) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT pg_current_wal_flush_lsn()::text, "
-                "pg_snapshot_xmax(pg_current_snapshot())::text"
-            )
+            cur.execute(_PROBE_SQL)
             row = cur.fetchone()
             if row is None:  # pragma: no cover - defensive
                 raise BackendError("empty LSN probe result", kind="neon")
-            return str(row[0]), str(row[1])
+            lsn, committed, next_xid = row
+            return str(lsn), str(committed) if committed else f"<{next_xid}"
 
     def _active_writers(self, conn_uri: str) -> int:
         import psycopg
@@ -262,9 +314,9 @@ class NeonBackend(ObjectBackend):
         return f"neon:{self._project(locator)}"
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
-        """`{lsn, next_xid, branch[, timeline]}` for the branch read.
+        """`{lsn, commit_xid, branch[, timeline]}` for the branch read.
 
-        Content is `{next_xid, branch}` where `branch` is the *lineage* (the
+        Content is `{commit_xid, branch}` where `branch` is the *lineage* (the
         object's source branch when the branch read descends from it) and
         `lsn`/`timeline` are volatile address keys. Two sibling branches of
         the same lineage that have consumed the same number of transactions
@@ -283,15 +335,15 @@ class NeonBackend(ObjectBackend):
         branch = self._require_branch(
             project_id, working_ref or self._source_branch(locator)
         )
-        uri = self._connection_uri(project_id, branch["id"], locator)
-        lsn, next_xid = self._probe(uri)
+        uri = self._branch_uri(project_id, branch["id"], locator)
+        lsn, commit_xid = self._probe(uri)
         # `branch` is the lineage -- the object's source branch when this one
         # descends from it -- so that a fork with no writes has the same
         # content state as the pin it was cut from; `timeline` is the branch
         # actually read, which pin/fork/open hang off.
         source = self._source_branch(locator)
         lineage = self._lineage(project_id, branch, source)
-        state: State = {"lsn": lsn, "next_xid": next_xid, "branch": lineage}
+        state: State = {"lsn": lsn, "commit_xid": commit_xid, "branch": lineage}
         if str(branch["name"]) != lineage:
             state["timeline"] = str(branch["name"])
         return state
@@ -321,7 +373,7 @@ class NeonBackend(ObjectBackend):
         branch = self._require_branch(
             project_id, working_ref or self._source_branch(locator)
         )
-        uri = self._connection_uri(project_id, branch["id"], locator)
+        uri = self._branch_uri(project_id, branch["id"], locator)
         if self._active_writers(uri) > 0:
             raise BackendError(
                 "active writers detected; commit with --force to override",
@@ -553,14 +605,16 @@ class NeonBackend(ObjectBackend):
         "data with pg_dump/psql"
     )
 
-    def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> None:
+    def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> str:
+        """The id of the branch's `ep_type` endpoint, created if it has none."""
         for ep in self._endpoints_for(project_id, branch_id):
             if ep.get("type") == ep_type:
-                return
-        self._api.post(
+                return str(ep["id"])
+        created = self._api.post(
             f"/projects/{project_id}/endpoints",
             {"endpoint": {"branch_id": branch_id, "type": ep_type}},
         )
+        return str(created["endpoint"]["id"])
 
     def open(
         self,
@@ -572,16 +626,16 @@ class NeonBackend(ObjectBackend):
         project_id = self._project(locator)
         if isinstance(target, Pin):
             br = self._require_branch(project_id, target.ref)
-            self._ensure_endpoint(project_id, br["id"], "read_only")
-            uri = self._connection_uri(project_id, br["id"], locator)
+            ep = self._ensure_endpoint(project_id, br["id"], "read_only")
+            uri = self._connection_uri(project_id, br["id"], ep, locator)
             return NeonHandle(
                 key=target.ref, read_only=True, url=uri, branch=target.ref
             )
         if isinstance(target, dict):
             # Time-travel read on the state's branch within the history window.
             br = self._require_branch(project_id, self._timeline(target))
-            self._ensure_endpoint(project_id, br["id"], "read_only")
-            uri = self._connection_uri(project_id, br["id"], locator)
+            ep = self._ensure_endpoint(project_id, br["id"], "read_only")
+            uri = self._connection_uri(project_id, br["id"], ep, locator)
             sep = "&" if "?" in uri else "?"
             uri = f"{uri}{sep}options=neon_lsn:{target['lsn']}"
             return NeonHandle(
@@ -589,9 +643,7 @@ class NeonBackend(ObjectBackend):
             )
         name = target or self._source_branch(locator)
         br = self._require_branch(project_id, name)
-        if not read_only:
-            self._ensure_endpoint(project_id, br["id"], "read_write")
-        uri = self._connection_uri(project_id, br["id"], locator)
+        uri = self._branch_uri(project_id, br["id"], locator)
         return NeonHandle(key=name, read_only=read_only, url=uri, branch=str(name))
 
 

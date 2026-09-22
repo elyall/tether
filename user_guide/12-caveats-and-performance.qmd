@@ -122,19 +122,26 @@ pins), `gc` only drops leaf pins, and `new` onto a *different* pin forks a
 sibling rather than resetting a branch with children (`commit` then `new`
 reuses the branch, since it already sits at the pin). Neon cannot merge or
 promote a child into `main`; run production writes on the trunk bookmark,
-where the working ref is `main` itself. `protected` needs a paid plan; branch
-quotas vary.
+where the working ref is `main` itself. `protected` needs a paid plan.
+
+**A branch per commit.** Every pin is a branch, so each commit that changes a
+Neon object adds one to the project. Neon plans cap branches per project (10
+on the free plan) or bill the ones past the allowance per branch-month; `gc`
+releases pins no commit references, and `--pin record` takes none at all.
 
 **Fingerprint cost.** The LSN moves without user writes, so it is a volatile
-(address-only) key: only `next_xid` and the lineage count as change. A
-snapshot may still wake a suspended compute; a plain `status` does not
-fingerprint (`--snapshot`, `commit`, and `verify` do).
+(address-only) key: only `commit_xid`, the newest committed transaction id,
+and the lineage count as change. A compute that restarts skips transaction
+ids nobody used; those never commit, so they are not a change. A snapshot may
+still wake a suspended compute, and on a branch with no compute yet it
+creates the read-write endpoint; a plain `status` does not fingerprint
+(`--snapshot`, `commit`, and `verify` do).
 
-**Content is `{next_xid, lineage}`.** `branch` in a Neon state is the
+**Content is `{commit_xid, lineage}`.** `branch` in a Neon state is the
 *lineage* -- the object's source branch when the branch read descends from it
 -- so that a fork with no writes compares equal to the pin it was cut from.
-The price: two sibling branches of the same lineage that have consumed the
-same number of transactions compare equal too. Neon exposes no content hash
+The price: two sibling branches of the same lineage whose newest commits share
+a transaction id compare equal too. Neon exposes no content hash
 and no history query to tell them apart, which is why the backend is
 `BRANCH_IS_STORAGE`: `gc` never judges a Neon branch by its state alone, and
 `promote` is not offered.

@@ -52,7 +52,7 @@ committed 8d5719841a09
 | Object | State recorded | Pin created |
 | --- | --- | --- |
 | `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.0a1b2c3d.6674305d5e1fe5f6` (immutable, excluded from expiry) |
-| `db/metrics` | `lsn`, `next_xid` of `main` | protected Neon child branch `tether.0a1b2c3d.a91f0e2b77c3e5f6` at that LSN |
+| `db/metrics` | `lsn`, `commit_xid` of `main` | protected Neon child branch `tether.0a1b2c3d.a91f0e2b77c3e5f6` at that LSN |
 | `raw/plate1` | `count`, `size`, `digest` | none; the per-file listing is stored under `.tether/listings/` |
 
 Then the manifests (and the listing) were committed to your repository as

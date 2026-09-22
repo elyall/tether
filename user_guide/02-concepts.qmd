@@ -58,7 +58,7 @@ For each object a backend implements three things, in increasing order of what
 the system must support:
 
 - **State**: what the object *is* right now -- an Icechunk `snapshot_id`, a
-  Neon `(lsn, next_xid, branch)`, a Delta `version`, a file's sha256, a
+  Neon `(lsn, commit_xid, branch)`, a Delta `version`, a file's sha256, a
   directory's digest over its files' sha256s. Comparing states is how drift
   is detected without watching anything.
 - **Pin**: a durable, GC-proof native reference to a state -- an Icechunk tag,
