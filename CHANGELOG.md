@@ -20,6 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `dolt`: credentials come only from the server's `[uris."mysql://host:port"]`
   entry in `.tether/secrets.toml` (`password_env` / `user_env` move there);
   `$DOLT_PASSWORD` went to any host a manifest named.
+- Object keys may not contain `\` or a drive letter, and are checked when a
+  manifest is read: on Windows such a key wrote outside `.tether/objects/`.
 
 ### Fixed
 

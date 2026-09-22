@@ -147,6 +147,30 @@ def test_unsafe_keys_are_refused() -> None:
     assert key_to_relpath("with space") == Path("objects/with space.toml")
 
 
+def test_windows_path_syntax_in_keys_is_refused(tmp_path: Path) -> None:
+    """Joined on Windows, `..\\..\\evil` climbs out of `objects/` and a
+    segment like `C:evil` replaces the whole path with a drive's. A cloned
+    manifest is read, never added, so `read_objects` checks its key too."""
+    import pytest
+
+    from tether.errors import ConfigError
+    from tether.manifest import read_objects
+
+    for bad in ("..\\..\\evil", "a\\b", "C:\\evil", "C:evil", "a/c:x", "z:"):
+        with pytest.raises(ConfigError, match="unsafe object key"):
+            key_to_relpath(bad)
+    assert key_to_relpath("db:metrics") == Path("objects/db:metrics.toml")
+
+    objects = tmp_path / ".tether" / "objects"
+    objects.mkdir(parents=True)
+    for i, bad in enumerate(("..\\..\\evil", "../evil", "C:evil")):
+        manifest = ObjectManifest(key=bad, kind="file", locator={"uri": "/a"})
+        (objects / f"x{i}.toml").write_text(manifest.to_toml(), encoding="utf-8")
+        with pytest.raises(ConfigError, match="unsafe object key"):
+            read_objects(tmp_path)
+        (objects / f"x{i}.toml").unlink()
+
+
 def test_manifest_hash_order_independent() -> None:
     m1 = ObjectManifest(key="a", kind="file", locator={"uri": "/a"})
     m2 = ObjectManifest(key="b", kind="file", locator={"uri": "/b"})

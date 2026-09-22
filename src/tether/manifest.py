@@ -610,19 +610,26 @@ def manifest_hash(objects: dict[str, ObjectManifest]) -> str:
     return _blake(*parts, size=32)
 
 
+_DRIVE = re.compile(r"[A-Za-z]:")
+
+
 def validate_key(key: str) -> list[str]:
     """Split an object key into path segments, refusing anything that would not
     map to one manifest file under ``objects/`` or would escape it.
 
     Raises:
         ConfigError: Empty key, empty segment (``a//b``, trailing ``/``),
-            leading ``/``, a ``.`` or ``..`` segment, or a control character.
+            leading ``/``, a ``.`` or ``..`` segment, a control character, a
+            ``\\``, or a segment starting with a drive (``C:``) -- Windows
+            joins those out of ``objects/``.
     """
-    if not key or key.startswith("/") or key.endswith("/"):
+    if not key or key.startswith("/") or key.endswith("/") or "\\" in key:
         raise ConfigError(f"unsafe object key: {key!r}")
     parts = key.split("/")
-    if any(p in ("", ".", "..") for p in parts) or any(
-        (ch.isspace() and ch != " ") or ord(ch) < 32 for ch in key
+    if (
+        any(p in ("", ".", "..") for p in parts)
+        or any(_DRIVE.match(p) for p in parts)
+        or any((ch.isspace() and ch != " ") or ord(ch) < 32 for ch in key)
     ):
         raise ConfigError(f"unsafe object key: {key!r}")
     return parts
@@ -825,13 +832,19 @@ def write_config(root: Path, config: RepoConfig) -> None:
 
 
 def read_objects(root: Path) -> dict[str, ObjectManifest]:
-    """Load every committed object manifest from the working tree."""
+    """Load every committed object manifest from the working tree.
+
+    Raises:
+        ConfigError: A manifest's key is unsafe (see `validate_key`); a clone
+            brings manifests that never went through `add`.
+    """
     result: dict[str, ObjectManifest] = {}
     base = objects_dir(root)
     if not base.is_dir():
         return result
     for path in sorted(base.rglob("*.toml")):
         manifest = ObjectManifest.from_toml(path.read_text(encoding="utf-8"))
+        validate_key(manifest.key)
         result[manifest.key] = manifest
     return result
 
