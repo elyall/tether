@@ -32,6 +32,7 @@ from tether.errors import (
     CapabilityError,
     ConfigError,
     ImmutableObjectModified,
+    MultiObjectError,
     PinDriftError,
     StaleWorkingCopyError,
     TetherError,
@@ -404,7 +405,12 @@ class ObjectOps(RepoCore):
         state the object was first registered at."""
         return {k: v for k, v in m.locator.items() if k != "at"}
 
-    def snapshot(self, *, upstream: bool = True) -> dict[str, State]:
+    def snapshot(
+        self,
+        *,
+        upstream: bool = True,
+        failures: dict[str, Exception] | None = None,
+    ) -> dict[str, State]:
         """Fingerprint objects concurrently and cache the result.
 
         Objects with a working ref are read there; the others at their upstream
@@ -417,6 +423,8 @@ class ObjectOps(RepoCore):
         Args:
             upstream: Contact the upstream branch of objects without a working
                 ref.
+            failures: Collect each object whose fingerprint failed here, and
+                leave it out of the result, instead of raising.
 
         Returns:
             Current state per object key.
@@ -424,7 +432,8 @@ class ObjectOps(RepoCore):
         Raises:
             ImmutableObjectModified: An Observed object with `policy.file ==
                 "immutable"` changed since it was committed.
-            MultiObjectError: One or more fingerprints failed.
+            MultiObjectError: One or more fingerprints failed (without
+                `failures`).
         """
         # Under the lock from the first decision to the last write: which refs
         # to read comes from the workspace as it is *now* on disk (the lock
@@ -452,9 +461,13 @@ class ObjectOps(RepoCore):
                     return backend.fingerprint(self._upstream_locator(m), None)
                 return backend.fingerprint(m.locator, ref)
 
-            states: dict[str, State] = self._fanout(fp, keys)
+            states, errors = self._fanout_collect(fp, keys)
+            if errors and failures is None:
+                raise MultiObjectError("fan-out failed", errors)
+            if failures is not None:
+                failures.update(errors)
             for key, m in self.objects.items():
-                if key not in states and m.state is not None:
+                if key not in states and key not in errors and m.state is not None:
                     states[key] = dict(m.state)
             self._enforce_immutability(states)
             # Cache what was actually read. A partial (commit-time) snapshot
@@ -511,7 +524,10 @@ class ObjectOps(RepoCore):
             The report; `objects` are sorted by key.
         """
         fresh = do_snapshot or not self.workspace.last_snapshot
-        states = self.snapshot() if fresh else self.workspace.last_snapshot
+        failures: dict[str, Exception] = {}
+        states = (
+            self.snapshot(failures=failures) if fresh else self.workspace.last_snapshot
+        )
         moving = set(self.moving_keys())
         objects: list[ObjectStatus] = []
         for key in sorted(self.objects):
@@ -546,6 +562,7 @@ class ObjectOps(RepoCore):
                     origin=m.origin,
                     current_state=current,
                     verify=report,
+                    error=str(failures[key]) if key in failures else None,
                 )
             )
         stale = self.stale_keys()

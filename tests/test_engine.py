@@ -1732,6 +1732,33 @@ def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> 
     assert entries["db"].a_pin is not None and entries["db"].b_pin is not None
 
 
+def test_status_reports_an_unreachable_object_beside_the_rest(vcs_root: Path) -> None:
+    """One store that cannot be read labels its object `error`; it does not
+    abort the report (nor a fresh workspace's first, snapshotting, status)."""
+    repo = Repo.init(vcs_root)
+    _mem_object(repo, "ok")
+    bad = _mem_object(repo, "bad")
+    repo.commit("baseline")
+    default_store().deleted.add(bad)
+    try:
+        for fresh in (True, False):
+            if not fresh:
+                repo.workspace.last_snapshot.clear()  # none yet: it snapshots
+            report = repo.status(do_snapshot=fresh)
+            assert report.fresh
+            by_key = {o.key: o for o in report.objects}
+            assert {k: o.state_label for k, o in by_key.items()} == {
+                "bad": "error",
+                "ok": "clean",
+            }
+            assert by_key["bad"].error and "deleted" in by_key["bad"].error
+            assert by_key["bad"].current_state is None
+        with pytest.raises(MultiObjectError):
+            repo.snapshot()  # what commit relies on: a failed read still raises
+    finally:
+        default_store().deleted.discard(bad)
+
+
 def test_diff_defaults_to_the_last_commit(vcs_root: Path) -> None:
     """Plain `diff` compares the working tree with its parent commit, including
     after jj has snapshotted the working copy into `@`."""

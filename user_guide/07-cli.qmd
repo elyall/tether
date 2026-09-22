@@ -51,8 +51,9 @@ are experimental and print a note saying so.
 ## Exit codes and errors
 
 `0` on success, `1` on any `TetherError` (printed to stderr as `error: ...`).
-`verify` also exits `1` when any report is not `ok`, and `promote` when
-anything was refused, which makes both natural CI gates. `undo`, `repair`,
+`verify` also exits `1` when any report is not `ok`, `status` when any
+object is `error`, and `promote` when anything was refused, which makes them
+natural CI gates. `undo`, `repair`,
 `upgrade`, and `forget-workspace` exit `2` when they did part of the job and
 the store would not allow the rest (each such part is printed as
 `IRREVERSIBLE` / `FAILED`). Failures in one object's backend during a fan-out
@@ -216,7 +217,8 @@ dataset 3f9c2a1b7d0e (STALE: zarr/imaging); on bookmark relabel
 - States: `new` (no commit yet), `modified` (the bookmark's branch for the
   object differs from the commit), `behind` (on the trunk, a branch-less or
   `--at` object whose system moved past its pin -- `pull` takes it), `clean`,
-  `error` (the fingerprint failed).
+  `error` (the fingerprint failed: the other objects are still reported, the
+  reason follows on stderr, and `status` exits `1`).
 - `unrecoverable`: the committed state cannot be reconstructed later
   (Observed).
 - `(created)`: the store was made by `add --create` (`origin = "created"` in
@@ -697,7 +699,7 @@ per-table counts.
 | --- | --- |
 | `init` | `{"root": "<absolute path>", "dataset_id": "<8 hex>"}` |
 | `backends` | `[{"kind", "installed", "maturity", "tier", "capabilities": [names]}]` (an uninstalled extra: `installed` false, the rest null) |
-| `status` | `{"manifest_hash", "stale", "stale_keys", "fresh", "snapshot_at", "bookmark", "trunk", "bookmark_drift": [str], "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "origin", "verify"}]}`; `fresh` is false when the cached snapshot from `snapshot_at` was shown |
+| `status` | `{"manifest_hash", "stale", "stale_keys", "fresh", "snapshot_at", "bookmark", "trunk", "bookmark_drift": [str], "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "origin", "verify", "error": str or null}]}`; `fresh` is false when the cached snapshot from `snapshot_at` was shown |
 | `set` | `{"changed": {key: {field: {"from", "to"}}}, "unchanged": [keys]}` |
 | `pull` | `{"bookmark", "committed": {key: {"from", "to"}}, "unchanged": [keys], "skipped": [keys], "vcs_commit", "pinned": {key: pin_id or null}}` |
 | `snapshot` | `{key: state}` |

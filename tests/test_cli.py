@@ -1006,3 +1006,29 @@ def test_commit_from_plan_with_dry_run_commits_nothing(
     assert r.exit_code == 1 and "cannot be combined" in r.output, r.output
     repo = Repo.find(vcs_root)
     assert repo._vcs_head_or_none() == head and repo.objects["db"].state is None
+
+
+def test_status_labels_an_unreadable_object_and_exits_1(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(vcs_root)
+    repo = Repo.init(vcs_root)
+    systems = {key: f"sys-{uuid.uuid4().hex[:8]}" for key in ("bad", "ok")}
+    for key, system in systems.items():
+        default_store().system(system)
+        repo.add(key, "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    default_store().deleted.add(systems["bad"])
+    try:
+        r = runner.invoke(app, ["status", "--snapshot", "--json"])
+        assert r.exit_code == 1, r.output
+        objects = {o["key"]: o for o in json.loads(r.stdout)["objects"]}
+        assert objects["bad"]["state"] == "error"
+        assert "deleted" in objects["bad"]["error"]
+        assert (objects["ok"]["state"], objects["ok"]["error"]) == ("clean", None)
+        r = runner.invoke(app, ["status", "--snapshot"])
+        assert r.exit_code == 1
+        assert "error  bad" in r.stdout and "clean  ok" in r.stdout
+        assert "bad:" in r.stderr and "deleted" in r.stderr
+    finally:
+        default_store().deleted.discard(systems["bad"])

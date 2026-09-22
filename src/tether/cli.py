@@ -176,6 +176,7 @@ def _status_payload(report: StatusReport) -> dict:
                 "recoverable": o.recoverable,
                 "origin": o.origin,
                 "verify": o.verify.status.value if o.verify else None,
+                "error": o.error,
             }
             for o in report.objects
         ],
@@ -575,16 +576,20 @@ def status(
     snapshot of each object's state, with its age. `--snapshot` fans out and
     fingerprints every object first (one metadata round-trip per system; a
     suspended Neon compute wakes). A workspace with no snapshot yet takes one.
-    Labels: new (never committed), modified, clean, error. `(STALE)` means the
-    committed state changed since this workspace forked; run `tether new`.
+    Labels: new (never committed), modified, clean, error (its store could not
+    be read; exit 1). `(STALE)` means the committed state changed since this
+    workspace forked; run `tether new`.
     """
     repo = _repo()
     try:
         report = repo.status(do_snapshot=_want_snapshot(repo, snapshot))
     except TetherError as exc:
         _fail(exc)
+    failed = [o for o in report.objects if o.error is not None]
     if json_out:
         _emit(_status_payload(report), as_json=True)
+        if failed:
+            raise typer.Exit(1)
         return
     flag = f" (STALE: {', '.join(report.stale_keys)})" if report.stale else ""
     if report.bookmark is None:
@@ -609,6 +614,10 @@ def status(
         typer.echo(
             f"  {o.state_label:>9}  {o.key}  [{o.kind}/{o.tier.value}]{made}{rec}{v}"
         )
+    for o in failed:
+        typer.secho(f"error: {o.key}: {o.error}", fg=typer.colors.RED, err=True)
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command()
