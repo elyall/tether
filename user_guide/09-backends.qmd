@@ -183,7 +183,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `project_id` (required), `branch` (default `main`), `database`, `role` (used for connection URIs) |
-| Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2), `protected_pins` (default `true`; set `false` on the free tier, where protected branches are unavailable) -- `.tether/secrets.toml` only; a committed value is refused |
+| Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2), `protected_pins` (default `false`; `true` creates each pin as a protected branch, which Neon refuses to delete -- Free has none and paid plans allow a few, and every commit that pins makes one) -- `.tether/secrets.toml` only; a committed value is refused |
 | Identity | `{project_id, branch}` -- a Neon branch at an LSN is a snapshot of the whole project, so `database` and `role` are how you connect, not what you pin: neither changes pin ids, and two objects on two databases of one project share one pin per commit and (via `branch_scope`) one working branch per bookmark |
 | State | `lsn`, `next_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `next_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to |
 | Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |

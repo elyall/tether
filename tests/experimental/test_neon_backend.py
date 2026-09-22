@@ -191,7 +191,7 @@ def test_pin_fork_verify_unpin(backend: NeonBackend) -> None:
         assert "abc123def456" in backend.list_pins(LOCATOR)
         assert backend.verify(LOCATOR, state, pin, deep=False).ok
         pin_br = next(b for b in fake.branches.values() if b["name"] == pin.ref)
-        assert pin_br["parent_id"] == "br-main" and pin_br["protected"] is True
+        assert pin_br["parent_id"] == "br-main" and pin_br["protected"] is False
 
         # Fork a working branch and open it writable (creates an endpoint).
         wref = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.db")
@@ -270,18 +270,23 @@ def test_pins_hang_off_the_branch_the_state_came_from(
         assert "neon_lsn:0/2000000" in ro.url
 
 
-def test_neon_free_tier_pins_are_unprotected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_neon_protects_pins_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every pin is a branch. Neon's Free plan has no protected branches and
+    paid plans allow a handful, so protected pins failed on the first commit,
+    or the third or sixth: unprotected is the default, `protected_pins = true`
+    the opt-in."""
     monkeypatch.setenv("NEON_API_KEY", "secret")
-    b = NeonBackend({"api_url": BASE, "protected_pins": False})
-    monkeypatch.setattr(b, "_probe", lambda uri: ("0/16B3748", "742"))
     fake = FakeNeon()
     with respx.mock as router:
         fake.install(router)
-        pin = b.pin(LOCATOR, b.fingerprint(LOCATOR, None), "abc123def456")
-        br = next(x for x in fake.branches.values() if x["name"] == pin.ref)
-        assert br["protected"] is False
-        b.unpin(LOCATOR, pin)  # no unprotect call needed
-        assert pin.ref not in {x["name"] for x in fake.branches.values()}
+        for config, protected in (({}, False), ({"protected_pins": True}, True)):
+            b = NeonBackend({"api_url": BASE, **config})
+            monkeypatch.setattr(b, "_probe", lambda uri: ("0/16B3748", "742"))
+            pin = b.pin(LOCATOR, b.fingerprint(LOCATOR, None), "abc123def456")
+            br = next(x for x in fake.branches.values() if x["name"] == pin.ref)
+            assert br["protected"] is protected
+            b.unpin(LOCATOR, pin)  # a protected pin is unprotected first
+            assert pin.ref not in {x["name"] for x in fake.branches.values()}
 
 
 def test_neon_handle_keeps_the_password_out_of_repr() -> None:

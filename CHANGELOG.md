@@ -23,6 +23,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Object keys may not contain `\` or a drive letter, and are checked when a
   manifest is read: on Windows such a key wrote outside `.tether/objects/`.
 
+### Changed
+
+- `neon`: pins are unprotected unless `protected_pins = true`; Free has no
+  protected branches, and paid plans allow a few.
+
 ### Fixed
 
 - A saved `drop` plan applies only in the checkout that made it (0.1.0b3

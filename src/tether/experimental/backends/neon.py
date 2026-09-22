@@ -7,7 +7,7 @@ Model:
   pin; ``next_xid`` (``pg_snapshot_xmax``) only advances when a writing
   transaction ran, so it is the reliable "changed" signal (LSN drifts on
   checkpoints/autovacuum without user writes).
-- **pin**: a *protected* child branch ``tether.<pin_id>`` created at
+- **pin**: a child branch ``tether.<pin_id>`` (protected on request) created at
   ``parent_lsn=<lsn>`` with no compute endpoint -- durable and free to keep.
 - **fork**: a child branch off the pin; a ``read_write`` endpoint is created on
   first :meth:`open`.
@@ -360,11 +360,11 @@ class NeonBackend(ObjectBackend):
         return Pin(id=pin_id, ref=ref, created=existing is None)
 
     def _protect_pins(self) -> bool:
-        """Pins are created *protected* (Neon refuses to delete a protected
-        branch, so a stray console click cannot lose one). Protected branches
-        are a paid feature: `[backends.neon] protected_pins = false` in
-        secrets.toml turns it off for the free tier."""
-        return bool(self._config.get("protected_pins", True))
+        """`[backends.neon] protected_pins = true` in secrets.toml creates
+        pins *protected* (Neon refuses to delete a protected branch, so a
+        stray console click cannot lose one). Off by default: every pin is a
+        branch, Free has no protected branches, and paid plans allow a few."""
+        return bool(self._config.get("protected_pins", False))
 
     def unpin(self, locator: Locator, pin: Pin) -> None:
         self._fresh()
