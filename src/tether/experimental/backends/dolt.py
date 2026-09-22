@@ -219,21 +219,30 @@ class SqlDoltClient:
         with self._connect(**self._kwargs) as conn:
             cur = conn.cursor()
             cur.execute("CALL DOLT_CHECKOUT(%s)", (base,))
-            if ff_only:
-                cur.execute("CALL DOLT_MERGE('--ff-only', %s)", (source,))
-            else:
-                cur.execute("CALL DOLT_MERGE(%s, '-m', %s)", (source, message))
-            row = cur.fetchone()
-            names = [d[0] for d in cur.description or ()]
-            result: dict[str, Any] = dict(zip(names, row or (), strict=False))
-            conflicts = int(result.get("conflicts") or 0)
-            tables: list[str] = []
-            if conflicts:
-                cur.execute("SELECT `table` FROM dolt_conflicts")
-                tables = [str(r[0]) for r in cur.fetchall()]
-                cur.execute("CALL DOLT_MERGE('--abort')")
-            conn.commit()
-            result["conflict_tables"] = tables
+            # Under autocommit Dolt rolls a conflicting merge back and raises;
+            # only inside a transaction does it report what conflicted.
+            conn.begin()
+            try:
+                if ff_only:
+                    cur.execute("CALL DOLT_MERGE('--ff-only', %s)", (source,))
+                else:
+                    cur.execute("CALL DOLT_MERGE(%s, '-m', %s)", (source, message))
+                row = cur.fetchone()
+                names = [d[0] for d in cur.description or ()]
+                result: dict[str, Any] = dict(zip(names, row or (), strict=False))
+                tables: list[str] = []
+                if int(result.get("conflicts") or 0):
+                    for table in ("dolt_conflicts", "dolt_constraint_violations"):
+                        cur.execute(f"SELECT `table` FROM {table}")
+                        tables += [str(r[0]) for r in cur.fetchall()]
+                    cur.execute("CALL DOLT_MERGE('--abort')")
+                    conn.rollback()
+                else:
+                    conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            result["conflict_tables"] = sorted(set(tables))
             return result
 
 

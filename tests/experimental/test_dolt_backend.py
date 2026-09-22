@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from tether.backends.base import Capability, ObjectBackend, VerifyStatus
-from tether.errors import BackendError
+from tether.errors import BackendError, MergeConflict
 from tether.experimental.backends.dolt import DoltBackend, SqlDoltClient
 from tether.handles import DoltHandle
 from tether.manifest import Locator, compute_pin_id, ref_for_pin
@@ -467,6 +467,89 @@ def test_sql_client_statements() -> None:
             "schema_change": 0,
         }
     ]
+
+
+class _MergeSession:
+    """A connection with Dolt's merge semantics: under autocommit a merge that
+    hits conflicts or constraint violations is rolled back and raises; inside
+    a transaction it reports them for the caller to inspect and abort."""
+
+    def __init__(self, log: list, conflicts: list[str], violations: list[str]) -> None:
+        self.log = log
+        self.conflicts, self.violations = conflicts, violations
+        self.in_txn = False
+        self.description: list[tuple] | None = None
+        self._rows: list[tuple] = []
+
+    def __enter__(self) -> _MergeSession:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.log.append("CLOSE")
+
+    def cursor(self) -> _MergeSession:
+        return self
+
+    def begin(self) -> None:
+        self.in_txn = True
+        self.log.append("BEGIN")
+
+    def commit(self) -> None:
+        self.in_txn = False
+        self.log.append("COMMIT")
+
+    def rollback(self) -> None:
+        self.in_txn = False
+        self.log.append("ROLLBACK")
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self.log.append(sql)
+        self.description, self._rows = None, []
+        if sql.startswith("CALL DOLT_MERGE(%s"):
+            hit = bool(self.conflicts or self.violations)
+            if hit and not self.in_txn:
+                raise RuntimeError("Merge conflict detected, @autocommit rolled back")
+            self._result(
+                ["hash", "fast_forward", "conflicts", "message"],
+                [("" if hit else "c0ffee", 0, int(hit), "merge")],
+            )
+        elif "dolt_conflicts" in sql:
+            self._result(["table"], [(t,) for t in self.conflicts])
+        elif "dolt_constraint_violations" in sql:
+            self._result(["table"], [(t,) for t in self.violations])
+
+    def _result(self, columns: list[str], rows: list[tuple]) -> None:
+        self.description = [(c,) for c in columns]
+        self._rows = rows
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+
+def test_sql_merge_reports_conflicts_from_a_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list = []
+    conflicted = SqlDoltClient(lambda **kw: _MergeSession(log, ["t"], ["u"]))
+    result = conflicted.merge("main", "feat", "m", ff_only=False)
+    assert result["conflicts"] == 1 and result["conflict_tables"] == ["t", "u"]
+    assert "COMMIT" not in log and "CALL DOLT_MERGE('--abort')" in log
+    assert log.index("BEGIN") < log.index("CALL DOLT_MERGE(%s, '-m', %s)")
+    assert log[-2:] == ["ROLLBACK", "CLOSE"]
+
+    b = DoltBackend()
+    monkeypatch.setattr(b, "_client", lambda locator: conflicted)
+    with pytest.raises(MergeConflict) as exc:
+        b.merge({"host": "h", "database": "d"}, "feat", "m")
+    assert exc.value.conflicts == ["t", "u"]
+
+    log.clear()
+    clean = SqlDoltClient(lambda **kw: _MergeSession(log, [], []))
+    assert clean.merge("main", "feat", "m", ff_only=False)["hash"] == "c0ffee"
+    assert log[-2:] == ["COMMIT", "CLOSE"] and "ROLLBACK" not in log
 
 
 def _login(client: object) -> dict:

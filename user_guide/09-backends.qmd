@@ -278,6 +278,7 @@ MySQL catalog with an object-store `data_path`.
 | State | `commit` (branch head hash), plus `dirty = true` when `dolt_branches.dirty` reports uncommitted working-set changes (refused at pin time) |
 | Pin | `CALL DOLT_TAG('tether.<id>', commit)` |
 | Fork | `CALL DOLT_BRANCH(name, tag)` (recreated with `-D` if it exists at another commit) |
+| Promote / merge | `DOLT_MERGE` (`--ff-only` to promote) inside an explicit transaction: under autocommit Dolt rolls a conflicting merge back with an error, so only a transaction can report which tables conflict or violate a constraint. Those come back as `MergeConflict`, and the merge is aborted and rolled back |
 | Handle | `DoltHandle(url, database, ref, commit)`: a revision-database URL `mysql://user@host:port/db/<branch|tag|hash>` (tags and hashes are read-only in Dolt); `database_ref` is `db/ref` for `USE` |
 | Diff | `tables`: `dolt_diff_summary` (added/dropped/modified/renamed tables, schema changes) with `dolt_diff_stat` row counts |
 | Notes | talks to `dolt sql-server` / Hosted Dolt via PyMySQL; the SQL surface sits behind the `DoltClient` protocol (`tether.backends.dolt`) so other transports can be substituted. |
