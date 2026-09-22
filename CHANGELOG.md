@@ -32,6 +32,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plan saved in a fresh clone or worktree applies there.
 - `drop` closes its journal entry when the store half fails; it stayed
   `started`, with nothing a re-run could finish.
+- An operation-log entry appended after a torn line is no longer lost with it.
 
 ## [0.1.0b3] - 2026-09-18
 

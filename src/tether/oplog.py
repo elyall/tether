@@ -453,15 +453,12 @@ def remove_touched(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) 
 
 
 def _append_line(root: Path, obj: dict[str, Any]) -> None:
-    """Append one JSON line and sync it: the log is a journal, and a started
-    entry must survive whatever interrupts the operation after it. Progress
-    records are appended from fan-out threads, hence the lock."""
-    path = ops_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _APPEND_LOCK, path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(obj, default=str) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    """Append one JSON line and sync it, on a fresh line after a torn one
+    (`append_index_entry`): the log is a journal, and a started entry must
+    survive whatever interrupts the operation after it. Progress records are
+    appended from fan-out threads, hence the lock."""
+    with _APPEND_LOCK:
+        append_index_entry(ops_path(root), obj)
 
 
 def mark_progress(root: Path, op_id: str, action: str, **detail: Any) -> None:
