@@ -44,6 +44,8 @@ from tether.backends.base import (
     ObjectDiff,
     VerifyReport,
     VerifyStatus,
+    canonical_uri,
+    local_path,
     register_backend,
     wrap_library_errors,
 )
@@ -63,9 +65,10 @@ def _parse(uri: str) -> tuple[str, str, str]:
     ``scheme`` is ``"local"`` for filesystem paths; otherwise the URL scheme. The
     store root is the URL without its path, so keys are always full object keys.
     """
+    path = local_path(uri)
+    if path is not None:
+        return "local", "", path
     parsed = urlparse(uri)
-    if parsed.scheme in ("", "file"):
-        return "local", "", parsed.path or uri
     if parsed.scheme in _REMOTE_SCHEMES:
         root = f"{parsed.scheme}://{parsed.netloc}"
         return parsed.scheme, root, parsed.path.lstrip("/")
@@ -414,14 +417,14 @@ class FileBackend(ObjectBackend):
 
     # -- store lifecycle (local directories) ----------------------------- #
     def _local_dir(self, locator: Locator, what: str) -> Path:
-        scheme, _root, _key = _parse(self._uri(locator))
+        scheme, _root, path = _parse(self._uri(locator))
         if scheme != "local":
             raise BackendError(
                 f"file {what}: only a local directory can be created or removed by "
                 "tether; a remote prefix is managed by its bucket",
                 kind="file",
             )
-        return Path(self._uri(locator))
+        return Path(path)
 
     def create(self, locator: Locator, *, owner: str) -> State:
         path = self._local_dir(locator, "create")
@@ -467,7 +470,7 @@ class FileBackend(ObjectBackend):
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
-        return {"uri": self._uri(locator)}
+        return {"uri": canonical_uri(self._uri(locator))}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         if locator.get("at"):

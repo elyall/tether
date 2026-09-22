@@ -63,6 +63,59 @@ def test_missing_local_path_is_backend_error(tmp_path: Path) -> None:
         FileBackend().fingerprint({"uri": str(tmp_path / "nope")}, None)
 
 
+def test_local_paths_with_url_characters_are_not_truncated(tmp_path: Path) -> None:
+    """`#` and `?` are ordinary characters in a path; run through a URL parser
+    they cut the path short, and `…/run#1` silently hashed `…/run`."""
+    b = FileBackend()
+    plain = tmp_path / "run"
+    plain.mkdir()
+    (plain / "a.bin").write_bytes(b"plain")
+    for name in ("run#1", "run?x=1"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "a.bin").write_bytes(name.encode())
+        state = b.fingerprint({"uri": str(d)}, None)
+        assert state["count"] == 1
+        assert state["digest"] != b.fingerprint({"uri": str(plain)}, None)["digest"]
+    assert _parse(str(tmp_path / "run#1")) == ("local", "", str(tmp_path / "run#1"))
+
+
+def test_local_uri_spellings_share_one_identity(tmp_path: Path) -> None:
+    """`/p` and `file:///p` are one directory, so they are one object to pin
+    ids, listings and `gc`: the identity is the path form."""
+    from tether.backends.base import canonical_uri, local_path
+
+    b = FileBackend()
+    d = tmp_path / "data"
+    d.mkdir()
+    (d / "a.bin").write_bytes(b"1")
+    as_path, as_uri = {"uri": str(d)}, {"uri": f"file://{d}"}
+    assert b.identity(as_path) == b.identity(as_uri) == {"uri": str(d)}
+    assert b.fingerprint(as_path, None) == b.fingerprint(as_uri, None)
+    assert local_path(f"file://{d}") == str(d)
+    assert local_path(f"file://localhost{d}") == str(d)
+    assert local_path("/data/run#1") == "/data/run#1"
+    assert local_path("relative/dir") == "relative/dir"
+    assert local_path("s3://bucket/key") is None
+    assert local_path("file://other-host/share") is None
+    assert canonical_uri("s3://bucket/key") == "s3://bucket/key"
+
+
+def test_create_with_a_file_uri_makes_the_directory_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`create` on `file:///p` used to make a relative `file:` directory."""
+    monkeypatch.chdir(tmp_path)
+    b = FileBackend()
+    target = tmp_path / "made"
+    b.create({"uri": f"file://{target}"}, owner="0123abcd")
+    assert target.is_dir() and b.owner({"uri": str(target)}) == "0123abcd"
+    assert not (tmp_path / "file:").exists()
+    assert b.is_ref_empty({"uri": f"file://{target}"}) is True
+    b.delete_store({"uri": f"file://{target}"})
+    assert not target.exists()
+
+
 def test_directory_listing_and_diff(tmp_path: Path) -> None:
     b = FileBackend()
     d = tmp_path / "data"

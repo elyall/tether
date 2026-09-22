@@ -31,6 +31,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    canonical_uri,
     iso_utc,
     register_backend,
     wrap_library_errors,
@@ -127,7 +128,7 @@ class DeltaBackend(ObjectBackend):
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
-        return {"uri": self._uri(locator)}
+        return {"uri": canonical_uri(self._uri(locator))}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         # The file list is not needed to read the version; skip loading it.

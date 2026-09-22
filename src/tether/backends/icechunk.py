@@ -25,7 +25,9 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    canonical_uri,
     iso_utc,
+    local_path,
     register_backend,
     wrap_library_errors,
 )
@@ -81,8 +83,9 @@ class IcechunkBackend(ObjectBackend):
 
     def validate_locator(self, locator: Locator) -> None:
         # Refused at `add`, not at the first read of a clone.
-        scheme = urlparse(self._uri(locator)).scheme
-        if scheme not in self._SCHEMES:
+        uri = self._uri(locator)
+        scheme = urlparse(uri).scheme
+        if local_path(uri) is None and scheme != "s3":
             raise BackendError(
                 f"unsupported icechunk storage scheme: {scheme!r} (one of "
                 f"{', '.join(repr(s) for s in self._SCHEMES)})",
@@ -93,9 +96,10 @@ class IcechunkBackend(ObjectBackend):
         import icechunk as ic
 
         uri = self._uri(locator)
+        path = local_path(uri)
+        if path is not None:
+            return ic.local_filesystem_storage(path)
         parsed = urlparse(uri)
-        if parsed.scheme in ("", "file"):
-            return ic.local_filesystem_storage(parsed.path or uri)
         if parsed.scheme == "s3":
             # One identity per object: a `secrets.toml` entry (profile, role,
             # or literal keys) resolves to explicit credentials; without one
@@ -166,7 +170,7 @@ class IcechunkBackend(ObjectBackend):
 
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
-        return {"uri": self._uri(locator)}
+        return {"uri": canonical_uri(self._uri(locator))}
 
     def fingerprint(self, locator: Locator, working_ref: str | None) -> State:
         repo = self._repo(locator)
@@ -449,16 +453,16 @@ class IcechunkBackend(ObjectBackend):
 
         self._require_lifecycle_api()
         uri = self._uri(locator)
-        parsed = urlparse(uri)
+        path = local_path(uri)
         # "Anything there" is the refusal, not just "a repository there": a
         # directory with files or a prefix with objects is someone's data, and
         # `delete_store` would later take the whole prefix.
-        if parsed.scheme in ("", "file") and Path(parsed.path or uri).exists():
+        if path is not None and Path(path).exists():
             raise BackendError(
-                f"{parsed.path or uri} already exists; `create` never adopts it",
+                f"{path} already exists; `create` never adopts it",
                 kind="icechunk",
             )
-        if parsed.scheme == "s3" and self._prefix_keys(locator):
+        if path is None and urlparse(uri).scheme == "s3" and self._prefix_keys(locator):
             raise BackendError(
                 f"objects already exist under {uri}; `create` never adopts them",
                 kind="icechunk",
@@ -529,6 +533,7 @@ class IcechunkBackend(ObjectBackend):
 
     def delete_store(self, locator: Locator) -> None:
         uri = self._uri(locator)
+        path = local_path(uri)
         parsed = urlparse(uri)
         # The caller checked; check again here, where the delete is.
         if self.owner(locator) is None or self.is_ref_empty(locator) is not True:
@@ -536,8 +541,8 @@ class IcechunkBackend(ObjectBackend):
                 f"{uri} is not an empty repository tether created; not removing it",
                 kind="icechunk",
             )
-        if parsed.scheme in ("", "file"):
-            root = Path(parsed.path or uri)
+        if path is not None:
+            root = Path(path)
             foreign = self._foreign_keys([p.name for p in root.iterdir()])
             if foreign:
                 raise BackendError(

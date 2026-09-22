@@ -46,6 +46,14 @@ def test_lance_conformance(tmp_path: Path) -> None:
     run_conformance(LanceHarness(tmp_path))
 
 
+def test_lance_local_uri_spellings_share_one_identity(tmp_path: Path) -> None:
+    b = LanceBackend()
+    uri = str(tmp_path / "d.lance")
+    assert b.identity({"uri": f"file://{uri}"}) == b.identity({"uri": uri})
+    assert b.identity({"uri": uri}) == {"uri": uri}
+    assert b.identity({"uri": "s3://bucket/d.lance"}) == {"uri": "s3://bucket/d.lance"}
+
+
 def test_lance_fork_lifecycle(tmp_path: Path) -> None:
     b = LanceBackend()
     uri = str(tmp_path / "d.lance")

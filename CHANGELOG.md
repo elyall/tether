@@ -25,10 +25,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `file`, `icechunk`, `lance`, `delta`: `/p` and `file:///p` are one store to
+  pin ids, listings and `gc`; spelled both ways, each spelling released the
+  other's pins. No migration: pin ids of objects registered with a `file://`
+  spelling change, as the Neon identity change did.
+
 - `neon`: pins are unprotected unless `protected_pins = true`; Free has no
   protected branches, and paid plans allow a few.
 
 ### Fixed
+
+- `file`: a local path holding `#` or `?` was cut short at that character, and
+  `add --create` on a `file://` URI made a stray `file:` directory.
 
 - A saved `drop` plan applies only in the checkout that made it (0.1.0b3
   plans included), and only while that checkout, as the VCS sees it, is

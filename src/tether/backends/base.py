@@ -894,6 +894,37 @@ def check_committed_config(
         )
 
 
+def local_path(uri: str) -> str | None:
+    """The filesystem path a locator string names, or `None` for a remote URL.
+
+    A bare path comes back as written: `#` and `?` are path characters there,
+    not URL syntax, so it is never run through a URL parser (which cut
+    `/data/run#1` to `/data/run`). `file:///p` and `file://localhost/p` are
+    `/p`. Anything with another scheme -- `s3://`, `ducklake:` -- is not local.
+    """
+    from urllib.parse import urlparse
+
+    if uri.startswith("file:"):
+        rest = uri[len("file:") :]
+        if rest.startswith("//"):
+            host, sep, path = rest[2:].partition("/")
+            if host not in ("", "localhost") or not sep:
+                return None
+            rest = f"/{path}"
+        return rest or None
+    if urlparse(uri).scheme and not Path(uri).is_absolute():
+        return None
+    return uri
+
+
+def canonical_uri(uri: str) -> str:
+    """One spelling per store for identities and ref namespaces: a local path
+    in path form (`file:///p` and `/p` are the same directory, and must be
+    the same object to pin ids and to `gc`), any other URL as written."""
+    path = local_path(uri)
+    return uri if path is None else path
+
+
 def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> Locator:
     """Resolve relative local paths in `locator` against `base`.
 

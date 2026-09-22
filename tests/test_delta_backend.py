@@ -44,6 +44,14 @@ def test_delta_conformance(tmp_path: Path) -> None:
     run_conformance(DeltaHarness(tmp_path))
 
 
+def test_delta_local_uri_spellings_share_one_identity(tmp_path: Path) -> None:
+    b = DeltaBackend()
+    uri = str(tmp_path / "t")
+    assert (
+        b.identity({"uri": f"file://{uri}"}) == b.identity({"uri": uri}) == {"uri": uri}
+    )
+
+
 def test_delta_versions_are_addressable(tmp_path: Path) -> None:
     b = DeltaBackend()
     uri = str(tmp_path / "t")

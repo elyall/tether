@@ -345,6 +345,29 @@ def test_icechunk_fork_from_older_snapshot(vcs_root: Path) -> None:
         b.fingerprint({"uri": uri, "at": "NOPE"}, None)
 
 
+def test_icechunk_one_store_spelled_two_ways_is_one_namespace_to_gc(
+    vcs_root: Path,
+) -> None:
+    """Two keys on one repository, `/p` and `file:///p`: one identity, so
+    they share a pin and `gc` counts both keys' references against the store.
+    Keyed on the raw string, each spelling released the other's pins."""
+    from tether.repo import Repo
+
+    repo = Repo.init(vcs_root)
+    uri = _new_repo(vcs_root / "imaging.icechunk")
+    repo.add("a", "icechunk", {"uri": uri, "branch": "main"})
+    repo.add("b", "icechunk", {"uri": f"file://{uri}", "branch": "main"})
+    backend = repo.backend_for("icechunk")
+    assert backend.identity({"uri": f"file://{uri}"}) == {"uri": uri}
+    res = repo.commit("baseline")
+    pins = {k: p for k, p in res.pinned.items() if p is not None}
+    assert set(pins) == {"a", "b"} and pins["a"].id == pins["b"].id
+    assert not [x for x in repo.plan_gc().actions if x.op == "unpin"]
+    repo.gc(dry_run=False)
+    assert pins["a"].id in backend.list_pins({"uri": uri})
+    assert all(r.ok for r in repo.verify().values())
+
+
 def test_icechunk_engine_lifecycle(vcs_root: Path) -> None:
     from tether.handles import IcechunkHandle
     from tether.repo import Repo
