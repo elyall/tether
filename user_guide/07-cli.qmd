@@ -85,7 +85,8 @@ the ones you are done with.
 `upgrade`, and `forget-workspace` write to external systems (or rewrite
 history), and each is a plan followed by an apply. `--dry-run` runs only the
 plan and prints it (as JSON with `--json`); `--plan FILE` also saves it;
-`--from-plan FILE` skips planning and applies the saved actions. Before
+`--from-plan FILE` skips planning and applies the saved actions (so it refuses
+`--dry-run` and `--plan` alongside it). Before
 applying, tether re-checks the plan's preconditions -- the manifests, the
 branch heads it will touch, the workspace -- and refuses with
 `StalePlanError` if anything differs from what the plan recorded. `gc` and

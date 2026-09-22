@@ -17,6 +17,7 @@ from tether.cli import (
     _experimental_note,
     _fail,
     _load_plan,
+    _refuse_preview_with_apply,
     _repo,
     _save_plan,
     _show_plan,
@@ -234,6 +235,7 @@ def register(app: typer.Typer) -> None:
             specs_from_rows,
         )
 
+        _refuse_preview_with_apply(dry_run, plan_out, from_plan)
         if not json_out:  # machine consumers get JSON alone
             _experimental_note(_REGISTRY_NOTE)
         repo = _repo()

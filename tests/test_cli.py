@@ -941,3 +941,54 @@ def test_validate_locator_refuses_cheap_mistakes_at_add(vcs_root: Path) -> None:
     with pytest.raises(BackendError, match="ducklake `at` must be"):
         repo.add("l", "ducklake", {"metadata": str(vcs_root / "m.ducklake"), "at": "x"})
     assert repo.objects == {}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["commit"],
+        ["new"],
+        ["repair"],
+        ["restore", "db", "--from", "@"],
+        ["forget-workspace"],
+        ["drop", "probe"],
+        ["upgrade"],
+        ["gc"],
+        ["promote"],
+        ["import", "reg.csv"],
+    ],
+)
+@pytest.mark.parametrize("preview", [["--dry-run"], ["--plan", "out.json"]])
+def test_from_plan_refuses_a_preview_flag(
+    command: list[str],
+    preview: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--from-plan` applies; `--dry-run` and `--plan` preview. Together the
+    apply used to win silently: `commit --from-plan p --dry-run` committed."""
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(app, [*command, "--from-plan", "p.json", *preview])
+    assert r.exit_code == 1, r.output
+    assert "cannot be combined" in r.output
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_commit_from_plan_with_dry_run_commits_nothing(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    r = runner.invoke(
+        app, ["add", "db", "--kind", "memory", "--set", f"system={system}"]
+    )
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["commit", "-m", "v1", "--plan", "p.json"])
+    assert r.exit_code == 0, r.output
+    head = Repo.find(vcs_root)._vcs_head_or_none()
+    r = runner.invoke(app, ["commit", "--from-plan", "p.json", "--dry-run"])
+    assert r.exit_code == 1 and "cannot be combined" in r.output, r.output
+    repo = Repo.find(vcs_root)
+    assert repo._vcs_head_or_none() == head and repo.objects["db"].state is None

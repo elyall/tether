@@ -650,6 +650,18 @@ def _save_plan(plan: Plan, path: Path | None) -> None:
         typer.secho(f"plan written to {path}", err=True)
 
 
+def _refuse_preview_with_apply(
+    dry_run: bool | None, plan_out: Path | None, from_plan: Path | None
+) -> None:
+    if from_plan is not None and (dry_run or plan_out is not None):
+        _fail(
+            TetherError(
+                "--from-plan applies a saved plan; it cannot be combined with "
+                "--dry-run or --plan"
+            )
+        )
+
+
 def _load_plan(path: Path, expected: str) -> Plan:
     try:
         plan = Plan.from_json(path.read_text())
@@ -705,6 +717,7 @@ def commit(
     committed. `--dry-run` / `--plan` preview the actions; `--from-plan` applies
     a saved plan after checking nothing changed underneath it.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
@@ -816,6 +829,7 @@ def new(
     committed is not reset unless `--discard`. `--dry-run` / `--plan` preview;
     `--from-plan` applies a saved plan.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1123,6 +1137,7 @@ def repair(
     point elsewhere are reported, not overwritten. Exit code 2 if something
     could not be rebuilt.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1191,6 +1206,7 @@ def restore(
     as forked from REV. Refused if the branch holds writes you never committed,
     unless `--discard`.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1240,6 +1256,7 @@ def forget_workspace(
     that. Forgetting the current workspace means the next tether command here
     starts a fresh one. Exit code 2 if a step failed.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
@@ -1341,8 +1358,8 @@ def drop(
         help="Delete its branches even when they hold unpinned writes. Data on "
         "them is lost.",
     ),
-    dry_run: bool = typer.Option(
-        True, "--dry-run/--no-dry-run", help="Only show the plan (default)."
+    dry_run: bool | None = typer.Option(
+        None, "--dry-run/--no-dry-run", help="Only show the plan (default)."
     ),
     plan_out: Path | None = typer.Option(
         None, "--plan", help="Write the plan to FILE (implies --dry-run)."
@@ -1365,6 +1382,7 @@ def drop(
     by tether (`jj undo` / the reflog bring the commits back; `repair` the pins
     and branches).
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     if delete_stores and not json_out:
         _experimental_note(
             "reclaiming created stores is experimental: `delete-store` has no "
@@ -1379,7 +1397,7 @@ def drop(
             plan = repo.plan_drop(
                 bookmark, to=to, delete_stores=delete_stores, force_prune=force_prune
             )
-            if dry_run or plan_out is not None:
+            if dry_run is not False or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 if not json_out:
@@ -1453,6 +1471,7 @@ def upgrade(
     before anything else changes (renames already made are skipped on the next
     run); exit code 2 marks a partially applied step.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo(allow_outdated=True)
     try:
         if from_plan is not None:
@@ -1509,8 +1528,8 @@ def upgrade(
 
 @app.command()
 def gc(
-    dry_run: bool = typer.Option(
-        True, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."
+    dry_run: bool | None = typer.Option(
+        None, "--dry-run/--no-dry-run", help="Show the plan (default) or apply it."
     ),
     prune_bookmarks: bool = typer.Option(
         False,
@@ -1569,6 +1588,7 @@ def gc(
     refs remain in them (`delete-store`). Dry-run by default: pass
     `--no-dry-run` (or `--from-plan`) to release.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     if force_prune and not prune_bookmarks:
         _fail(TetherError("--force-prune requires --prune-bookmarks"))
     claimed: list[tuple[str, dict]] = []
@@ -1595,7 +1615,7 @@ def gc(
                 delete_stores=delete_stores,
                 stores=claimed,
             )
-            if dry_run or plan_out is not None:
+            if dry_run is not False or plan_out is not None:
                 _save_plan(plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
@@ -1707,6 +1727,7 @@ def promote(
     (lakeFS, Dolt, git), otherwise refused with the system's own recipe; after
     a merge, `commit` then `promote` again to move the trunk.
     """
+    _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
     try:
         if from_plan is not None:
