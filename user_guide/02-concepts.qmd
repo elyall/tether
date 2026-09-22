@@ -88,7 +88,7 @@ Backends declare capabilities; commands degrade explicitly by tier.
   `verify` and `gc` apply.
 - **Forkable** (`+ FORK`): a writable branch can be created off a pin; `new`
   forks and `open` returns a writable handle. Icechunk, Neon, Iceberg, Lance,
-  lakeFS, Dolt, git/jj.
+  Dolt, git/jj.
 
 Orthogonal flags refine behaviour -- `PROMOTE`, `MERGE`, `DIFF`, `HISTORY`,
 `NEEDS_QUIESCENCE`, `BRANCH_IS_STORAGE`, `RETENTION_BOUND`, `CREATE`, ... --
@@ -99,7 +99,7 @@ and are listed per backend in [Backends](09-backends.qmd) and defined in
 
 tether is never in the data path. `open` returns a typed handle carrying the
 native address -- an Icechunk session on the right branch or tag, a Postgres
-URL, a `DeltaTable` at a version, a `lakefs://repo/ref/prefix/` URI -- and
+URL, a `DeltaTable` at a version, a Dolt revision database -- and
 steps aside. You read and write with the system's own library.
 
 ## Every store write is a plan

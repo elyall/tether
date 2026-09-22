@@ -683,7 +683,6 @@ _BUILTIN_MODULES: dict[str, str] = {
     "iceberg": "tether.experimental.backends.iceberg",
     "delta": "tether.backends.delta",
     "lance": "tether.backends.lance",
-    "lakefs": "tether.experimental.backends.lakefs",
     "ducklake": "tether.experimental.backends.ducklake",
     "dolt": "tether.experimental.backends.dolt",
 }

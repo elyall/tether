@@ -30,7 +30,6 @@ from tether.handles import (
     Handle,
     IcebergHandle,
     IcechunkHandle,
-    LakeFSHandle,
     LanceHandle,
     NeonHandle,
 )
@@ -146,8 +145,6 @@ def _handle_address(handle: Handle, *, with_password: bool = False) -> str:
     if isinstance(handle, LanceHandle):
         ref = handle.tag or f"{handle.branch}@v{handle.version}"
         return f"{handle.uri}#{ref}"
-    if isinstance(handle, LakeFSHandle):
-        return handle.uri
     if isinstance(handle, DuckLakeHandle):
         return f"{handle.metadata}#snapshot={handle.snapshot_id}"
     if isinstance(handle, DoltHandle):
@@ -217,7 +214,7 @@ def add(
         ...,
         "--kind",
         help="Backend kind: file, icechunk, neon, git, iceberg, delta, lance; "
-        "experimental: lakefs, ducklake, dolt.",
+        "experimental: ducklake, dolt.",
     ),
     project_id: str | None = typer.Option(None, "--project-id", help="Neon project."),
     database: str | None = typer.Option(None, "--database", help="Neon/Dolt database."),
@@ -232,8 +229,6 @@ def add(
         None, "--remote", help="git remote to push pins to."
     ),
     region: str | None = typer.Option(None, "--region", help="Object-store region."),
-    repository: str | None = typer.Option(None, "--repository", help="lakeFS repo."),
-    prefix: str | None = typer.Option(None, "--prefix", help="Path scope in a repo."),
     host: str | None = typer.Option(None, "--host", help="Dolt server host."),
     port: int | None = typer.Option(None, "--port", help="Dolt server port."),
     table: str | None = typer.Option(None, "--table", help="DuckLake table scope."),
@@ -291,8 +286,6 @@ def add(
         branch=branch,
         remote=remote,
         region=region,
-        repository=repository,
-        prefix=prefix,
         host=host,
         port=port,
         table=table,
@@ -1758,7 +1751,7 @@ def promote(
     point at it too, and when everything fast-forwarded, sets the trunk
     bookmark to this bookmark's commit. Base unchanged since the fork ->
     fast-forward. Base moved -> native 3-way merge where the system has one
-    (lakeFS, Dolt, git), otherwise refused with the system's own recipe; after
+    (Dolt, git), otherwise refused with the system's own recipe; after
     a merge, `commit` then `promote` again to move the trunk.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)

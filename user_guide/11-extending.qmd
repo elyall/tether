@@ -167,11 +167,11 @@ so make `diff` degrade gracefully (a summary line) when either is `None`.
 ## Experimental and graduation
 
 Backends that have been driven only through fakes of their service (Neon,
-lakeFS, Dolt, DuckLake, Iceberg) and the registry layer (`export`,
+Dolt, DuckLake, Iceberg) and the registry layer (`export`,
 `publish`, `import`) live under `tether.experimental`:
 
 ```
-tether/experimental/backends/{neon,lakefs,dolt,ducklake,iceberg}.py
+tether/experimental/backends/{neon,dolt,ducklake,iceberg}.py
 tether/experimental/registry/{export,registry}.py
 ```
 

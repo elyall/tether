@@ -4,7 +4,7 @@ A handle is a thin, typed carrier for whatever a caller needs to talk to the
 underlying system directly. tether never sits in the data path: it hands back
 the native address (a path/URI, an Icechunk repository + ref, a Neon connection
 URL, a git worktree, an Iceberg table + ref, a Delta table at a version, a Lance
-dataset at a branch/tag, a lakeFS ref URI) and steps out of the way.
+dataset at a branch/tag) and steps out of the way.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ __all__ = [
     "Handle",
     "IcebergHandle",
     "IcechunkHandle",
-    "LakeFSHandle",
     "LanceHandle",
     "MemoryHandle",
     "NeonHandle",
@@ -168,26 +167,6 @@ class LanceHandle(Handle):
     """Branch the dataset is checked out on."""
     tag: str | None = None
     """Tag the dataset was opened at (pinned reads)."""
-
-
-@dataclass
-class LakeFSHandle(Handle):
-    """A lakeFS repository ref, as a ``lakefs://repo/ref/prefix`` URI.
-
-    ``ref`` is a branch (write) or a tag / commit id (read); the URI is what
-    lakefs-spec, the S3 gateway, and ``lakectl`` all accept.
-    """
-
-    uri: str
-    """`lakefs://repo/ref/prefix/`."""
-    repository: str
-    """lakeFS repository id."""
-    ref: str
-    """Branch (writable) or tag / commit id (read-only)."""
-    commit_id: str | None = None
-    """Commit the ref resolved to, when known."""
-    prefix: str = ""
-    """Path prefix the object is scoped to."""
 
 
 @dataclass

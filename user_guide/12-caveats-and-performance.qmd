@@ -12,8 +12,8 @@ cost.
 ### Promotion is per system
 
 `tether promote` fast-forwards a base branch when it is unchanged since the
-fork point, uses the native three-way merge where one exists (git, lakeFS,
-Dolt), and otherwise refuses with the system's recipe: Icechunk and Iceberg
+fork point, uses the native three-way merge where one exists (git, Dolt),
+and otherwise refuses with the system's recipe: Icechunk and Iceberg
 cannot merge, Lance cannot move a branch head, Neon cannot promote a child
 branch. A bookmark is planned whole or not at all, so one refusal holds every
 other system back until you land a subset by name or finish on the trunk.
@@ -175,13 +175,6 @@ the tag (a re-fork picks `name.2`); `gc` reports that branch as a failed
 `delete-branch` rather than a deletion. `--at N` is version `N` of the
 locator's branch.
 
-### lakeFS staging
-
-Uncommitted lakeFS changes are not in any commit; a dirty branch is reported
-in `status` and refused at `commit`. Pins are repository-wide: two objects
-with different prefixes on one branch describe the same commit and share a
-pin.
-
 ### DuckLake attachments
 
 A DuckDB-file metadata catalog can be attached only once per process, so
@@ -217,7 +210,7 @@ not Python.
 ### Fan-out uses threads, not asyncio
 
 Every backend SDK tether wraps (obstore, psycopg, pyiceberg, deltalake, lance,
-lakefs, duckdb, pymysql, `git`) is synchronous, the per-object Python work is
+duckdb, pymysql, `git`) is synchronous, the per-object Python work is
 microseconds, and a thread pool gives the same wall-clock concurrency without
 forcing an async protocol on backend authors. `snapshot`, `verify`, and the
 fork step of `new` all run concurrently.

@@ -20,7 +20,7 @@ you import and the command you run are both `tether`. Python 3.11 or newer.
 
 Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`,
 `azure` are aliases), `icechunk`, `neon`, `iceberg`, `delta`, `lance`,
-`lakefs`, `ducklake`, `dolt`.
+`ducklake`, `dolt`.
 
 ::: {.callout-note title="Before you start"}
 - `git` or `jj` on `PATH`. tether keeps its history in *your* repository, not

@@ -1,8 +1,8 @@
 """Backend protocol, capability tiers, reports, and the registry.
 
 A backend maps tether's operations onto one class of system. Built-in kinds
-(`file`, `icechunk`, `neon`, `git`, `iceberg`, `delta`, `lance`, `lakefs`,
-`ducklake`, `dolt`, `memory`) live in `tether.backends.<kind>` and register
+(`file`, `icechunk`, `neon`, `git`, `iceberg`, `delta`, `lance`, `ducklake`,
+`dolt`, `memory`) live in `tether.backends.<kind>` and register
 themselves on import; `build_backend` imports them lazily so importing this
 package does not pull in optional third-party dependencies. Third-party
 backends implement `ObjectBackend` and call `register_backend`.

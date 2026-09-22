@@ -2,8 +2,8 @@
 
 Everything here is *experimental*: the backends under
 :mod:`tether.experimental.backends` have been driven only through fakes or
-local stand-ins (Neon's control-plane API mocked with respx, lakeFS and Dolt
-through in-memory clients, Iceberg through a fake catalog), the registry
+local stand-ins (Neon's control-plane API mocked with respx, Dolt through an
+in-memory client, Iceberg through a fake catalog), the registry
 layer under :mod:`tether.experimental.registry` (`export`, `publish`, `import`)
 is a young feature whose schema may still change, and the store lifecycle
 under :mod:`tether.experimental.lifecycle` (`add --create`,

@@ -893,7 +893,7 @@ def test_experimental_is_an_import_boundary() -> None:
     ).stdout
     assert "tether.experimental.lifecycle" not in out, out
 
-    assert {"neon", "lakefs", "dolt", "ducklake", "iceberg"} <= set(known_kinds())
+    assert {"neon", "dolt", "ducklake", "iceberg"} <= set(known_kinds())
     assert type(build_backend("neon", {})).__module__ == (
         "tether.experimental.backends.neon"
     )

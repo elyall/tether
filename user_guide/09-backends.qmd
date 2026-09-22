@@ -18,7 +18,6 @@ reports. Credentials are never stored in manifests.
 | [`delta`](#delta-delta-lake-tables) | `delta` | stable | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
 | [`neon`](#neon-neon-postgres) | `neon` | experimental | Forkable | `NEEDS_QUIESCENCE`, `RETENTION_BOUND`, `BRANCH_IS_STORAGE` |
 | [`iceberg`](#iceberg-apache-iceberg-tables) | `iceberg` | experimental | Forkable | `RETENTION_BOUND`, `DIFF`, `HISTORY`, `PROMOTE` |
-| [`lakefs`](#lakefs-lakefs-repositories) | `lakefs` | experimental | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
 | [`ducklake`](#ducklake-ducklake-catalogs) | `ducklake` | experimental | Addressable | `CHEAP_FINGERPRINT`, `RETENTION_BOUND`, `DIFF`, `HISTORY` |
 | [`dolt`](#dolt-dolt-databases) | `dolt` | experimental | Forkable | `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE` |
 | [`memory`](#memory-in-process-reference-backend) | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
@@ -68,7 +67,6 @@ and flags are defined in
 | `iceberg` | snapshot id or ref name | snapshot ancestry with operation and record counts |
 | `delta` | version number | transaction log with operation and metrics |
 | `ducklake` | snapshot id | `ducklake_snapshots` with each snapshot's changes |
-| `lakefs` | commit id or tag | the ref's commit log |
 | `dolt` | commit hash, tag, or branch (`HASHOF`) | `DOLT_LOG(ref)` |
 | `git` | any commit-ish (alias of `ref`) | `git log` with decorations |
 | `neon`, `file` | not supported | -- |
@@ -77,14 +75,13 @@ and flags are defined in
 
 **`PROMOTE` and `MERGE`.** `PROMOTE` means `tether promote` can fast-forward
 the base branch to a fork (Icechunk `reset_branch`, Iceberg
-`set-snapshot-ref`, git `merge --ff-only`, lakeFS / Dolt merges); `MERGE`
-means it can three-way merge a diverged fork (git `merge`, lakeFS
-`merge_into`, `DOLT_MERGE`). Lance cannot move a branch head yet and Neon
+`set-snapshot-ref`, git `merge --ff-only`, Dolt merges); `MERGE`
+means it can three-way merge a diverged fork (git `merge`, `DOLT_MERGE`). Lance cannot move a branch head yet and Neon
 cannot promote a child branch, so both are refused with instructions.
 
 **`--pin record`** removes `PIN` from any backend: the state is recorded
 without a native ref and `new` forks from it directly (Icechunk snapshot id,
-Lance `(branch, version)`, Iceberg snapshot id, lakeFS/Dolt/git commit, Neon
+Lance `(branch, version)`, Iceberg snapshot id, Dolt/git commit, Neon
 LSN on the branch it was read from) for as long as the system still has that
 state.
 
@@ -93,8 +90,8 @@ can make an empty store, mark it as the dataset's, and remove it again once
 `gc` finds nothing but tether's own refs in it (see
 [Stores tether created](05-reclaiming-storage.qmd#stores-tether-created)).
 Lance, Delta, and Iceberg tables need a schema to exist and cannot be created
-empty; Neon, Dolt, DuckLake, and lakeFS objects live inside a project,
-database, or repository tether does not own. For those kinds, make the store
+empty; Neon, Dolt, and DuckLake objects live inside a project,
+database, or catalog tether does not own. For those kinds, make the store
 with its own tools and `add` it.
 
 ## State keys: content and address
@@ -129,7 +126,6 @@ concurrently across objects:
 | `iceberg` | snapshots | snapshot summaries along `b`'s ancestry to `a` | `append: +5 rows, +1 files` |
 | `delta` | commits | transaction-log `history()` in `(a, b]` | `WRITE: +2 rows, +1 files` |
 | `lance` | fragments | fragment ids / deletions / schema at both versions | `added fragment 1 +1 rows` |
-| `lakefs` | objects | server-side `Reference.diff`, scoped to `prefix` | `added raw/c.bin 1 B` |
 | `ducklake` | tables | snapshot `changes` + `ducklake_table_changes` | `modified main.t +5000 rows, -1 rows` |
 | `dolt` | tables | `dolt_diff_summary` + `dolt_diff_stat` | `modified t +6 rows` |
 | `neon` | -- | no native diff | |
@@ -252,22 +248,6 @@ against a catalog service.
 | Handle | `LanceHandle(uri, dataset, version, branch, tag)`; append with `lance.write_dataset(table, handle.dataset, mode="append")` |
 | Diff | `fragments`: fragment ids added/removed, deletion-file changes, columns added/removed, from the two manifests |
 | Notes | an untouched fork reports its parent's `(branch, version)`, so a no-op commit after `tether new` is a no-op. |
-
-## `lakefs`: lakeFS repositories
-
-*Experimental*: tested against a fake of the lakeFS API, not a live
-deployment.
-
-| | |
-| --- | --- |
-| Locator | `repository` (required; `--repository`), `branch` (default `main`), `prefix` (scopes the handle URI and the diff; pins are repository-wide) |
-| Config | keyword arguments for `lakefs.Client` (e.g. `host`) -- `.tether/secrets.toml` only; by default the SDK reads `LAKECTL_*` / `~/.lakectl.yaml` |
-| Identity | `{repository}` -- deliberately not `prefix`: a lakeFS commit is repository-wide, so two objects with different prefixes on the same branch describe the same commit and share one pin (and their forks are separate branches by key regardless) |
-| State | `commit_id` of the branch head, plus `dirty = true` when the staging area has uncommitted changes (refused at pin time) |
-| Pin | tag `tether.<id>` at the commit |
-| Fork | branch `name` from the tag (recreated if it exists at another commit) |
-| Handle | `LakeFSHandle(uri, repository, ref, commit_id, prefix)` with `uri = lakefs://repo/ref/prefix/` (accepted by lakefs-spec, the S3 gateway, `lakectl`) |
-| Diff | `objects`: server-side `Reference.diff` between the commits, scoped to `prefix`, with sizes |
 
 ## `ducklake`: DuckLake catalogs
 

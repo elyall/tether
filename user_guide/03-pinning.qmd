@@ -180,7 +180,7 @@ provenance = {
 `raw/plate1` cannot be opened at a revision: it is Observed, and its state at
 `8d571984` is a digest, not an address. Directories that must be recoverable
 belong in an object store with versioning enabled (single objects with
-`--file versioned`) or in lakeFS.
+`--file versioned`).
 
 ## Drift
 

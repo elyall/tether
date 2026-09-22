@@ -440,8 +440,8 @@ def _promote_checks(h: BackendHarness, loc: Locator) -> None:
     )
     if _same(b, moved, fork_head):
         # A fast-forward: the base *is* the fork's head, so promoting again
-        # has nothing to do. (A system whose promotion is a merge commit --
-        # lakeFS -- is not "already there" in this sense.)
+        # has nothing to do. (A system whose promotion is a merge commit is
+        # not "already there" in this sense.)
         again = b.promote(loc, wref)
         assert _same(b, again, moved), (
             "a second promote is a no-op returning the same state"

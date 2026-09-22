@@ -89,7 +89,7 @@ forms (`::`).
 | --- | --- |
 | `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
 | `PATH`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
-| Backend credentials | Never stored in manifests; each backend reads them from `.tether/secrets.toml` or the environment (`NEON_API_KEY`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...; Dolt only from a per-server secrets entry). See [Backends](09-backends.qmd). |
+| Backend credentials | Never stored in manifests; each backend reads them from `.tether/secrets.toml` or the environment (`NEON_API_KEY`, AWS/GCP/Azure defaults, ...; Dolt only from a per-server secrets entry). See [Backends](09-backends.qmd). |
 | `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, ... | Ignored: tether clears the variables that point git at another repository or add config to it (the ones `git rev-parse --local-env-vars` lists), so running inside a git hook still commits to the repository the dataset is in. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are honoured. |
 
 ## Plans
@@ -177,11 +177,10 @@ backend reads is listed per backend in [Backends](09-backends.qmd).
 | Option | Locator field | Typical backends |
 | --- | --- | --- |
 | `LOCATOR` (positional) | `uri` | file, icechunk, delta, lance, ducklake (`metadata`) |
-| `--branch` | `branch` | icechunk, neon, iceberg, lance, lakefs, dolt: the object's *upstream* (default `main`) -- what the trunk bookmark stands for: the first commit pins it, a trunk `pull` reads it, `promote` lands on it |
+| `--branch` | `branch` | icechunk, neon, iceberg, lance, dolt: the object's *upstream* (default `main`) -- what the trunk bookmark stands for: the first commit pins it, a trunk `pull` reads it, `promote` lands on it |
 | `--project-id`, `--database`, `--role` | same | neon; `--database` also dolt |
 | `--remote` | `remote` | git (push pins to a remote) |
 | `--region` | `region` | file (object stores), icechunk, delta |
-| `--repository`, `--prefix` | same | lakefs |
 | `--host`, `--port` | same | dolt |
 | `--table` | `table` | ducklake (handle scope), iceberg (alias of `identifier`) |
 | `--at ID` / `--pick` | `at` | initial position: snapshot id / version / commit / tag (all but file, neon) that the first commit pins instead of the branch head; `--pick` chooses from `log` interactively |
@@ -314,7 +313,6 @@ discards).
 | `IcebergHandle` | `identifier#<ref or snapshot_id>` |
 | `DeltaHandle` | `uri@vN` |
 | `LanceHandle` | `uri#tag` or `uri#branch@vN` |
-| `LakeFSHandle` | `lakefs://repo/ref/prefix/` |
 | `DuckLakeHandle` | `metadata#snapshot=N` |
 | `DoltHandle` | `mysql://user@host:port/db/ref` |
 

@@ -248,7 +248,7 @@ point** -- the state recorded when the branch was created -- and decides:
 | Upstream since your fork | Backend has | Outcome |
 | --- | --- | --- |
 | unchanged | `PROMOTE` | **fast-forward**: upstream is moved to the branch's head; nothing is rewritten |
-| moved | `MERGE` | **merge**: the system's own three-way merge (lakeFS, Dolt, git); conflicts are reported and nothing is written |
+| moved | `MERGE` | **merge**: the system's own three-way merge (Dolt, git); conflicts are reported and nothing is written |
 | moved | `PROMOTE` only | **refuse**, with the system's recipe (Icechunk and Iceberg have no merge) |
 | anything | neither | **refuse** (Neon, Lance) |
 
@@ -349,7 +349,7 @@ branch-less objects and `--at` positions.
 
 `--at` sets an object's *initial* position: a state that was never pinned --
 an older Icechunk snapshot from before you adopted tether, a Lance version, a
-Dolt or lakeFS commit. `tether log` shows what there is to choose from, with
+Dolt commit. `tether log` shows what there is to choose from, with
 each system's own ids, timestamps, and messages:
 
 ```bash

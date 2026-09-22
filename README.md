@@ -37,7 +37,7 @@ pip install "tether-vcs[all]"                 # everything
 The distribution is `tether-vcs`; the package you import and the command you
 run are both `tether`. Python 3.11 or newer; `git` and/or `jj` on `PATH`.
 Extras: `objectstore` (S3/GCS/Azure for `file`), `icechunk`, `neon`,
-`iceberg`, `delta`, `lance`, `lakefs`, `ducklake`, `dolt`, `postgres`, `all`.
+`iceberg`, `delta`, `lance`, `ducklake`, `dolt`, `postgres`, `all`.
 
 ## Quickstart
 
@@ -126,7 +126,6 @@ Every backend is fingerprinted; the rest depends on what the system offers.
 | [Delta Lake](https://delta.io) tables | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | [Neon](https://neon.com) Postgres databases *(experimental)* | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | [Apache Iceberg](https://iceberg.apache.org) tables *(experimental)* | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| [lakeFS](https://lakefs.io) repositories *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [DuckLake](https://ducklake.select) catalogs *(experimental)* | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | [Dolt](https://www.dolthub.com) databases *(experimental)* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
@@ -180,7 +179,7 @@ Every existing tool versions a single layer:
 | Tool | Scope | Relationship to tether |
 | --- | --- | --- |
 | **DVC** (lakeFS-owned) | files/objects in git | closest structural analog; no pin/fork of live systems |
-| lakeFS, Quilt, Oxen, DataChain | objects / files | analog of our `file` objects; lakeFS is also a backend |
+| lakeFS, Quilt, Oxen, DataChain | objects / files | analog of our `file` objects |
 | Dolt, pgGit, Neon, Databricks Lakebase | one database | vendor-bound; no external-object pins; Dolt and Neon are backends |
 | Nessie, Bauplan | Iceberg catalog branching | Iceberg-only |
 | Icechunk, Lance, Delta, DuckLake | one dataset / table / catalog | we use them as backends |

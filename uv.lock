@@ -8,15 +8,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "aenum"
-version = "3.1.17"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/07/e9/8b283567c1fef7c24d1f390b37daede8b61593d8cdaffb8e95d571699e83/aenum-3.1.17.tar.gz", hash = "sha256:a969a4516b194895de72c875ece355f17c0d272146f7fda346ef74f93cf4d5ba", size = 137648, upload-time = "2026-03-20T20:43:29.846Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/8d/1fe30c6fd8999b9d462547c4a1bb6690bda24af38f2913c4bec7decb81f2/aenum-3.1.17-py3-none-any.whl", hash = "sha256:8b883a37a04e74cc838ac442bdd28c266eae5bbf13e1342c7ef123ed25230139", size = 165560, upload-time = "2026-03-20T20:43:27.681Z" },
-]
-
-[[package]]
 name = "annotated-doc"
 version = "0.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1420,34 +1411,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/21/8b/e739cf9066ad5037a2d4b0a403f06da374fdccb9748221661c8b492d3dbc/jupyterlab_widgets-3.0.17.tar.gz", hash = "sha256:6e61fe21ca8a66039180a5cc52a433e07279d2fee79c8be963e00d55193f17a8", size = 213919, upload-time = "2026-08-18T08:52:17.511Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/33/ef/6d27fc118f58cb24886da413545a7efb0853d405fddbfd8b2d9ac09fbed4/jupyterlab_widgets-3.0.17-py3-none-any.whl", hash = "sha256:40ac1e9955acf116c4d995d9bfa082d86ad9ec6d91c4f134827cf5e0a5eb75e0", size = 217292, upload-time = "2026-08-18T08:52:15.47Z" },
-]
-
-[[package]]
-name = "lakefs"
-version = "0.16.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "lakefs-sdk" },
-    { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/60/5cdf074905ac0bb1fe11570ad56e94f22df651d02b67ab267fbdf46bb561/lakefs-0.16.0.tar.gz", hash = "sha256:f17afa5f8d99a622e7d8088a57c74262ae058befc6a4eba7e4b6cc9704f84748", size = 34340, upload-time = "2026-04-10T16:37:22.478Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/af/15e3bb8b125795c008ff57fa2592130f5f25a0521726e44f3902f8903a60/lakefs-0.16.0-py3-none-any.whl", hash = "sha256:a513bc8b5a64d31b1ed75ce11aee803de84c1e9c11207a042acd874012799b0b", size = 39324, upload-time = "2026-04-10T16:37:21.451Z" },
-]
-
-[[package]]
-name = "lakefs-sdk"
-version = "1.86.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aenum" },
-    { name = "pydantic" },
-    { name = "python-dateutil" },
-    { name = "urllib3" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/35/74b6db0a7b23efa0ba92c39d9a88d0b7a391addf9be4d542f0ac1b77d5da/lakefs_sdk-1.86.0.tar.gz", hash = "sha256:5352e46fd82a3d129d02fdcd4323515b8df982c9e7026330ac191bac81309dd9", size = 128476, upload-time = "2026-08-05T16:13:26.91Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/26/1a/d096877a64b748aaf7b4b74151d838c39db8c92e95d98d790879df45e3b0/lakefs_sdk-1.86.0-py3-none-any.whl", hash = "sha256:bca6b84762c5c9a871c5630058edc3cad6303844bc4467e2eb6bc9454b85b388", size = 225372, upload-time = "2026-08-05T16:13:25.601Z" },
 ]
 
 [[package]]
@@ -3316,7 +3279,6 @@ all = [
     { name = "httpx" },
     { name = "icechunk", version = "1.1.21", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "icechunk", version = "2.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "lakefs" },
     { name = "obstore" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
@@ -3350,9 +3312,6 @@ iceberg = [
 icechunk = [
     { name = "icechunk", version = "1.1.21", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "icechunk", version = "2.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-lakefs = [
-    { name = "lakefs" },
 ]
 lance = [
     { name = "pylance" },
@@ -3398,8 +3357,6 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'neon'", specifier = ">=0.27" },
     { name = "icechunk", marker = "extra == 'all'", specifier = ">=1.0" },
     { name = "icechunk", marker = "extra == 'icechunk'", specifier = ">=1.0" },
-    { name = "lakefs", marker = "extra == 'all'", specifier = ">=0.8" },
-    { name = "lakefs", marker = "extra == 'lakefs'", specifier = ">=0.8" },
     { name = "obstore", marker = "extra == 'all'", specifier = ">=0.11" },
     { name = "obstore", marker = "extra == 'azure'", specifier = ">=0.11" },
     { name = "obstore", marker = "extra == 'gcs'", specifier = ">=0.11" },
@@ -3420,7 +3377,7 @@ requires-dist = [
     { name = "typer", marker = "extra == 'all'", specifier = ">=0.12" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },
 ]
-provides-extras = ["cli", "objectstore", "s3", "gcs", "azure", "icechunk", "neon", "postgres", "iceberg", "delta", "lance", "lakefs", "ducklake", "dolt", "all"]
+provides-extras = ["cli", "objectstore", "s3", "gcs", "azure", "icechunk", "neon", "postgres", "iceberg", "delta", "lance", "ducklake", "dolt", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -183,7 +183,7 @@ skill:
   best_practices:
     - "Set `TETHER_REV` in reproducible jobs so `repo.open(key)` resolves read-only at that commit's pins."
     - "Production databases that must receive writes on `main` (e.g. Neon, which cannot promote a child branch) are written on the trunk bookmark: `tether new main`."
-    - "`tether promote` lands the bookmark: each system's upstream branch fast-forwards to the bookmark's branch when unchanged since the fork point (a moved upstream needs a backend with `MERGE` -- lakeFS, Dolt, git -- or a manual re-apply; Icechunk/Iceberg refuse, Lance/Neon cannot promote at all), and when everything fast-forwarded the trunk bookmark moves to the commit."
+    - "`tether promote` lands the bookmark: each system's upstream branch fast-forwards to the bookmark's branch when unchanged since the fork point (a moved upstream needs a backend with `MERGE` -- Dolt, git -- or a manual re-apply; Icechunk/Iceberg refuse, Lance/Neon cannot promote at all), and when everything fast-forwarded the trunk bookmark moves to the commit."
     - "Run `tether verify --all-history --deep` before `tether gc --no-dry-run`."
     - "Preview store writes with `--dry-run` on every command that makes them (`commit`, `new`, `gc`, `promote`, `restore`, `import`, `repair`, `upgrade`, `forget-workspace`); save with `--plan FILE` and apply with `--from-plan FILE` when a review step is needed."
     - "Retire a losing bookmark with `tether drop NAME` (dry run first): it leaves the bookmark if the checkout is on it, drops the commits only it reaches, deletes it, and releases its pins and branches -- a branch whose head a dropped commit pinned goes without `--force-prune`. `tether forget-workspace` another checkout that is on it first; `drop` refuses while one is."

@@ -153,9 +153,9 @@ with every clone, so nothing in them may choose an executable tether runs, an
 endpoint your credentials are sent to, SQL to execute, or which environment
 variable holds a secret. tether refuses a committed `tether.toml` that tries
 (`[vcs] git_path`, `[import] query`, `[backends.neon] api_url`,
-`[backends.ducklake] init_sql`, any `[backends.lakefs]` client option, a
-`storage_options.endpoint`, ...) and says where the key belongs. What that
-adds up to is the [security model](#security-model) below.
+`[backends.ducklake] init_sql`, a `storage_options.endpoint`, ...) and says
+where the key belongs. What that adds up to is the
+[security model](#security-model) below.
 
 Those settings live in `.tether/secrets.toml` -- untracked, per checkout,
 never committed -- or in the environment:
@@ -339,5 +339,4 @@ each entry holds, and how the journal survives an interrupted command:
 | `NEON_API_KEY` (or `[backends.neon] api_key_env`) | neon |
 | whatever `user_env` / `password_env` name in a `[uris."mysql://host:port"]` entry | dolt |
 | AWS / GCP / Azure credential chains | file (obstore), icechunk, delta, lance |
-| `LAKECTL_*` or `~/.lakectl.yaml` | lakefs |
 | pyiceberg catalog properties / env | iceberg |

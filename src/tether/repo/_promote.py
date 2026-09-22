@@ -260,7 +260,7 @@ class PromoteOps(RepoCore):
 
             # Is the base still behind the source? The store's own history
             # answers exactly where it can (`ancestor_of`: git, icechunk,
-            # lakeFS, Dolt, memory); the recorded fork point is the fallback
+            # Dolt, memory); the recorded fork point is the fallback
             # for backends without a DAG -- a heuristic that lies after a
             # bookmark is joined from elsewhere or reset by hand.
             unchanged: bool | None = backend.ancestor_of(
