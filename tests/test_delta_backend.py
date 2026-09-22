@@ -117,3 +117,36 @@ def test_delta_diff_lists_commits(tmp_path: Path) -> None:
         b.fingerprint(dict(loc, at="v1"), None)
     with pytest.raises(CapabilityError):
         b.fork(loc, Pin(id="abc", ref="tether.abc"), "x")
+
+
+def test_delta_history_and_diff_below_head(tmp_path: Path) -> None:
+    # deltalake's `DeltaTable(version=n).history()` returns the head's commits
+    # numbered from n; every commit here is identifiable by its row count.
+    b = DeltaBackend()
+    uri = str(tmp_path / "t")
+    loc = {"uri": uri}
+    _write(uri, 0, mode="overwrite")
+    for i in range(1, 6):
+        deltalake.write_deltalake(
+            uri, pa.table({"a": list(range(i + 1))}), mode="append"
+        )
+    tid = b.fingerprint(loc, None)["table_id"]
+
+    d = b.diff(loc, {"version": 1, "table_id": tid}, {"version": 3, "table_id": tid})
+    assert [(e.path, e.detail) for e in d.entries] == [
+        ("v2", "WRITE: +3 rows, +1 files"),
+        ("v3", "WRITE: +4 rows, +1 files"),
+    ]
+    back = b.diff(loc, {"version": 3, "table_id": tid}, {"version": 1, "table_id": tid})
+    assert [e.path for e in back.entries] == ["v2", "v3"]
+
+    at2 = b.history(dict(loc, at="2"), None, 3)
+    assert [(e.id, e.message) for e in at2] == [
+        ("2", "WRITE: +3 rows"),
+        ("1", "WRITE: +2 rows"),
+        ("0", "WRITE: +1 rows"),
+    ]
+    assert [e.id for e in b.history(loc, "4", 2)] == ["4", "3"]
+    assert [e.id for e in b.history(loc, None, 2)] == ["5", "4"]
+    with pytest.raises(BackendError, match="no version 9"):
+        b.history(loc, "9", 2)

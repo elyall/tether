@@ -126,6 +126,25 @@ class DeltaBackend(ObjectBackend):
                 f"cannot load delta table {uri}{where}: {exc}", kind="delta"
             ) from exc
 
+    def _log(self, locator: Locator, hi: int | None, count: int) -> list[dict]:
+        """Up to ``count`` commits at or below version ``hi``, newest first.
+
+        ``DeltaTable(version=n).history()`` returns the head's commits but
+        numbers them from ``n``, so the log is always read from the head.
+        """
+        dt = self._table(locator, without_files=True)
+        head = int(dt.version())
+        if hi is None:
+            hi = head
+        elif hi > head:
+            raise BackendError(
+                f"delta table {self._uri(locator)} has no version {hi} "
+                f"(head is v{head})",
+                kind="delta",
+            )
+        commits = dt.history(head - hi + count)
+        return [c for c in commits if int(c.get("version", -1)) <= hi][:count]
+
     # -- protocol -------------------------------------------------------- #
     def identity(self, locator: Locator) -> Locator:
         return {"uri": canonical_uri(self._uri(locator))}
@@ -149,9 +168,8 @@ class DeltaBackend(ObjectBackend):
     ) -> list[HistoryEntry]:
         start = ref if ref is not None else base_at(locator)
         version = int(start) if start is not None and str(start).isdigit() else None
-        dt = self._table(locator, version=version, without_files=True)
         entries: list[HistoryEntry] = []
-        for commit in dt.history(limit):
+        for commit in self._log(locator, version, limit):
             metrics = commit.get("operationMetrics") or {}
             parts = [
                 f"{sign}{metrics[k]} {label}"
@@ -275,10 +293,9 @@ class DeltaBackend(ObjectBackend):
         lo, hi = min(va, vb), max(va, vb)
         if vb < va:
             out.note = (out.note + "; " if out.note else "") + "b is older than a"
-        dt = self._table(locator, version=hi, without_files=True)
-        for commit in reversed(dt.history(hi - lo)):
+        for commit in reversed(self._log(locator, hi, hi - lo)):
             version = int(commit.get("version", -1))
-            if version <= lo or version > hi:
+            if version <= lo:
                 continue
             metrics = commit.get("operationMetrics") or {}
             parts = [
