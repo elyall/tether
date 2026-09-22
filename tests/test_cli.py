@@ -384,18 +384,19 @@ def test_cli_export_publish_import(
     }
     assert Repo.find(".").objects["scratch/other"].policy.pin == "record"
 
-    # A SQL source with the query saved in tether.toml; --sync removes the rest.
+    # A SQL source with the query saved in secrets.toml; --sync removes the rest.
     db = vcs_root / "reg.sqlite"
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE data_object (name TEXT, sys TEXT)")
     con.execute("INSERT INTO data_object VALUES ('db', ?)", (system,))
     con.commit()
     con.close()
-    cfg = vcs_root / "tether.toml"
-    cfg.write_text(
-        cfg.read_text() + "\n[import]\nquery = \"SELECT name AS key, 'memory' AS kind, "
+    secrets = vcs_root / ".tether" / "secrets.toml"
+    secrets.write_text(
+        "[import]\nquery = \"SELECT name AS key, 'memory' AS kind, "
         "json_object('system', sys) AS locator_json FROM data_object\"\n"
     )
+    secrets.chmod(0o600)
     r = runner.invoke(app, ["import", str(db), "--sync", "--plan", "imp.json"])
     assert r.exit_code == 0, r.output
     assert "remove" in r.output and "scratch/other" in r.output

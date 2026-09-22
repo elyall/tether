@@ -157,6 +157,68 @@ def test_read_source_postgres(pg_dsn: str) -> None:
         read_source(pg_dsn)
 
 
+def test_a_committed_import_query_never_runs(
+    vcs_root: Path, pg_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[import] query` in `tether.toml` arrives with every clone, and whoever
+    wrote it chose SQL that ran with your DSN -- under `--dry-run` too. The
+    default query comes from `.tether/secrets.toml` or `--query`, and runs as
+    one statement in a read-only transaction."""
+    from typer.testing import CliRunner
+
+    from tether.cli import app
+
+    runner = CliRunner()
+    with _pg(pg_dsn) as conn:
+        conn.execute("CREATE TABLE catalog (name text, approved bool DEFAULT true)")
+        conn.execute("INSERT INTO catalog (name) VALUES ('run-1'), ('run-2')")
+        conn.commit()
+
+    def approved() -> list[bool]:
+        with _pg(pg_dsn) as conn:
+            return [r[0] for r in conn.execute("SELECT approved FROM catalog")]
+
+    select = (
+        "SELECT 'x/' || name AS key, 'memory' AS kind, "
+        "json_build_object('system', name)::text AS locator_json FROM catalog"
+    )
+    writes = f"{select}; UPDATE catalog SET approved = false; COMMIT"
+    monkeypatch.chdir(vcs_root)
+    Repo.init(vcs_root)
+    cfg = vcs_root / "tether.toml"
+    cfg.write_text(cfg.read_text() + f'\n[import]\nquery = "{writes}"\n')
+    r = runner.invoke(app, ["import", pg_dsn, "--dry-run"])
+    assert r.exit_code == 1 and "secrets.toml" in r.output, r.output
+    assert approved() == [True, True]
+
+    # From secrets.toml the same text is refused: one statement only...
+    secrets = vcs_root / ".tether" / "secrets.toml"
+    secrets.write_text(f'[import]\nquery = "{writes}"\n')
+    secrets.chmod(0o600)
+    r = runner.invoke(app, ["import", pg_dsn, "--dry-run"])
+    assert r.exit_code == 1 and "multiple commands" in r.output, r.output
+    assert approved() == [True, True]
+    # ...and one statement that writes is refused by the read-only transaction.
+    r = runner.invoke(
+        app,
+        [
+            "import",
+            pg_dsn,
+            "--dry-run",
+            "--query",
+            "UPDATE catalog SET approved = false RETURNING 'x/' || name AS key, "
+            "'memory' AS kind, name AS uri",
+        ],
+    )
+    assert r.exit_code == 1 and "read-only transaction" in r.output, r.output
+    assert approved() == [True, True]
+
+    secrets.write_text(f'[import]\nquery = "{select}"\n')
+    r = runner.invoke(app, ["import", pg_dsn, "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "x/run-1" in r.output and "x/run-2" in r.output
+
+
 def test_publish_then_import_from_postgres(vcs_root: Path, pg_dsn: str) -> None:
     """The registry direction end to end: publish, edit in SQL, import back."""
     repo = Repo.init(vcs_root)

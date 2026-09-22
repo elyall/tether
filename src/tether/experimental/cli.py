@@ -21,7 +21,7 @@ from tether.cli import (
     _save_plan,
     _show_plan,
 )
-from tether.errors import TetherError
+from tether.errors import ConfigError, TetherError
 from tether.plan import Action, Plan
 
 _REGISTRY_NOTE = (
@@ -200,7 +200,7 @@ def register(app: typer.Typer) -> None:
             "--query",
             help="SQL sources: run this query (must yield key, kind, and locator "
             "columns). "
-            "Defaults to [import] query in tether.toml.",
+            "Defaults to [import] query in .tether/secrets.toml.",
         ),
         sync: bool = typer.Option(
             False,
@@ -228,7 +228,11 @@ def register(app: typer.Typer) -> None:
         `tether commit` afterwards to record states. `--sync` removes objects the
         source no longer lists.
         """
-        from tether.experimental.registry import read_source, specs_from_rows
+        from tether.experimental.registry import (
+            is_sql_source,
+            read_source,
+            specs_from_rows,
+        )
 
         if not json_out:  # machine consumers get JSON alone
             _experimental_note(_REGISTRY_NOTE)
@@ -239,7 +243,18 @@ def register(app: typer.Typer) -> None:
                 report = repo.apply_import(plan)
             else:
                 if table is None and query is None:
-                    query = repo.config.import_query
+                    query = repo.secrets.import_query
+                    if (
+                        query is None
+                        and repo.config.committed_import_query
+                        and is_sql_source(source)
+                    ):
+                        raise ConfigError(
+                            "tether.toml sets [import] query; a committed file "
+                            "arrives with every clone and must not choose SQL "
+                            "that runs with your DSN. Move it to "
+                            ".tether/secrets.toml under [import], or pass --query"
+                        )
                 rows = read_source(source, table=table, query=query)
                 specs, notes = specs_from_rows(rows, repo.config.defaults)
                 plan = repo.plan_import(specs, sync=sync, notes=notes)

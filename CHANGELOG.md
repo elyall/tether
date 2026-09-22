@@ -14,6 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `GIT_CONFIG_*`, which retargeted tether run from a git hook.
 - `git`: a committed `remote` must name a remote the repository has
   configured; a URL goes in `.tether/secrets.toml` (`[objects."<key>"] remote`).
+- `import`: `[import] query` is read from `.tether/secrets.toml`, not
+  `tether.toml`, and runs as one read-only statement; a committed query could
+  write, even under `--dry-run`.
 
 ### Fixed
 

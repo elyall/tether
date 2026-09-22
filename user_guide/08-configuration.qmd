@@ -119,13 +119,17 @@ and ignored, and `tether upgrade` drops it.
 
 ## Import query
 
-`[import] query` is the default SQL for `tether import` when neither `--table`
-nor `--query` is given. It must yield tether's canonical columns (`key`,
-`kind`, `uri` / `locator_json`, optional `policy_*`, `at`); the source (DSN or
-file) is still passed on the command line, so no credentials land in the repo.
-See [Registries and SQL](10-registries-and-sql.qmd).
+`[import] query` in `.tether/secrets.toml` is the default SQL for
+`tether import` when neither `--table` nor `--query` is given. It must yield
+tether's canonical columns (`key`, `kind`, `uri` / `locator_json`, optional
+`policy_*`, `at`), and runs as one statement in a read-only transaction; the
+source (DSN or file) is still passed on the command line. The committed
+`tether.toml` may not set it (see the trust boundary below): `import` refuses
+one there and names where it goes. See
+[Registries and SQL](10-registries-and-sql.qmd).
 
 ```toml
+# .tether/secrets.toml
 [import]
 query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'"
 ```
@@ -148,9 +152,9 @@ A cloned dataset is untrusted input. `tether.toml` and the manifests arrive
 with every clone, so nothing in them may choose an executable tether runs, an
 endpoint your credentials are sent to, SQL to execute, or which environment
 variable holds a secret. tether refuses a committed `tether.toml` that tries
-(`[vcs] git_path`, `[backends.neon] api_url`, `[backends.ducklake] init_sql`,
-any `[backends.lakefs]` client option, a `storage_options.endpoint`, ...) and
-says where the key belongs.
+(`[vcs] git_path`, `[import] query`, `[backends.neon] api_url`,
+`[backends.ducklake] init_sql`, any `[backends.lakefs]` client option, a
+`storage_options.endpoint`, ...) and says where the key belongs.
 
 Those settings live in `.tether/secrets.toml` -- untracked, per checkout,
 never committed -- or in the environment:
@@ -175,6 +179,9 @@ profile = "lab-a"                          # an AWS shared-config profile ...
 
 [objects."zarr/imaging"]                  # one object; beats a URI prefix
 profile = "imaging"
+
+[import]                                  # the default SQL for `tether import`
+query = "SELECT name AS key, 'file' AS kind, uri FROM catalog"
 ```
 
 Resolution per object, first match wins: `[objects."<key>"]`, then the

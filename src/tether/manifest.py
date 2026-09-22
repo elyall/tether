@@ -434,8 +434,10 @@ class RepoConfig:
     defaults: Policy = field(default_factory=Policy)
     vcs: dict[str, Any] = field(default_factory=dict)
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
-    import_query: str | None = None
-    """`[import] query`: default SQL for `tether import` (holds no credentials)."""
+    committed_import_query: str | None = None
+    """`[import] query` in the committed file: kept only so `tether import`
+    can refuse it by name. A clone must not choose SQL that runs with your
+    DSN; the default query is `Secrets.import_query`."""
 
     @property
     def trunk(self) -> str:
@@ -459,8 +461,8 @@ class RepoConfig:
             doc["vcs"] = _drop_nulls(self.vcs)
         if self.backends:
             doc["backends"] = _drop_nulls(self.backends)
-        if self.import_query:
-            doc["import"] = {"query": self.import_query}
+        if self.committed_import_query:
+            doc["import"] = {"query": self.committed_import_query}
         return tomlkit.dumps(doc)
 
     @classmethod
@@ -494,7 +496,7 @@ class RepoConfig:
             defaults=Policy.from_dict(data.get("defaults")),
             vcs=dict(data.get("vcs") or {}),
             backends=dict(data.get("backends") or {}),
-            import_query=str(query) if query else None,
+            committed_import_query=str(query) if query else None,
         )
 
 
@@ -764,6 +766,7 @@ SECRETS_HEADER = """\
 # environment -- never in tether.toml, which arrives with a clone.
 #
 #   [vcs]             git_path / jj_path
+#   [import]          query (the default SQL for `tether import`)
 #   [backends.<kind>] per-kind options (api_url, init_sql, storage_options ...)
 #   [uris."<prefix>"] per-store credentials by URI prefix (longest match wins)
 #   [objects."<key>"] per-object credentials (beat a URI prefix)
@@ -776,6 +779,8 @@ class Secrets:
 
     Attributes:
         vcs: `[vcs]` -- `git_path`, `jj_path`.
+        import_query: `[import] query` -- the default SQL for `tether import`
+            when neither `--table` nor `--query` is given.
         backends: `[backends.<kind>]` -- per-kind options merged over the
             committed, allowlisted ones (endpoints, init SQL, client kwargs).
         uris: `[uris."<prefix>"]` -- credentials or references for every
@@ -785,6 +790,7 @@ class Secrets:
     """
 
     vcs: dict[str, Any] = field(default_factory=dict)
+    import_query: str | None = None
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
     uris: dict[str, dict[str, Any]] = field(default_factory=dict)
     objects: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -793,8 +799,10 @@ class Secrets:
     @classmethod
     def from_toml(cls, text: str) -> Secrets:
         data = _loads_plain(text)
+        query = (data.get("import") or {}).get("query")
         return cls(
             vcs=dict(data.get("vcs") or {}),
+            import_query=str(query) if query else None,
             backends={str(k): dict(v) for k, v in (data.get("backends") or {}).items()},
             uris={str(k): dict(v) for k, v in (data.get("uris") or {}).items()},
             objects={str(k): dict(v) for k, v in (data.get("objects") or {}).items()},

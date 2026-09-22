@@ -189,10 +189,13 @@ plan: import (2 write(s))
 ```
 
 Sources: a Postgres DSN, a SQLite file (`--table` or `--query`), a `.csv`, or a
-`.jsonl`. A standing query can live in `tether.toml` (it holds no
-credentials):
+`.jsonl`. The query runs as one statement in a read-only transaction. A
+standing query lives in `.tether/secrets.toml`, not the committed
+`tether.toml`: whoever writes a committed file would choose SQL that runs with
+every cloner's DSN.
 
 ```toml
+# .tether/secrets.toml
 [import]
 query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'"
 ```

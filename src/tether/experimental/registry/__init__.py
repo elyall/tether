@@ -21,6 +21,7 @@ from tether.experimental.registry.ops import (
 from tether.experimental.registry.registry import (
     CANONICAL_COLUMNS,
     ImportSpec,
+    is_sql_source,
     read_source,
     specs_from_rows,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "build_bundle",
     "export",
     "import_objects",
+    "is_sql_source",
     "plan_import",
     "read_source",
     "specs_from_rows",

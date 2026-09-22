@@ -24,7 +24,13 @@ from tether.backends.base import known_kinds
 from tether.errors import ConfigError
 from tether.manifest import Locator, Policy, key_to_relpath
 
-__all__ = ["CANONICAL_COLUMNS", "ImportSpec", "read_source", "specs_from_rows"]
+__all__ = [
+    "CANONICAL_COLUMNS",
+    "ImportSpec",
+    "is_sql_source",
+    "read_source",
+    "specs_from_rows",
+]
 
 CANONICAL_COLUMNS: tuple[str, ...] = (
     "key",
@@ -146,6 +152,16 @@ def read_source(
     return _read_sqlite(path, table, query)
 
 
+def is_sql_source(source: str) -> bool:
+    """Whether `read_source` reads `source` with SQL (`--table` / `--query`):
+    a Postgres DSN or a SQLite file, not a `.csv`, `.jsonl` or `.ndjson`."""
+    return source.startswith(_POSTGRES_SCHEMES) or Path(source).suffix.lower() not in (
+        ".csv",
+        ".jsonl",
+        ".ndjson",
+    )
+
+
 def _select(table: str | None, query: str | None) -> str:
     if bool(table) == bool(query):
         raise ConfigError("give exactly one of --table or --query for a SQL source")
@@ -180,9 +196,14 @@ def _read_postgres(
     # Plain DB-API usage; the query text is user-supplied, so no static typing.
     conn: Any = psycopg.connect(dsn)
     try:
+        # A registry query only reads: a read-only transaction, and one
+        # statement (prepared; the simple protocol runs `SELECT ...; UPDATE`).
+        conn.read_only = True
         cur = conn.cursor()
-        cur.execute(_select(table, query))
+        cur.execute(_select(table, query), prepare=True)
         names = [d.name for d in cur.description or ()]
         return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+    except psycopg.Error as exc:
+        raise ConfigError(f"the import query failed: {exc}") from exc
     finally:
         conn.close()
