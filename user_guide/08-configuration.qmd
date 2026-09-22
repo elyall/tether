@@ -154,7 +154,8 @@ endpoint your credentials are sent to, SQL to execute, or which environment
 variable holds a secret. tether refuses a committed `tether.toml` that tries
 (`[vcs] git_path`, `[import] query`, `[backends.neon] api_url`,
 `[backends.ducklake] init_sql`, any `[backends.lakefs]` client option, a
-`storage_options.endpoint`, ...) and says where the key belongs.
+`storage_options.endpoint`, ...) and says where the key belongs. What that
+adds up to is the [security model](#security-model) below.
 
 Those settings live in `.tether/secrets.toml` -- untracked, per checkout,
 never committed -- or in the environment:
@@ -242,6 +243,45 @@ secret_access_key = "${IMAGING_SECRET}"  # writing the file; tether reads values
 
 (tether does not expand `${...}` itself; write the file with the values in
 place, or use a profile / role and let the runner's identity assume it.)
+
+## Security model
+
+What a cloned dataset -- its `tether.toml`, its manifests and history, and
+every other file in the checkout -- can and cannot make tether do.
+
+It cannot:
+
+- **Run a program.** Executables come from `secrets.toml` or the
+  environment. git runs with `core.fsmonitor`, hooks, and `ext::` transports
+  off, and never takes a directory for a bare repository by itself. A `git`
+  object's `path` must be absolute and outside the checkout, whose files came
+  with the clone.
+- **Send your credentials somewhere.** Endpoints are refused in committed
+  files (the trust boundary above), and a Dolt password goes only to a server
+  `secrets.toml` lists.
+- **Run SQL.** `[import] query` and `init_sql` come from `secrets.toml` or the
+  command line, and an import query runs as one statement in a read-only
+  transaction.
+- **Push your code.** A manifest's git `remote` must name a remote the
+  repository already has.
+- **Write outside `.tether/`.** Object keys are checked when a manifest is
+  read, not only at `add`: no `..`, no `\`, no drive letters.
+
+It can:
+
+- **Name stores.** A locator is an address. A manifest can point `status`,
+  `commit`, and `verify` at any store your ambient credentials reach, and
+  they sign the requests (a signature does not reveal the secret). `commit`
+  records what it finds there, a directory's file names and hashes
+  included, and pushing publishes that.
+- **Release pins in your stores.** `gc` releases the pins in its dataset's
+  namespace that its own history does not reference. A clone that reuses
+  your dataset id and names your stores can release yours.
+- **Make commands fail.** Every refusal above is an error: a hostile clone
+  can stop a command, not redirect it.
+
+So read a clone's manifests before its first `commit`, and a `gc` plan
+before applying it.
 
 ## Workspace state
 
