@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A saved `drop` plan applies only in the checkout that made it (0.1.0b3
+  plans included), and only while that checkout, as the VCS sees it, is
+  still on (or off) the bookmark.
+- A checkout writes its workspace id the first time tether opens it, so a
+  plan saved in a fresh clone or worktree applies there.
+- `drop` closes its journal entry when the store half fails; it stayed
+  `started`, with nothing a re-run could finish.
+
 ## [0.1.0b3] - 2026-09-18
 
 ### Experimental

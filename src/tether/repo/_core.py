@@ -47,6 +47,7 @@ from tether.manifest import (
     RepoConfig,
     State,
     WorkspaceState,
+    claim_workspace,
     ensure_ignored,
     ensure_layout,
     find_dataset_root,
@@ -159,6 +160,10 @@ class RepoCore:
         ensure_ignored(root, only_present=True)
         self.objects = read_objects(root)
         self.workspace = read_workspace(root)
+        if not workspace_path(root).is_file():
+            # A read-only checkout keeps the id in memory, as before.
+            with contextlib.suppress(OSError):
+                self.workspace = claim_workspace(root, self.workspace)
         self.secrets = read_secrets(root)
         if self.secrets.insecure:
             warnings.warn(
@@ -297,9 +302,9 @@ class RepoCore:
     def _refresh(self) -> None:
         """Reload the per-checkout state from disk (see `_writer_lock`).
 
-        A checkout that has never written `workspace.toml` keeps the in-memory
-        state: its workspace id was minted at construction and is written with
-        the first command.
+        A checkout with no `workspace.toml` keeps the in-memory state: one
+        construction could not write (a read-only checkout), or
+        `forget-workspace` removed it.
         """
         if _m.workspace_path(self.root).is_file():
             self.workspace = read_workspace(self.root)

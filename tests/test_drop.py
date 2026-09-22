@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from typer import testing as typer_testing
 
-from tether.backends.memory import default_store
+from tether.backends.memory import MemoryBackend, default_store
 from tether.cli import app
-from tether.errors import ConfigError, StalePlanError
+from tether.errors import BackendError, ConfigError, MultiObjectError, StalePlanError
 from tether.handles import MemoryHandle
 from tether.plan import Plan
 from tether.repo import Repo
@@ -46,6 +46,18 @@ def _probe(repo: Repo, name: str = "probe") -> tuple[str, str, str]:
     pin = result.pinned["db"]
     assert pin is not None
     return result.vcs_commit, repo.workspace.working_refs["db"], pin.id
+
+
+def _other_checkout(repo: Repo, vcs_root: Path, tmp_path: Path) -> Repo:
+    """A second checkout of the repository at this one's commit."""
+    other_root = tmp_path / "other-checkout"
+    cmd = (
+        ["jj", "workspace", "add", str(other_root)]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root)]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    return Repo.find(other_root)
 
 
 def test_drop_from_the_bookmark_you_are_on(vcs_root: Path) -> None:
@@ -155,14 +167,7 @@ def test_drop_refuses_the_trunk_an_unknown_bookmark_and_a_held_one(
         repo.plan_drop("nope")
     _probe(repo)
     repo.new("main")
-    other_root = tmp_path / "other-checkout"
-    cmd = (
-        ["jj", "workspace", "add", str(other_root)]
-        if repo.vcs.kind == "jj"
-        else ["git", "worktree", "add", "--detach", str(other_root)]
-    )
-    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
-    other = Repo.find(other_root)
+    other = _other_checkout(repo, vcs_root, tmp_path)
     other.new("probe")  # someone is working there
     with pytest.raises(ConfigError, match="worked on by checkout"):
         Repo.find(vcs_root).plan_drop("probe")
@@ -214,6 +219,132 @@ def test_drop_plan_is_stale_when_the_bookmark_moves(vcs_root: Path) -> None:
     with pytest.raises(StalePlanError, match="since the drop plan was made"):
         repo.apply_drop(saved)
     assert later in repo.vcs.history_revs() and "probe" in repo.vcs.bookmarks()
+
+
+def test_saved_drop_plan_applies_only_in_the_checkout_that_made_it(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """Whether to leave the bookmark is decided from where the planning
+    checkout stands. Another checkout at the same commit sees the same head
+    and history, so only the workspace binding stops it applying the plan."""
+    repo, system = _baseline(vcs_root)
+    commit, fork, _pin = _probe(repo)
+    repo.new("main")
+    plan = repo.plan_drop("probe")
+    saved = Plan.from_dict(json.loads(plan.to_json()))
+    other = _other_checkout(repo, vcs_root, tmp_path)
+    assert other._vcs_head_or_none() == repo._vcs_head_or_none()
+
+    with pytest.raises(StalePlanError, match="made in another checkout"):
+        other.apply_drop(saved)
+    assert "probe" in repo.vcs.bookmarks() and commit in repo.vcs.history_revs()
+    assert not [e for e in other.ops() if e.command == "drop"]
+    # Where it was made, the same plan still holds.
+    report = Repo.find(vcs_root).apply_drop(saved)
+    assert report.abandoned == [commit]
+    assert fork not in default_store().system(system).branches
+
+
+def test_a_drop_plan_from_before_the_binding_is_bound_by_its_context(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """Plans saved by 0.1.0b3 carry the workspace id in their context but not
+    as a precondition; apply compares it anyway."""
+    repo, _system = _baseline(vcs_root)
+    commit, _fork, _pin = _probe(repo)
+    repo.new("main")
+    old = repo.plan_drop("probe").to_dict()
+    old["preconditions"] = [
+        p for p in old["preconditions"] if p["kind"] != "workspace_id"
+    ]
+    other = _other_checkout(repo, vcs_root, tmp_path)
+    with pytest.raises(StalePlanError, match="made in another checkout"):
+        other.apply_drop(Plan.from_dict(old))
+    assert "probe" in repo.vcs.bookmarks() and commit in repo.vcs.history_revs()
+
+
+def test_a_saved_drop_plan_applies_in_a_checkout_that_had_no_workspace_file(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """The workspace id binds a saved plan to its checkout, so it must outlive
+    the `Repo` that minted it. A fresh checkout (a clone, a new jj workspace
+    or git worktree) had no `workspace.toml`, every `Repo` there minted an id
+    of its own, and `--from-plan` there always refused."""
+    repo, _system = _baseline(vcs_root)
+    commit, _fork, _pin = _probe(repo)
+    repo.new("main")
+    other_root = _other_checkout(repo, vcs_root, tmp_path).root
+    saved = Repo.find(other_root).plan_drop("probe").to_json()
+    report = Repo.find(other_root).apply_drop(Plan.from_dict(json.loads(saved)))
+    assert report.abandoned == [commit]
+
+
+def test_drop_leaves_the_bookmark_the_vcs_is_on(vcs_root: Path) -> None:
+    """Whether this checkout is on the bookmark comes from the VCS: after a
+    `git switch probe` (or `jj new probe`) by hand, `workspace.toml` still
+    says main. Decided from the file, git refused to delete the checked-out
+    branch half-way through the drop, with its journal entry left open."""
+    repo, system = _baseline(vcs_root)
+    commit, fork, _pin = _probe(repo)
+    repo.new("main")
+    cmd = (
+        ["git", "switch", "-q", "probe"]
+        if repo.vcs.kind == "git"
+        else ["jj", "new", "probe"]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    repo = Repo.find(vcs_root)
+    assert repo.workspace.bookmark == "main"
+    plan = repo.plan_drop("probe")
+    assert plan.context["leave"] == "main"
+    report = repo.apply_drop(plan)
+    assert report.left_for == "main" and report.abandoned == [commit]
+    assert repo.workspace.bookmark == "main" and "probe" not in repo.vcs.bookmarks()
+    assert fork not in default_store().system(system).branches
+    assert not repo.incomplete_ops()
+
+
+def test_a_drop_whose_store_half_fails_closes_its_journal_entry(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commits and the bookmark are gone when the store half fails, so
+    re-running `drop` cannot finish it. The entry ends with the failure, as
+    gc's does, instead of staying `started`; a plain gc finishes the job."""
+    repo, _system = _baseline(vcs_root)
+    commit, _fork, pin = _probe(repo)
+
+    def unavailable(self: MemoryBackend, locator: dict, pin: object) -> None:
+        raise BackendError("store unavailable", kind="memory")
+
+    with monkeypatch.context() as m:
+        m.setattr(MemoryBackend, "unpin", unavailable)
+        with pytest.raises(MultiObjectError):
+            repo.drop("probe")
+    assert not repo.incomplete_ops()
+    (entry,) = [e for e in repo.ops() if e.command == "drop"]
+    assert entry.result["abandoned"] == [commit]
+    assert "store unavailable" in str(entry.result["failed"])
+    report = repo.gc(dry_run=False)
+    assert report.unpinned == {"memory": [pin]}
+
+
+def test_drop_plan_is_stale_when_this_checkout_moves_onto_the_bookmark(
+    vcs_root: Path,
+) -> None:
+    """A bookmark with no commits of its own sits on its base's commit, so a
+    `new` onto it moves neither the bookmark nor the head the plan bound to.
+    The plan's decision not to leave no longer holds: dropping the bookmark
+    under this checkout would leave it on nothing."""
+    repo, _system = _baseline(vcs_root)
+    repo.new(bookmark="probe")
+    repo.new("main")
+    plan = repo.plan_drop("probe")
+    assert plan.context["leave"] is None and plan.context["commits"] == []
+    repo.new("probe")
+    with pytest.raises(StalePlanError, match="this checkout is on probe now"):
+        repo.apply_drop(plan)
+    assert "probe" in repo.vcs.bookmarks() and repo.workspace.bookmark == "probe"
+    assert not [e for e in repo.ops() if e.command == "drop"]
 
 
 def test_drop_plan_is_stale_when_another_bookmark_reaches_its_commits(
@@ -313,14 +444,7 @@ def test_drop_refuses_to_leave_for_a_bookmark_another_checkout_holds(
     repo, _system = _baseline(vcs_root)
     repo.new(bookmark="side")
     repo.new("main")
-    other_root = tmp_path / "other-checkout"
-    cmd = (
-        ["jj", "workspace", "add", str(other_root)]
-        if repo.vcs.kind == "jj"
-        else ["git", "worktree", "add", "--detach", str(other_root)]
-    )
-    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
-    Repo.find(other_root).new("side")
+    _other_checkout(repo, vcs_root, tmp_path).new("side")
     repo = Repo.find(vcs_root)
     _probe(repo)
     with pytest.raises(ConfigError, match="cannot leave for 'side'"):

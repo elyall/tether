@@ -343,8 +343,10 @@ one step. Dry-run by default; the plan lists, in order:
 The store actions in the plan are a preview computed as if the commits were
 already gone; apply re-plans them live after the VCS half, because `gc`
 binds to the history it sees. The plan is stale -- refused with "re-run the
-plan" -- if the bookmark moved, this checkout moved, history changed, another
-checkout started working on the bookmark, or the set of commits only the
+plan" -- if it is applied in another checkout, the bookmark moved, this
+checkout moved (to another commit, or onto or off the bookmark), history
+changed, another checkout started working on the bookmark, or the set of
+commits only the
 bookmark reaches changed (a `promote` or a `jj bookmark set` onto the line in
 between); that last one is re-derived at apply, never trusted from a saved
 plan. Refused for the trunk. "Only the bookmark reaches" is exact: another

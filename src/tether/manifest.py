@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass, field, replace
@@ -851,3 +852,20 @@ def read_workspace(root: Path) -> WorkspaceState:
 
 def write_workspace(root: Path, workspace: WorkspaceState) -> None:
     _atomic_write(workspace_path(root), workspace.to_toml())
+
+
+def claim_workspace(root: Path, workspace: WorkspaceState) -> WorkspaceState:
+    """Write a freshly minted `workspace.toml` unless another process already
+    has, and return the one on disk. The workspace id binds saved plans to
+    this checkout, so it must outlive the process that minted it."""
+    path = workspace_path(root)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(workspace.to_toml(), encoding="utf-8")
+    try:
+        os.link(tmp, path)  # create-if-absent, whole file or nothing
+    except FileExistsError:
+        return read_workspace(root)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return workspace

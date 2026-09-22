@@ -761,7 +761,8 @@ class GcOps(RepoCore):
         destination = to or trunk
         if destination != trunk and destination not in marks:
             raise ConfigError(f"no bookmark {destination!r} to leave for")
-        here = self.workspace.bookmark == bookmark
+        commits = self.vcs.exclusive_commits(bookmark)
+        here = self._on_bookmark(bookmark, commits)
         if here:
             # Leaving is a `new <destination>`, which refuses a bookmark
             # another live checkout works on (it wants `--shared`). Refuse
@@ -772,7 +773,6 @@ class GcOps(RepoCore):
                     f"cannot leave for {destination!r}: checkout(s) "
                     f"{', '.join(there)} work on it; `--to` another bookmark"
                 )
-        commits = self.vcs.exclusive_commits(bookmark)
         remotes = self.vcs.remote_counterparts(bookmark)
         vcs_head = self._vcs_head_or_none()
         history_digest = self.vcs.history_digest()
@@ -788,6 +788,14 @@ class GcOps(RepoCore):
                 "vcs_head": vcs_head,
                 "history_digest": history_digest,
             },
+        )
+        # Whether to leave is decided from where *this* checkout stands.
+        # Another checkout at the same commit sees the same head and history,
+        # so nothing below would stop it applying that decision.
+        plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this drop plan was made in another checkout; re-run the plan here",
         )
         if history_digest is not None:
             plan.require(
@@ -902,6 +910,13 @@ class GcOps(RepoCore):
         with self._writer_lock(), self._repo_lock():
             self._verify_plan(plan, "drop")
             ctx = plan.context
+            # 0.1.0b3 plans record the id without requiring it.
+            if not any(p.kind == "workspace_id" for p in plan.preconditions) and (
+                ctx.get("workspace_id") not in (None, self.workspace.workspace_id)
+            ):
+                raise StalePlanError(
+                    "this drop plan was made in another checkout; re-run the plan here"
+                )
             bookmark = str(ctx["bookmark"])
             planned = [str(c) for c in ctx.get("commits") or []]
             # The plan promised these commits and no others. Which commits only
@@ -920,43 +935,70 @@ class GcOps(RepoCore):
                     + "); re-run the plan"
                 )
             leave = ctx.get("leave")
+            # A bookmark with no commits of its own sits on its base's commit,
+            # so a `new` onto or off it moves neither the bookmark nor the head
+            # the plan bound to. Dropping the bookmark under this checkout
+            # would leave it on nothing (git refuses the delete outright);
+            # leaving from a bookmark it is no longer on would move it again.
+            here = self._on_bookmark(bookmark, commits)
+            if here != bool(leave):
+                where = (
+                    f"is on {bookmark} now" if here else f"is no longer on {bookmark}"
+                )
+                raise StalePlanError(
+                    f"this checkout {where}, unlike when the drop plan was made; "
+                    "re-run the plan"
+                )
             pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
             op = self._begin_op("drop", plan=plan, pre=pre)
             report = DropReport(bookmark=bookmark, plan=plan)
-            # What the dropped commits pinned: not references once they are
-            # gone, but the branch sweep may delete a head one of them pinned.
-            # One object reader for all of them, not one process per commit.
-            dropped_manifests = [
-                m
-                for files in self.vcs.files_at_many(
-                    commits, self._objects_reldir()
-                ).values()
-                for m in self._parse_manifests(files).values()
-            ]
-            if leave:
-                dropped_manifests.extend(self.objects.values())
-                self.new(str(leave))
-                report.left_for = str(leave)
-                self._progress(op, "leave-bookmark", target=str(leave))
-            self.vcs.drop_bookmark(bookmark, commits)
-            report.abandoned = commits
-            self._progress(op, "delete-bookmark", target=bookmark)
-            self._manifest_cache.clear()
-            self.objects = read_objects(self.root)
-            gc_plan = self.plan_gc(
-                prune_bookmarks=True,
-                force_prune=bool(ctx.get("force_prune")),
-                delete_stores=bool(ctx.get("delete_stores")),
-                scope=GcScope(
-                    bookmarks=frozenset({bookmark}),
-                    dropped_manifests=tuple(dropped_manifests),
-                ),
-            )
-            report.gc_report = (
-                self.apply_gc(gc_plan)
-                if not gc_plan.is_empty
-                else GcReport(dry_run=False, plan=gc_plan)
-            )
+            try:
+                # What the dropped commits pinned: not references once they
+                # are gone, but the branch sweep may delete a head one of them
+                # pinned. One object reader for all of them, not one process
+                # per commit.
+                dropped_manifests = [
+                    m
+                    for files in self.vcs.files_at_many(
+                        commits, self._objects_reldir()
+                    ).values()
+                    for m in self._parse_manifests(files).values()
+                ]
+                if leave:
+                    dropped_manifests.extend(self.objects.values())
+                    self.new(str(leave))
+                    report.left_for = str(leave)
+                    self._progress(op, "leave-bookmark", target=str(leave))
+                self.vcs.drop_bookmark(bookmark, commits)
+                report.abandoned = commits
+                self._progress(op, "delete-bookmark", target=bookmark)
+                self._manifest_cache.clear()
+                self.objects = read_objects(self.root)
+                gc_plan = self.plan_gc(
+                    prune_bookmarks=True,
+                    force_prune=bool(ctx.get("force_prune")),
+                    delete_stores=bool(ctx.get("delete_stores")),
+                    scope=GcScope(
+                        bookmarks=frozenset({bookmark}),
+                        dropped_manifests=tuple(dropped_manifests),
+                    ),
+                )
+                report.gc_report = (
+                    self.apply_gc(gc_plan)
+                    if not gc_plan.is_empty
+                    else GcReport(dry_run=False, plan=gc_plan)
+                )
+            except Exception as exc:
+                self._end_op(
+                    op,
+                    result={
+                        "bookmark": bookmark,
+                        "left_for": report.left_for,
+                        "abandoned": report.abandoned,
+                        "failed": str(exc),
+                    },
+                )
+                raise
             self._end_op(
                 op,
                 result={
@@ -967,6 +1009,16 @@ class GcOps(RepoCore):
                 },
             )
             return report
+
+    def _on_bookmark(self: Repo, bookmark: str, commits: Sequence[str]) -> bool:
+        """Whether this checkout is on `bookmark`, as the VCS sees it (git's
+        `HEAD` branch, jj's bookmarks at the working copy). A jj bookmark with
+        no commits of its own shares its commit with its base, and jj cannot
+        say which of the two the working copy is on: `workspace.toml` can."""
+        on = bookmark in self.vcs.current_bookmarks()
+        if on and self.vcs.kind == "jj" and not commits:
+            return self.workspace.bookmark == bookmark
+        return on
 
     def drop(
         self: Repo,
