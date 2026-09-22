@@ -58,6 +58,32 @@ _REMOTE_SCHEMES = frozenset(
     {"s3", "s3a", "gs", "gcs", "az", "azure", "abfs", "abfss", "adl", "http", "https"}
 )
 
+# obstore's `ClientConfig`: passed as `client_options`, not as store config.
+_CLIENT_OPTION_KEYS = frozenset(
+    {
+        "allow_http",
+        "allow_invalid_certificates",
+        "connect_timeout",
+        "default_content_type",
+        "default_headers",
+        "http1_only",
+        "http2_keep_alive_interval",
+        "http2_keep_alive_timeout",
+        "http2_keep_alive_while_idle",
+        "http2_only",
+        "pool_idle_timeout",
+        "pool_max_idle_per_host",
+        "proxy_url",
+        "proxy_ca_certificate",
+        "proxy_excludes",
+        "randomize_addresses",
+        "read_timeout",
+        "root_certificate",
+        "timeout",
+        "user_agent",
+    }
+)
+
 
 def _parse(uri: str) -> tuple[str, str, str]:
     """Return ``(scheme, store_root_url, key_or_path)``.
@@ -105,20 +131,19 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-_COARSE_MTIME_WINDOW_NS = 2_000_000_000
-"""On a filesystem with whole-second mtimes, a write that lands within a second
-of the read can leave size and mtime unchanged (git's "racily clean" case);
-an entry hashed that close to the file's mtime is not trusted next time."""
+_RACY_WINDOW_NS = 2_000_000_000
+"""A write that lands in the same timestamp tick as the read can leave size,
+mtime and ctime unchanged (git's "racily clean" case). Ticks are coarser than
+the nanoseconds they are reported in -- a whole second on some filesystems,
+milliseconds on Linux before multigrain timestamps, up to two seconds on
+NFS or FAT -- so an entry hashed this close to the file's last change is not
+trusted next time."""
 
 
 def _racy(st: os.stat_result, hashed_at_ns: int) -> bool:
-    """Whether a cache entry made at `hashed_at_ns` could hide a later write.
-
-    Only filesystems that round mtimes to seconds are exposed; with
-    nanosecond mtimes the read and a later write cannot share a timestamp.
-    """
-    coarse = st.st_mtime_ns % 1_000_000_000 == 0
-    return coarse and hashed_at_ns - st.st_mtime_ns < _COARSE_MTIME_WINDOW_NS
+    """Whether a cache entry made at `hashed_at_ns` could hide a later write."""
+    changed_ns = max(st.st_mtime_ns, st.st_ctime_ns)
+    return hashed_at_ns - changed_ns < _RACY_WINDOW_NS
 
 
 class _HashCache:
@@ -127,9 +152,9 @@ class _HashCache:
     A hit requires every stat field to match; a miss hashes the file and
     records it. ``ctime`` is in the key because a process that overwrites a
     file and restores its mtime (a sync tool, `touch -r`) cannot restore the
-    inode change time; and on filesystems with whole-second mtimes an entry
-    hashed within the same second as the file's mtime is re-read next time
-    (see :func:`_racy`). Without a path (a backend built outside a dataset)
+    inode change time; and an entry hashed within a couple of seconds of the
+    file's last change is re-read next time (see :func:`_racy`). Without a
+    path (a backend built outside a dataset)
     the cache lives for the process only.
 
     One cache serves every `file` object of a dataset, and the engine
@@ -256,6 +281,7 @@ def _walk_files(root: Path) -> list[tuple[str, int, int]]:
     ``os.scandir`` reuses the directory entry's cached type information and is
     ~7x cheaper per entry than ``Path.rglob`` + ``stat``. Symlinked directories
     are not followed (matching ``rglob``); symlinked files are stat'ed through.
+    Other symlinks are not files; see :func:`_walk`.
     """
     return [(rel, st.st_size, st.st_mtime_ns) for rel, st in _walk_stats(root)]
 
@@ -267,7 +293,17 @@ directory fingerprints as empty until something is written into it."""
 
 
 def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
-    out: list[tuple[str, os.stat_result]] = []
+    return _walk(root)[0]
+
+
+def _walk(
+    root: Path,
+) -> tuple[list[tuple[str, os.stat_result]], list[tuple[str, str]]]:
+    """Files under root (symlinked files stat'ed through), and every other
+    symlink -- to a directory, which is not followed, or dangling -- with its
+    target, which is what such an entry holds (as git records a symlink)."""
+    files: list[tuple[str, os.stat_result]] = []
+    links: list[tuple[str, str]] = []
     stack = [root]
     while stack:
         current = stack.pop()
@@ -275,12 +311,18 @@ def _walk_stats(root: Path) -> list[tuple[str, os.stat_result]]:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(Path(entry.path))
-                elif entry.is_file():
-                    rel = Path(entry.path).relative_to(root).as_posix()
-                    if rel == OWNER_MARKER:
-                        continue
-                    out.append((rel, entry.stat()))
-    return out
+                    continue
+                rel = Path(entry.path).relative_to(root).as_posix()
+                if entry.is_file():
+                    if rel != OWNER_MARKER:
+                        files.append((rel, entry.stat()))
+                elif entry.is_symlink():
+                    links.append((rel, os.readlink(entry.path)))
+    return files, links
+
+
+def _link_token(target: str) -> str:
+    return "symlink:" + hashlib.sha256(os.fsencode(target)).hexdigest()
 
 
 @wrap_library_errors
@@ -406,6 +448,14 @@ class FileBackend(ObjectBackend):
             options["region"] = str(region)
         # Per-object credentials from secrets.toml, resolved to static keys.
         options.update(storage_options(self.secrets_for(locator)))
+        # HTTP client settings are a separate argument; as store config keys
+        # obstore panics (a BaseException, past `wrap_library_errors`).
+        client = dict(options.pop("client_options", None) or {})
+        client.update(
+            {k: options.pop(k) for k in list(options) if k in _CLIENT_OPTION_KEYS}
+        )
+        if client:
+            options["client_options"] = client
         return from_url(root, **options)
 
     def _store_key(self, root: str, locator: Locator) -> tuple[str, str, str, str]:
@@ -506,16 +556,17 @@ class FileBackend(ObjectBackend):
         if not path.exists():
             raise BackendError(f"path does not exist: {path}", kind="file")
         if path.is_dir():
-            entries = _walk_stats(path)
+            entries, links = _walk(path)
             hashes = self._hashes.hashes([(path / rel, st) for rel, st in entries])
             rows: ListingRows = {
                 rel: (hashes[path / rel], st.st_size) for rel, st in entries
             }
+            rows.update({rel: (_link_token(target), 0) for rel, target in links})
             digest = _digest_pairs([(p, tok) for p, (tok, _) in rows.items()])
             self._remember(digest, rows)
             return {
                 "type": "dir",
-                "count": len(entries),
+                "count": len(rows),
                 "size": sum(st.st_size for _, st in entries),
                 "digest": digest,
             }

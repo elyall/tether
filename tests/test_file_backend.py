@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,75 @@ def test_walk_files_does_not_follow_symlinked_dirs(tmp_path: Path) -> None:
     (tmp_path / "real" / "f.txt").write_text("f", encoding="utf-8")
     (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
     assert {rel for rel, _, _ in _walk_files(tmp_path)} == {"real/f.txt"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks")
+def test_directory_digest_records_unfollowed_symlinks_by_target(
+    tmp_path: Path,
+) -> None:
+    b = FileBackend()
+    d = tmp_path / "data"
+    d.mkdir()
+    (d / "a.bin").write_bytes(b"A")
+    ext1, ext2 = tmp_path / "ext1", tmp_path / "ext2"
+    for ext, body in ((ext1, b"one"), (ext2, b"two")):
+        ext.mkdir()
+        (ext / "big.bin").write_bytes(body)
+    (d / "linked").symlink_to(ext1, target_is_directory=True)
+    loc = {"uri": str(d)}
+    s0 = b.fingerprint(loc, None)
+    assert (s0["count"], s0["size"]) == (2, 1)
+    rows = {r["p"]: r for r in map(json.loads, (b.listing(loc, s0) or "").splitlines())}
+    assert rows["linked"]["k"].startswith("symlink:") and rows["linked"]["s"] == 0
+
+    (d / "linked").unlink()
+    (d / "linked").symlink_to(ext2, target_is_directory=True)
+    s1 = b.fingerprint(loc, None)
+    assert s1["digest"] != s0["digest"]
+    (ext2 / "big.bin").write_bytes(b"not followed")
+    assert b.fingerprint(loc, None) == s1
+
+    (d / "dangling").symlink_to(tmp_path / "nowhere")
+    s2 = b.fingerprint(loc, None)
+    assert s2["digest"] != s1["digest"] and s2["count"] == 3
+    diff = b.diff(loc, s1, s2, listings=(b.listing(loc, s1), b.listing(loc, s2)))
+    assert [(e.path, e.change) for e in diff.entries] == [("dangling", "added")]
+
+    # A symlink to a file is still read through: its content is what counts.
+    (ext1 / "f.bin").write_bytes(b"x")
+    (d / "file_link").symlink_to(ext1 / "f.bin")
+    s3 = b.fingerprint(loc, None)
+    (ext1 / "f.bin").write_bytes(b"y")
+    assert b.fingerprint(loc, None)["digest"] != s3["digest"]
+
+
+def test_hash_cache_distrusts_entries_hashed_near_a_change(tmp_path: Path) -> None:
+    """On a filesystem whose timestamps tick coarsely, a same-size rewrite in
+    the tick after hashing leaves every stat field as cached. Any entry hashed
+    within the window of the file's last change is re-read, whatever the
+    timestamp granularity."""
+    from tether.backends.file import _HashCache
+
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"old!")
+    now = time.time_ns()
+    fine = now // 1_000_000_000 * 1_000_000_000 + 123_456_789  # not whole seconds
+    os.utime(f, ns=(fine, fine))
+    st = f.stat()
+    cache = _HashCache(None)
+    cache.record(f, st, "hash-of-old")
+    assert cache.lookup(f, st) is None  # hashed right after the change: racy
+    entries = cache._load()
+    entries[str(f)][5] = max(st.st_mtime_ns, st.st_ctime_ns) + 3_000_000_000
+    assert cache.lookup(f, st) == "hash-of-old"
+
+
+def test_open_store_passes_client_options_apart(tmp_path: Path) -> None:
+    """obstore takes `allow_http` in `client_options`; as a store config key it
+    panics (a BaseException that escapes error wrapping)."""
+    b = FileBackend({"storage_options": {"region": "us-east-1", "allow_http": True}})
+    store = b._open_store("s3://bucket", {})
+    assert type(store).__name__ == "S3Store"
 
 
 def test_directory_fingerprint_tracks_content(tmp_path: Path) -> None:
@@ -425,6 +495,13 @@ def test_local_states_are_content_hashes_not_mtimes(tmp_path: Path) -> None:
     assert b.fingerprint({"uri": str(d)}, None)["digest"] != s_dir["digest"]
 
 
+@pytest.fixture
+def no_racy_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trust entries for files written moments ago, so read counts are exact."""
+    monkeypatch.setattr("tether.backends.file._RACY_WINDOW_NS", 0)
+
+
+@pytest.mark.usefixtures("no_racy_window")
 def test_hash_cache_rereads_only_changed_files(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     b = FileBackend()
@@ -500,6 +577,7 @@ def test_versioned_policy_addresses_only_remote_objects(tmp_path: Path) -> None:
     assert isinstance(h, FileHandle) and h.version_id == "v1"
 
 
+@pytest.mark.usefixtures("no_racy_window")
 def test_hash_cache_is_shared_safely_across_concurrent_fingerprints(
     tmp_path: Path,
 ) -> None:
