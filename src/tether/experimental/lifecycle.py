@@ -199,6 +199,7 @@ def create_store(
     backend = repo.backend_for(kind)
     resolved = absolutize_locator(backend, dict(locator), Path.cwd())
     backend.validate_locator(resolved)
+    repo._secrets_for_new_object(kind, backend, key, resolved)
     eff = effective_capabilities(backend, resolved, policy or repo.config.defaults)
     if Capability.CREATE not in eff:
         raise CapabilityError(

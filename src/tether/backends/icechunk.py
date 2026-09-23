@@ -119,15 +119,33 @@ class IcechunkBackend(ObjectBackend):
             }
             if secrets.get("endpoint_url"):
                 kwargs["endpoint_url"] = str(secrets["endpoint_url"])
+            kwargs.update(self._s3_flags(secrets))
             if creds:
                 kwargs.update(creds)
             else:
                 kwargs["from_env"] = True
+            accepted = _keywords(ic.s3_storage)
+            missing = sorted(set(kwargs) - accepted) if accepted is not None else []
+            if missing:
+                raise BackendError(
+                    f"this icechunk's s3_storage takes no {', '.join(missing)} "
+                    "(set in .tether/secrets.toml); upgrade icechunk",
+                    kind="icechunk",
+                )
             return ic.s3_storage(**kwargs)
         raise BackendError(
             f"unsupported icechunk storage scheme: {parsed.scheme!r}",
             kind="icechunk",
         )
+
+    _S3_FLAGS = ("allow_http", "force_path_style")
+    """`secrets.toml` switches for an S3-compatible server (SeaweedFS, MinIO):
+    plain HTTP to its `endpoint_url`, and the bucket in the path rather than
+    the host name. Only the untracked file may set them: a clone that could
+    would downgrade where your credentials go to HTTP."""
+
+    def _s3_flags(self, secrets: dict[str, Any]) -> dict[str, bool]:
+        return {k: True for k in self._S3_FLAGS if _truthy(secrets.get(k))}
 
     def _credentials(self, locator: Locator) -> dict[str, str] | None:
         """The static keys the repository at `locator` is opened with; `None`
@@ -537,12 +555,19 @@ class IcechunkBackend(ObjectBackend):
             raise CapabilityError(why, kind="icechunk")
 
     def _prefix_store(self, locator: Locator) -> Any:
-        """An obstore store rooted at an `s3://` URI, with the object's credentials."""
+        """An obstore store rooted at an `s3://` URI, with the object's
+        credentials and the server switches `_storage` passes Icechunk."""
         from obstore.store import from_url
 
         from tether.credentials import storage_options
 
-        options: dict[str, Any] = dict(storage_options(self.secrets_for(locator)))
+        secrets = self.secrets_for(locator)
+        options: dict[str, Any] = dict(storage_options(secrets))
+        flags = self._s3_flags(secrets)
+        if flags.get("allow_http"):
+            options["client_options"] = {"allow_http": True}
+        if flags.get("force_path_style"):
+            options["virtual_hosted_style_request"] = False
         return from_url(self._uri(locator), **options)
 
     def _prefix_keys(self, locator: Locator) -> list[str]:
@@ -877,6 +902,27 @@ class IcechunkBackend(ObjectBackend):
         _collect(out, merged)
         out.note = f"diverged at snapshot {base}; changes on either side"
         return out
+
+
+@functools.cache
+def _keywords(fn: Any) -> frozenset[str] | None:
+    """The keyword arguments `fn` takes; `None` when it takes any. Icechunk
+    adds `s3_storage` keywords from release to release (the lock pins 1.1 on
+    Python 3.11 and 2.2 above), so what the installed one lacks is named in
+    a refusal rather than left to a `TypeError`."""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):  # no signature data: let the call decide
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return None
+    return frozenset(p.name for p in params)
+
+
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
 def _generation_number(tag: str) -> int:

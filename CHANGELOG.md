@@ -41,6 +41,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gc --release-foreign` (`Repo.gc(release_foreign=)`): also release
   unreferenced pins this clone did not create.
+- `icechunk`: `allow_http` and `force_path_style` in `.tether/secrets.toml`
+  (per URI prefix or object) for an S3-compatible server such as SeaweedFS
+  or MinIO; without them `add --create` could not reach one.
 
 ### Changed
 
@@ -156,6 +159,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An op-log entry appended after a torn line is no longer lost with it.
 - `--from-plan` refuses `--dry-run` and `--plan`; `commit --from-plan p.json
   --dry-run` committed.
+- An `[objects."<key>"]` entry in `.tether/secrets.toml` reaches the store
+  `add --create` makes and, once the object is removed, the store
+  `gc --delete-stores` reclaims; both used the default endpoint and ambient
+  credentials.
 
 ### Experimental
 

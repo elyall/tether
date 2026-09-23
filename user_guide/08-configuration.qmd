@@ -179,6 +179,8 @@ profile = "lab-a"                          # an AWS shared-config profile ...
 # access_key_id = "..."                    # ... or, when nothing else will do, literal keys
 # secret_access_key = "..."
 # endpoint_url = "http://seaweedfs.local:8333"
+# allow_http = true                        # icechunk: plain HTTP to that endpoint
+# force_path_style = true                  # icechunk: bucket in the path, not the host
 
 [objects."zarr/imaging"]                  # one object; beats a URI prefix
 profile = "imaging"

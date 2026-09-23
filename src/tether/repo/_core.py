@@ -78,6 +78,7 @@ from tether.oplog import (
     pinned_path,
     read_ops,
     read_pinned,
+    read_touched,
 )
 from tether.plan import Plan, Precondition
 from tether.repo._reports import (
@@ -260,6 +261,9 @@ class RepoCore:
         reload replaces the dict. Together they date the per-object secret
         rules a backend holds (see `backend_for`)."""
         self._secret_stamp: dict[str, tuple[object, int]] = {}
+        self._new_objects: dict[str, tuple[str, Locator]] = {}
+        """Key -> (kind, locator) of stores `add --create` made in this `Repo`
+        (see `_secrets_for_new_object`)."""
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
@@ -583,18 +587,66 @@ class RepoCore:
     ) -> dict[str, dict[str, Any]]:
         """URI-prefix -> credential options for `kind`: `[uris."<prefix>"]` as
         written, plus each `[objects."<key>"]` entry as an exact rule on that
-        object's own store URI (so an object entry beats a prefix)."""
+        object's own store URI (so an object entry beats a prefix).
+
+        A key that is not registered keeps its entry for the stores recorded
+        under it: the one `add --create` is making before the manifest
+        exists, and those the created- and touched-store indexes name -- a
+        removed object's store is what `gc --delete-stores` reclaims.
+        """
         rules: dict[str, dict[str, Any]] = dict(self.secrets.uris)
-        for key, options in self.secrets.objects.items():
-            m = self.objects.get(key)
-            if m is None or m.kind != kind:
-                continue
+        located: list[tuple[str, Locator]] = []
+        unregistered = [k for k in self.secrets.objects if k not in self.objects]
+        if unregistered:
+            recorded = self._recorded_locators(kind)
+            located += [(k, loc) for k in unregistered for loc in recorded.get(k, [])]
+        located += [
+            (k, self.objects[k].locator)
+            for k in self.secrets.objects
+            if k in self.objects and self.objects[k].kind == kind
+        ]
+        for key, locator in located:
             uri = next(
-                (str(m.locator[k]) for k in backend.URI_KEYS if m.locator.get(k)), None
+                (str(locator[k]) for k in backend.URI_KEYS if locator.get(k)), None
             )
             if uri is not None:
-                rules[uri] = {**rules.get(uri, {}), **options}
+                rules[uri] = {**rules.get(uri, {}), **self.secrets.objects[key]}
         return rules
+
+    def _recorded_locators(self, kind: str) -> dict[str, list[Locator]]:
+        """Key -> the `kind` stores recorded under it outside the manifests:
+        one `add --create` is making, and the created- and touched-store
+        indexes. Best effort: an unreadable index names nothing."""
+        out: dict[str, list[Locator]] = {}
+        for key, (k, locator) in self._new_objects.items():
+            if k == kind:
+                out.setdefault(key, []).append(locator)
+        with contextlib.suppress(Exception):
+            from tether.experimental.lifecycle import read_created
+
+            shared = self.vcs.shared_dir()
+            entries: list[Any] = [
+                *read_touched(shared, self.config.dataset_id),
+                *read_created(shared, self.config.dataset_id),
+            ]
+            for e in entries:
+                if e.kind == kind:
+                    out.setdefault(e.key, []).append(dict(e.locator))
+        return out
+
+    def _secrets_for_new_object(
+        self, kind: str, backend: ObjectBackend, key: str, locator: Locator
+    ) -> None:
+        """Give `backend` the `[objects."<key>"]` entry of an object whose
+        store `add --create` makes before the manifest exists."""
+        if key not in self.secrets.objects:
+            return
+        self._new_objects[key] = (kind, dict(locator))
+        committed = dict(self.config.backends.get(kind, {}))
+        local = dict(self.secrets.backends.get(kind, {}))
+        backend.configure_secrets(
+            {**committed, **local}, self._secret_rules_for(kind, backend)
+        )
 
     def _working_ref_for(self, key: str) -> str:
         """The store branch this workspace's bookmark stands for (`key` names

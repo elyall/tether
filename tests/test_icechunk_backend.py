@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -168,6 +170,221 @@ def test_icechunk_s3_delete_removes_only_the_repository_layout(
     obs.put(bucket, ".DS_Store", b"")  # tolerated, removed with the store
     backend.delete_store(loc)
     assert keys() == []
+
+
+_S3_SECRETS = (
+    '[uris."s3://lab/"]\n'
+    'endpoint_url = "http://127.0.0.1:{port}"\n'
+    "allow_http = true\n"
+    "force_path_style = true\n"
+    'access_key_id = "AKIA_LAB"\n'
+    'secret_access_key = "sk-lab"\n'
+    'region = "us-east-1"\n'
+    '[objects."b"]\n'
+    'endpoint_url = "http://127.0.0.1:{port}"\n'
+    'allow_http = "true"\n'
+    "force_path_style = true\n"
+    'access_key_id = "AKIA_B"\n'
+    'secret_access_key = "sk-b"\n'
+    'region = "us-east-1"\n'
+)
+
+
+def _create_snapshot_reclaim(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`add --create` two S3 stores through the CLI (one configured by URI
+    prefix, one by key), fingerprint them, then remove them and have
+    `gc --delete-stores` delete both."""
+    typer_testing = pytest.importorskip("typer.testing")
+    from tether.cli import app
+
+    runner = typer_testing.CliRunner()
+    monkeypatch.chdir(root)
+    for key, uri in (("a", "s3://lab/a.icechunk"), ("b", "s3://lab2/b.icechunk")):
+        r = runner.invoke(app, ["add", key, "--kind", "icechunk", uri, "--create"])
+        assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["status", "--snapshot"])
+    assert r.exit_code == 0, r.output
+    for key in ("a", "b"):
+        assert runner.invoke(app, ["remove", key]).exit_code == 0
+    r = runner.invoke(app, ["gc", "--delete-stores", "--no-dry-run", "--json"])
+    assert r.exit_code == 0, r.output
+    assert set(json.loads(r.output)["deleted_stores"]) == {"a", "b"}
+
+
+def test_s3_server_switches_reach_every_icechunk_call_through_the_cli(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain-HTTP, path-style S3 server (SeaweedFS, MinIO) needs
+    `allow_http` and `force_path_style`; `Repository.create` against one
+    worked only when both were passed, and tether passed neither. Set in
+    secrets.toml by URI prefix or by key, they reach `s3_storage` on every
+    path -- create, open, fingerprint, owner, delete_store -- and the obstore
+    client that lists and deletes the prefix."""
+    import obstore.store
+
+    from tether.repo import Repo
+
+    _needs_lifecycle_api()
+    buckets = tmp_path / "buckets"
+    storages: list[dict] = []
+    stores: list[dict] = []
+    real_storage = ic.local_filesystem_storage
+
+    def s3_storage(**kw: object) -> object:
+        storages.append(kw)
+        return real_storage(str(buckets / str(kw["bucket"]) / str(kw["prefix"])))
+
+    def from_url(url: str, **kw: object) -> object:
+        stores.append({"url": url, **kw})
+        root = buckets / url.removeprefix("s3://")
+        root.mkdir(parents=True, exist_ok=True)
+        return obstore.store.LocalStore(str(root))
+
+    monkeypatch.setattr(ic, "s3_storage", s3_storage)
+    monkeypatch.setattr(obstore.store, "from_url", from_url)
+    Repo.init(vcs_root)
+    secrets = vcs_root / ".tether" / "secrets.toml"
+    secrets.write_text(_S3_SECRETS.format(port=8333))
+    secrets.chmod(0o600)
+    _create_snapshot_reclaim(vcs_root, monkeypatch)
+
+    assert {s["bucket"] for s in storages} == {"lab", "lab2"}
+    assert len(storages) >= 10  # create, open, fingerprint, owner, delete, x2
+    for s in storages:
+        assert s.get("allow_http") is True and s.get("force_path_style") is True, s
+        assert s["endpoint_url"] == "http://127.0.0.1:8333", s
+        want = "AKIA_LAB" if s["bucket"] == "lab" else "AKIA_B"
+        assert s["access_key_id"] == want and "from_env" not in s, s
+    assert {s["url"] for s in stores} == {"s3://lab/a.icechunk", "s3://lab2/b.icechunk"}
+    for s in stores:
+        assert s["client_options"] == {"allow_http": True}, s
+        assert s["virtual_hosted_style_request"] is False, s
+        assert s["AWS_ENDPOINT_URL"] == "http://127.0.0.1:8333", s
+    for prefix in ("lab/a.icechunk", "lab2/b.icechunk"):
+        assert not [p for p in (buckets / prefix).rglob("*") if p.is_file()]
+
+
+def _free_port_pair() -> int:
+    """A port that is free, and so is the one 10000 above it (where
+    SeaweedFS puts each server's gRPC port)."""
+    import random
+    import socket
+
+    for _ in range(200):
+        port = random.randrange(20000, 30000)
+        try:
+            for p in (port, port + 10000):
+                with socket.socket() as s:
+                    s.bind(("127.0.0.1", p))
+        except OSError:
+            continue
+        return port
+    raise RuntimeError("no free port pair")
+
+
+@pytest.fixture
+def seaweedfs(tmp_path: Path) -> Iterator[str]:
+    """A SeaweedFS server with its S3 gateway (plain HTTP, no auth), and
+    buckets `lab` and `lab2`; its endpoint URL. Skips without `weed`."""
+    import shutil
+    import subprocess
+    import time
+    import urllib.error
+    import urllib.request
+
+    weed = shutil.which("weed")
+    if weed is None:
+        pytest.skip("SeaweedFS (`weed`) not on PATH")
+    ports = {name: _free_port_pair() for name in ("master", "volume", "filer", "s3")}
+    data = tmp_path / "weed"
+    data.mkdir()
+    log = (tmp_path / "weed.log").open("w")
+    proc = subprocess.Popen(
+        [
+            weed,
+            "server",
+            f"-dir={data}",
+            "-ip=127.0.0.1",
+            "-ip.bind=127.0.0.1",
+            f"-master.port={ports['master']}",
+            f"-volume.port={ports['volume']}",
+            f"-filer.port={ports['filer']}",
+            "-s3",
+            f"-s3.port={ports['s3']}",
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    endpoint = f"http://127.0.0.1:{ports['s3']}"
+    try:
+        for bucket in ("lab", "lab2"):
+            deadline = time.monotonic() + 90
+            while True:
+                request = urllib.request.Request(f"{endpoint}/{bucket}", method="PUT")
+                try:
+                    urllib.request.urlopen(request, timeout=5).close()
+                    break
+                except (urllib.error.URLError, ConnectionError, TimeoutError):
+                    if proc.poll() is not None or time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.5)
+        yield endpoint
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+
+
+def test_icechunk_add_create_and_reclaim_against_seaweedfs(
+    vcs_root: Path, seaweedfs: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same CLI round trip against a real S3-compatible server: nothing
+    stands in for Icechunk or obstore."""
+    from tether.repo import Repo
+
+    _needs_lifecycle_api()
+    Repo.init(vcs_root)
+    secrets = vcs_root / ".tether" / "secrets.toml"
+    port = seaweedfs.rsplit(":", 1)[1]
+    secrets.write_text(_S3_SECRETS.format(port=port))
+    secrets.chmod(0o600)
+    _create_snapshot_reclaim(vcs_root, monkeypatch)
+
+
+def test_s3_server_switches_default_off_and_come_only_from_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent or false, neither switch is passed (Icechunk's defaults
+    stand); a switch the installed icechunk lacks is refused by name."""
+    from tether.backends.icechunk import IcechunkBackend
+
+    calls: list[dict] = []
+    monkeypatch.setattr(ic, "s3_storage", lambda **kw: calls.append(kw) or kw)
+    b = IcechunkBackend()
+    b.configure_secrets(
+        {},
+        {
+            "s3://off/": {"allow_http": False, "force_path_style": "false"},
+            "s3://on/": {"allow_http": "yes", "force_path_style": 1},
+        },
+    )
+    for uri in ("s3://none/r", "s3://off/r", "s3://on/r"):
+        b._storage({"uri": uri})
+    none, off, on = calls
+    for s in (none, off):
+        assert "allow_http" not in s and "force_path_style" not in s
+    assert on["allow_http"] is True and on["force_path_style"] is True
+
+    def old_s3_storage(*, bucket: str, prefix: str | None, region=None, from_env=None):
+        return None
+
+    monkeypatch.setattr(ic, "s3_storage", old_s3_storage)
+    b._storage({"uri": "s3://none/r"})  # nothing it lacks is asked of it
+    with pytest.raises(BackendError, match=r"takes no allow_http, force_path_style"):
+        b._storage({"uri": "s3://on/r"})
 
 
 def test_icechunk_backend_conformance(tmp_path: Path) -> None:

@@ -167,7 +167,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | | |
 | --- | --- |
 | Locator | `uri` (local path or `s3://bucket/prefix`), `branch` (default `main`), `region` (S3) |
-| Config | none committed. `.tether/secrets.toml` may set `profile`, `role_arn`, literal keys, `endpoint_url`, `region` per URI prefix or object, so two repositories in two accounts pin in one `commit` (see [Configuration](08-configuration.qmd#advanced-two-stores-two-identities)); otherwise S3 credentials come from the environment (`from_env`). |
+| Config | none committed. `.tether/secrets.toml` may set `profile`, `role_arn`, literal keys, `endpoint_url`, `region` per URI prefix or object, so two repositories in two accounts pin in one `commit` (see [Configuration](08-configuration.qmd#advanced-two-stores-two-identities)); otherwise S3 credentials come from the environment (`from_env`). For an S3-compatible server (SeaweedFS, MinIO) the same entry sets `allow_http = true` (plain HTTP to `endpoint_url`) and `force_path_style = true` (the bucket in the path); both reach every Icechunk and obstore call, `add --create` and `delete_store` included. |
 | Identity | `{uri}` |
 | State | `snapshot_id` of the branch head |
 | Pin | `create_tag("tether.<id>", snapshot_id)`; tags are immutable, and the default `expire_snapshots` keeps a tagged snapshot. `expire_snapshots(delete_expired_tags=True)` deletes the tag and the snapshot with it; `verify` then reports the pin `missing` |
