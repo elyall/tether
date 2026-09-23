@@ -80,14 +80,15 @@ their own jj commands. tether's own paths are left out of that
 (`_JJ_TETHER_PATHS`) and tracked by name (`JjAdapter._track`).
 
 Aliases are kept out in two ways. The user's config file is replaced by
-`_jj_user_layer` (`JJ_CONFIG`), which carries `_JJ_USER_KEYS` and no alias.
-jj still loads the repo- and workspace-level config (kept outside the
-checkout, written by `jj config set --repo/--workspace`), and a command-line
-layer cannot restore a builtin an alias shadows. So templates call keywords
-as methods (`self.commit_id()`, which no alias can shadow), and the revsets
-gc, drop and promote judge by use operators and commit ids only (`::`, `~`,
-`x-`): no `all()`, `conflicts()`, `working_copies()`, `root()`, `tags()` or
-`remote_bookmarks()`."""
+`_jj_user_layer` (`JJ_CONFIG`), which carries `_JJ_USER_KEYS` and, of the
+aliases, only `immutable_heads()` and those it refers to
+(`_JJ_USER_ALIASES`). jj still loads the repo- and workspace-level config
+(kept outside the checkout, written by `jj config set --repo/--workspace`),
+and a command-line layer cannot restore a builtin an alias shadows. So
+templates call keywords as methods (`self.commit_id()`, which no alias can
+shadow), and the revsets gc, drop and promote judge by use operators and
+commit ids only (`::`, `~`, `x-`): no `all()`, `conflicts()`,
+`working_copies()`, `root()`, `tags()` or `remote_bookmarks()`."""
 
 _JJ_TETHER_PATHS = 'root-glob:"**/.tether/**"'
 """Taken out of the user's `snapshot.auto-track` for tether's calls. A
@@ -107,15 +108,43 @@ _JJ_USER_KEYS = (
 )
 """The user's jj settings tether's calls keep: identity and signing (what
 its commits carry), how the working copy is snapshotted, and git interop.
-Everything else in their config -- aliases, templates, revset settings --
-is left behind."""
+Everything else in their config -- aliases (bar `_JJ_USER_ALIASES`),
+templates, revset settings -- is left behind."""
+
+_JJ_USER_ALIASES = ("immutable_heads()",)
+"""The user's revset aliases tether's calls keep, with every alias of theirs
+these refer to: `immutable_heads()` is how jj refuses to rewrite commits the
+user marked immutable, which tether's `abandon` and `drop` must honour. No
+other alias comes along: `rewrite_history` still calls `files()`, which an
+alias can shadow."""
 
 _jj_layers: dict[str, str] = {}
 _jj_layers_lock = threading.Lock()
 
 
+def _alias_closure(aliases: dict[str, str], roots: tuple[str, ...]) -> set[str]:
+    """The names in `aliases` (revset alias -> definition) that `roots` reach,
+    `roots` included: an alias is reached when a reached definition names it
+    outside a string literal (`f` reaches `f()`, `f(x)` and a symbol `f`)."""
+    by_base: dict[str, list[str]] = {}
+    for name in aliases:
+        by_base.setdefault(name.split("(", 1)[0].strip(), []).append(name)
+    reached: set[str] = set()
+    todo = [r for r in roots if r in aliases]
+    while todo:
+        name = todo.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        code = re.sub(r'"(?:[^"\\]|\\.)*"|\'[^\']*\'', " ", aliases[name])
+        for word in re.findall(r"[A-Za-z_][\w-]*", code):
+            todo.extend(by_base.get(word, ()))
+    return reached
+
+
 def _jj_user_layer(exe: str, root: Path) -> str:
-    """A config file of the user's `_JJ_USER_KEYS` settings, for `JJ_CONFIG`.
+    """A config file of the user's `_JJ_USER_KEYS` settings and
+    `_JJ_USER_ALIASES` revset aliases, for `JJ_CONFIG`.
 
     Read with `jj config list --user` under the user's own environment, in
     `root` (so `--when.repositories` scopes resolve). One file per distinct
@@ -134,16 +163,26 @@ def _jj_user_layer(exe: str, root: Path) -> str:
         cwd=root,
     )
     entries: list[str] = []
+    aliases: dict[str, tuple[str, str]] = {}  # name -> (entry, definition)
     for record in out.stdout.split(_RS):
         name, sep, value = record.strip("\n").partition(_US)
-        if not sep or not name.startswith(_JJ_USER_KEYS):
+        setting = name.startswith(_JJ_USER_KEYS)
+        if not sep or not (setting or name.startswith("revset-aliases.")):
             continue
         entry = f"{name} = {value}\n"
         try:
-            tomllib.loads(entry)
+            parsed = tomllib.loads(entry)
         except tomllib.TOMLDecodeError:
             continue  # not expressible as one line of TOML; jj's default holds
-        entries.append(entry)
+        if setting:
+            entries.append(entry)
+            continue
+        found = list(parsed.get("revset-aliases", {}).items())
+        if len(found) == 1 and isinstance(found[0][1], str):
+            aliases[found[0][0]] = (entry, found[0][1])
+    definitions = {name: definition for name, (_e, definition) in aliases.items()}
+    for name in sorted(_alias_closure(definitions, _JJ_USER_ALIASES)):
+        entries.append(aliases[name][0])
     text = "".join(entries)
     digest = hashlib.sha256(text.encode()).hexdigest()
     with _jj_layers_lock:

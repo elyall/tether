@@ -392,6 +392,44 @@ def test_jj_calls_carry_the_users_identity_and_snapshot_settings_only(
     assert (info.author_name, info.author_email) == ("Ada Lovelace", "ada@example.org")
 
 
+def test_jj_calls_carry_immutable_heads_and_the_aliases_it_names(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Of the user's revset aliases, the layer keeps `immutable_heads()` and
+    every alias it reaches (a name in a string literal is not a reference);
+    the rest -- one shadowing `files()` included -- stay behind."""
+    import tomllib
+
+    from tether.vcs import _jj_user_layer
+
+    if detect_vcs(vcs_root).kind != "jj":
+        pytest.skip("jj config layers")
+    cfg = tmp_path_factory.mktemp("jjuser") / "user.toml"
+    cfg.write_text(
+        '[user]\nname = "Ada Lovelace"\nemail = "ada@example.org"\n'
+        "[revset-aliases]\n"
+        '"immutable_heads()" = "builtin_immutable_heads() | guarded() | kept"\n'
+        '"guarded()" = \'description(exact:"unrelated") | deep(@)\'\n'
+        '"deep(x)" = "x-"\n'
+        'kept = "root()"\n'
+        '"files(x)" = "none()"\n'
+        'unrelated = "@"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JJ_CONFIG", str(cfg))
+    layer = tomllib.loads(
+        Path(_jj_user_layer("jj", vcs_root)).read_text(encoding="utf-8")
+    )
+    assert layer["revset-aliases"] == {
+        "immutable_heads()": "builtin_immutable_heads() | guarded() | kept",
+        "guarded()": 'description(exact:"unrelated") | deep(@)',
+        "deep(x)": "x-",
+        "kept": "root()",
+    }
+
+
 def test_repo_level_aliases_do_not_bend_what_tether_reads(
     vcs_root: Path,
     tmp_path_factory: pytest.TempPathFactory,

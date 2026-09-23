@@ -106,7 +106,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to their preconditions; re-run a plan saved in format 1 or 2.
 - `gc` and `promote` print what they applied along with the failures, and
   exit 3 when part of the work was done.
-- jj calls keep only your identity, signing, snapshot and git settings.
+- jj calls keep only your identity, signing, snapshot and git settings, and
+  your `immutable_heads()` with the revset aliases it names.
 - A new file of yours that jj has not snapshotted stays in the change it was
   made in when tether moves the working copy.
 - Every `open` follows the checkout's current bookmark; on Windows a default

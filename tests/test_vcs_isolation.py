@@ -286,6 +286,46 @@ def test_tethers_own_new_manifest_follows_the_checkout(
         assert ".tether/objects/aux.toml" not in listed, head
 
 
+def test_abandon_and_drop_honour_the_users_immutable_heads(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """jj: tether's calls read the user's config through a layer that left
+    every revset alias behind, `immutable_heads()` included, so `abandon`
+    and `drop` rewrote commits the user had marked immutable. That alias,
+    and each alias it names, comes along."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj immutable_heads()")
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    _write(repo, "db", {"x": 1})
+    guarded = repo.commit("feat work").vcs_commit
+    assert guarded is not None
+    cfg = tmp_path_factory.mktemp("jjuser") / "user.toml"
+    cfg.write_text(
+        '[user]\nname = "tether tests"\nemail = "tests@tether.dev"\n'
+        "[revset-aliases]\n"
+        '"immutable_heads()" = "builtin_immutable_heads() | guarded()"\n'
+        f'"guarded()" = "{guarded}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JJ_CONFIG", str(cfg))
+
+    with pytest.raises(VcsError, match="immutable"):
+        Repo.find(vcs_root).abandon([guarded])
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.commit_alive(guarded)
+    repo.new("main")
+    with pytest.raises(VcsError, match="immutable"):
+        repo.drop("feat")
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.bookmarks()["feat"] == guarded
+    assert repo.vcs.commit_alive(guarded)
+
+
 def test_abandon_restores_later_manifests_under_a_hostile_config(
     vcs_root: Path, hostile_vcs_config: Path
 ) -> None:
