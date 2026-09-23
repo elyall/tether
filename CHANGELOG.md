@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   jj or git tracks them, with the command that untracks them. The committed
   `.tether/.gitignore` was all that kept them out, so a cloned
   `secrets.toml` naming `git_path` ran that program on `tether status`.
+- git 2.38 is the minimum version, checked by the VCS adapter and the `git`
+  backend; an older git ignores `safe.bareRepository` without a word.
 
 ### Added
 

@@ -33,6 +33,7 @@ from typing import Any, Protocol, runtime_checkable
 from tether.errors import VcsError
 
 __all__ = [
+    "MIN_GIT_VERSION",
     "MIN_JJ_VERSION",
     "CommitInfo",
     "GitAdapter",
@@ -46,6 +47,12 @@ __all__ = [
 MIN_JJ_VERSION = (0, 43, 0)
 """The oldest jj tether runs on; the adapter checks once and refuses an older
 one. CI runs 0.45.1."""
+
+MIN_GIT_VERSION = (2, 38, 0)
+"""The oldest git tether runs on: `safe.bareRepository`, which keeps the git
+backend from taking a directory a clone ships for a bare repository, arrived
+in 2.38, and an older git ignores it without a word. The git adapter and the
+git backend each check once and refuse an older one."""
 
 _TREE_MODE = "40000"
 _BLOB_MODES = frozenset({"100644", "100755"})
@@ -164,6 +171,30 @@ def git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
         and not k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
     }
     return {**env, **(extra or {})}
+
+
+def require_git_version(exe: str) -> None:
+    """Refuse a git older than `MIN_GIT_VERSION`; an unparseable banner (a
+    custom build) passes, as jj's does.
+
+    Raises:
+        VcsError: `exe` is too old, missing, or fails `--version`.
+    """
+    try:
+        proc = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, env=git_env()
+        )
+    except FileNotFoundError as exc:
+        raise VcsError(f"executable not found: {exe}") from exc
+    if proc.returncode != 0:
+        raise VcsError(f"command failed ({exe} --version): {proc.stderr.strip()}")
+    found = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", proc.stdout)
+    if found and tuple(int(n or 0) for n in found.groups()) < MIN_GIT_VERSION:
+        wanted = ".".join(str(n) for n in MIN_GIT_VERSION)
+        raise VcsError(
+            f"git {found.group(0)} is too old: tether needs git {wanted} or newer "
+            f"({exe})"
+        )
 
 
 def _run(
@@ -1408,7 +1439,17 @@ class GitAdapter:
 
     def __init__(self, root: Path, executable: str = "git") -> None:
         self.root = root
-        self._exe = executable
+        self._exe_unchecked = executable
+        self._version_checked = False
+
+    @property
+    def _exe(self) -> str:
+        """The git executable, refused once per adapter if older than
+        `MIN_GIT_VERSION`; every call goes through here."""
+        if not self._version_checked:
+            require_git_version(self._exe_unchecked)
+            self._version_checked = True
+        return self._exe_unchecked
 
     def _git(
         self,

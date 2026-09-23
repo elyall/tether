@@ -29,10 +29,10 @@ from tether.backends.base import (
     check_expected,
     register_backend,
 )
-from tether.errors import BackendError, MergeConflict, RefMovedError
+from tether.errors import BackendError, MergeConflict, RefMovedError, VcsError
 from tether.handles import GitHandle, Handle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
-from tether.vcs import git_env
+from tether.vcs import git_env, require_git_version
 
 _HARDENED = (
     "-c",
@@ -85,6 +85,18 @@ class GitBackend(ObjectBackend):
         configured = self._config.get("git_path")
         self._git: str = configured or shutil.which("git") or "git"
         self._checkout: Path | None = None
+        self._version_checked = False
+
+    def _require_version(self) -> None:
+        """Refuse a git older than `MIN_GIT_VERSION`, once per backend:
+        `_HARDENED`'s `safe.bareRepository` means nothing to an older one."""
+        if self._version_checked:
+            return
+        try:
+            require_git_version(self._git)
+        except VcsError as exc:
+            raise BackendError(str(exc), kind="git") from exc
+        self._version_checked = True
 
     def configure_checkout(self, root: Path) -> None:
         self._checkout = root.resolve()
@@ -162,6 +174,7 @@ class GitBackend(ObjectBackend):
     def _proc(
         self, locator: Locator, *args: str, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
+        self._require_version()
         return subprocess.run(
             [self._git, *_HARDENED, "-C", str(self._path(locator)), *args],
             capture_output=True,

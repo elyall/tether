@@ -236,6 +236,62 @@ def test_jj_below_the_minimum_version_is_refused(
     ]
 
 
+def _fake_git(where: Path, banner: str) -> tuple[Path, Path]:
+    """A `git` that prints `banner` for `--version` (counting the asks) and
+    fails everything else."""
+    calls = where / "version-calls"
+    exe = where / "git"
+    exe.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        f"  echo . >> '{calls}'\n  echo '{banner}'\n  exit 0\nfi\nexit 1\n"
+    )
+    exe.chmod(0o755)
+    return exe, calls
+
+
+@pytest.mark.parametrize(
+    ("banner", "refused"),
+    [
+        ("git version 2.37.9", True),
+        ("git version 2.9.5", True),  # compared as numbers, not text
+        ("git version 1.8.3.1", True),
+        ("git version 2.38.0", False),
+        ("git version 2.38", False),
+        ("git version 2.39.5 (Apple Git-154)", False),
+        ("git version 2.45.2.windows.1", False),
+        ("git version 3.0.0", False),
+        ("a custom build", False),
+    ],
+)
+def test_git_below_the_minimum_version_is_refused_by_adapter_and_backend(
+    tmp_path: Path, banner: str, refused: bool
+) -> None:
+    """The documented minimum (2.38, for `safe.bareRepository`) is enforced
+    like jj's: once per adapter and once per git backend, before any other
+    git call."""
+    from tether.backends.git import GitBackend
+    from tether.errors import BackendError, VcsError
+    from tether.vcs import GitAdapter
+
+    exe, calls = _fake_git(tmp_path, banner)
+    adapter = GitAdapter(tmp_path, executable=str(exe))
+    backend = GitBackend({"git_path": str(exe)})
+    code = tmp_path / "code"
+    code.mkdir()
+    if refused:
+        with pytest.raises(VcsError, match=r"git [\d.]+ is too old.*2\.38\.0"):
+            adapter.current_rev()
+        with pytest.raises(BackendError, match=r"git [\d.]+ is too old.*2\.38\.0"):
+            backend.fingerprint({"path": str(code)}, None)
+        return
+    for _ in range(3):
+        with pytest.raises(VcsError, match="could not resolve"):
+            adapter.current_rev()  # past the check, into the (failing) fake
+        with pytest.raises(BackendError, match="rev-parse"):
+            backend.fingerprint({"path": str(code)}, None)
+    assert calls.read_text().count(".") == 2  # once each
+
+
 def test_jj_history_walk_reads_every_side_of_a_conflicted_commit(
     vcs_root: Path,
 ) -> None:
