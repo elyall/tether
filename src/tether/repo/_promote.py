@@ -691,6 +691,15 @@ class PromoteOps(RepoCore):
                             f"({exc}); left as it is -- commit them and promote again"
                         )
                         continue
+                    except TetherError as exc:
+                        # The merge landed; a branch the store will not move
+                        # (git: checked out in a worktree) keeps its head.
+                        report.kept_forks[key] = (
+                            f"{working_ref} was not reset onto the merge result "
+                            f"({exc}); left as it is -- the next commit pins it and "
+                            "promote merges again"
+                        )
+                        continue
                 if (
                     key in self.workspace.working_refs
                     or key in self.workspace.fork_points

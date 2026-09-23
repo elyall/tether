@@ -393,12 +393,13 @@ class GitBackend(ObjectBackend):
         old = _old_value(expected)
         if exists and exists == sha == old:
             return name  # already at the source: left alone
-        if exists and exists != sha and self._checked_out(locator) == name:
-            # What `branch -f` refuses too: moving the ref under a checkout
-            # leaves its index and working tree describing another commit.
+        if exists != sha and (where := self._worktree_of(locator, name)):
+            # What `branch -f` refuses too, in every worktree: moving the ref
+            # under a checkout leaves its index and working tree describing
+            # another commit.
             raise BackendError(
-                f"branch {name} is checked out; check out another branch before "
-                "it is reset",
+                f"branch {name} is checked out in {where}; check out another "
+                "branch there before it is reset",
                 kind="git",
             )
         proc = self._proc(locator, "update-ref", f"refs/heads/{name}", sha, old)
@@ -592,6 +593,25 @@ class GitBackend(ObjectBackend):
         out = self._run(locator, "symbolic-ref", "--short", "-q", "HEAD", check=False)
         return out or None
 
+    def _worktree_of(
+        self, locator: Locator, branch: str, *, other: bool = False
+    ) -> str | None:
+        """The worktree that has `branch` checked out (an unborn one too), or
+        `None`; with `other`, only a worktree other than the locator's."""
+        top = self._run(locator, "rev-parse", "--show-toplevel", check=False)
+        here = Path(top).resolve() if top else None
+        where: str | None = None
+        for line in self._run(locator, "worktree", "list", "--porcelain").splitlines():
+            if line.startswith("worktree "):
+                where = line.removeprefix("worktree ")
+            elif (
+                line == f"branch refs/heads/{branch}"
+                and where is not None
+                and (not other or Path(where).resolve() != here)
+            ):
+                return where
+        return None
+
     def _base_branch(self, locator: Locator) -> str:
         """The branch `promote`/`merge` move: `ref`, or the checked-out branch."""
         ref = str(locator.get("ref", "HEAD"))
@@ -685,6 +705,13 @@ class GitBackend(ObjectBackend):
             # `base` between the two is not caught the way `update-ref`
             # catches it below.
             self._run(locator, "merge", "--ff-only", "--end-of-options", target)
+        elif where := self._worktree_of(locator, base, other=True):
+            raise BackendError(
+                f"{base} is checked out in {where}; moving it from here would "
+                "leave that checkout describing another commit -- promote from "
+                "there, or check out another branch there first",
+                kind="git",
+            )
         else:
             proc = self._proc(locator, "update-ref", f"refs/heads/{base}", target, old)
             if proc.returncode != 0:

@@ -302,6 +302,139 @@ def test_git_promote_refuses_when_the_base_moved_after_the_ancestry_check(
     assert _git(code, "rev-parse", main) == fork_sha
 
 
+@pytest.mark.parametrize(
+    ("where", "conditional"),
+    [
+        ("here", True),
+        ("linked", True),
+        ("linked", False),  # `branch -f`, the unconditional path, agrees
+        ("unborn", True),  # an orphan checkout of the name, reviewed ABSENT
+    ],
+)
+def test_git_fork_never_moves_a_branch_checked_out_in_any_worktree(
+    tmp_path: Path, where: str, conditional: bool
+) -> None:
+    """Port of the review's D7: the compare-and-swap fork (`update-ref`)
+    checked only the locator's own worktree, so a branch checked out in a
+    linked worktree was reset under it -- its index and files then describe
+    another commit. Refused wherever it is checked out, as `branch -f` is."""
+    from tether.backends.base import ABSENT
+
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    b = GitBackend()
+    loc = {"path": str(code), "ref": main}
+    name = "tether.ws.0a1b2c3d.work"
+    wt = tmp_path / "wt"
+    if where == "unborn":
+        _git(code, "worktree", "add", "-q", "--detach", str(wt))
+        _git(wt, "checkout", "-q", "--orphan", name)
+        expected = ABSENT
+    else:
+        b.fork(loc, {"sha": sha0}, name)
+        sha1 = _commit_on(code, name, "print(1)\n")
+        _git(code, "checkout", "-q", main)
+        if where == "linked":
+            _git(code, "worktree", "add", "-q", str(wt), name)
+        else:
+            _git(code, "checkout", "-q", name)
+        expected = {"sha": sha1} if conditional else None
+    before = _git(code, "for-each-ref", "--format=%(refname) %(objectname)")
+    with pytest.raises(BackendError, match=r"checked out in|used by worktree"):
+        b.fork(loc, {"sha": sha0}, name, expected=expected)
+    assert _git(code, "for-each-ref", "--format=%(refname) %(objectname)") == before
+
+
+def test_git_promote_never_moves_a_base_checked_out_in_another_worktree(
+    tmp_path: Path,
+) -> None:
+    """The same for the base branch: with the locator's checkout elsewhere,
+    promote moves the base through `update-ref` -- but a linked worktree that
+    has it checked out would be left describing the old commit."""
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    b = GitBackend()
+    loc = {"path": str(code), "ref": main}
+    wref = b.fork(loc, {"sha": sha0}, "tether.ws.0a1b2c3d.work")
+    fork_sha = _commit_on(code, wref, "print('fork')\n")
+    _git(code, "checkout", "-q", "-b", "elsewhere")
+    _git(code, "worktree", "add", "-q", str(tmp_path / "wt"), main)
+    with pytest.raises(BackendError, match="checked out in"):
+        b.promote(loc, wref, expected={"sha": sha0})
+    assert _git(code, "rev-parse", main) == sha0
+    _git(code, "worktree", "remove", str(tmp_path / "wt"))
+    assert b.promote(loc, wref, expected={"sha": sha0})["sha"] == fork_sha
+
+
+def _git_dataset(vcs_root: Path, outside: Path) -> tuple[Repo, Path, str]:
+    """A dataset with one git object, on bookmark `work` with its fork made
+    and checked out in a linked worktree (how one writes to a git fork),
+    holding one committed and pinned write."""
+    code = outside / "code"
+    _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    repo = Repo.init(vcs_root)
+    repo.add("code", "git", {"path": str(code), "ref": main})
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    wref = repo.workspace.working_refs["code"]
+    wt = outside / "wt"
+    _git(code, "worktree", "add", "-q", str(wt), wref)
+    (wt / "fork.py").write_text("fork = 1\n", encoding="utf-8")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", "fork work")
+    repo.commit("fork work")
+    return repo, wt, wref
+
+
+@pytest.mark.parametrize("command", ["new --discard", "restore --discard"])
+def test_resets_refuse_a_working_branch_checked_out_in_a_worktree(
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory, command: str
+) -> None:
+    """`new --discard` and `restore` reset the working branch from the head
+    they reviewed. The branch is checked out in the user's worktree, so the
+    reset is refused and the branch and that checkout keep what they hold."""
+    outside = tmp_path_factory.mktemp("outside")
+    repo, wt, wref = _git_dataset(vcs_root, outside)
+    baseline = next(e for e in reversed(repo.ops()) if e.command == "commit")
+    (wt / "more.py").write_text("more = 1\n", encoding="utf-8")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", "uncommitted to the dataset")
+    head = _git(wt, "rev-parse", "HEAD")
+    with pytest.raises(TetherError, match="checked out in"):
+        if command == "new --discard":
+            repo.new("work", eager=True, discard=True)
+        else:
+            repo.restore(["code"], str(baseline.result["vcs_commit"]), discard=True)
+    assert _git(wt, "rev-parse", wref) == head
+    assert _git(wt, "status", "--porcelain") == ""
+
+
+def test_the_reset_after_a_merge_keeps_a_branch_checked_out_in_a_worktree(
+    vcs_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """After a merge the fork is reset onto the merge result. Checked out in a
+    worktree, it is kept and reported -- the merge itself stands -- rather
+    than moved under the checkout (or the promote failing after it landed)."""
+    outside = tmp_path_factory.mktemp("outside")
+    repo, wt, wref = _git_dataset(vcs_root, outside)
+    code = outside / "code"
+    main = _git(code, "branch", "--show-current")
+    (code / "trunk.py").write_text("trunk = 1\n", encoding="utf-8")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-qm", "main moved")
+    fork_head = _git(wt, "rev-parse", "HEAD")
+    plan = repo.plan_promote()
+    assert [a.op for a in plan.actions] == ["merge"]
+    report = repo.apply_promote(plan)
+    assert report.merged["code"]["sha"] == _git(code, "rev-parse", main)
+    assert "checked out in" in report.kept_forks["code"]
+    assert _git(wt, "rev-parse", wref) == fork_head
+    assert _git(wt, "status", "--porcelain") == ""
+
+
 def test_git_merge_refuses_a_stale_expected(tmp_path: Path) -> None:
     from tether.errors import RefMovedError
 
