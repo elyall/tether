@@ -183,6 +183,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `iceberg`: tables with no snapshot yet are accepted; requires
   `pyiceberg >= 0.11`.
 - `ducklake`: a relative `metadata` path is stored absolute.
+- `ducklake`: a leading `~` in `metadata` or `data_path` is expanded (it was
+  stored as `<cwd>/~/...`), and a bare `sqlite:` or `duckdb:` metadata path
+  is stored absolute too.
 
 ## [0.1.0b3] - 2026-09-18
 

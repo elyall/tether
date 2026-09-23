@@ -102,7 +102,13 @@ class DuckLakeBackend(ObjectBackend):
     MATURITY = "experimental"
     SAFE_CONFIG_KEYS = frozenset()  # init_sql: secrets.toml only
     LOCAL_PATH_KEYS = ("metadata", "uri", "data_path")
-    LOCAL_PATH_PREFIXES = ("ducklake:", "ducklake:duckdb:", "ducklake:sqlite:")
+    LOCAL_PATH_PREFIXES = (
+        "ducklake:",
+        "ducklake:duckdb:",
+        "ducklake:sqlite:",
+        "duckdb:",
+        "sqlite:",
+    )
     capabilities = (
         Capability.FINGERPRINT
         | Capability.ADDRESSABLE

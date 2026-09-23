@@ -1094,13 +1094,16 @@ def canonical_uri(uri: str) -> str:
 
 
 def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> Locator:
-    """Resolve relative local paths in `locator` against `base`.
+    """Resolve relative local paths in `locator` against `base`, and expand a
+    leading `~` to the home directory.
 
     Only the keys the backend lists in :attr:`ObjectBackend.LOCAL_PATH_KEYS`
-    are touched, and only when the value is a bare relative path: URLs
-    (`s3://`, `file://`, `ducklake:`...) and absolute paths pass through. A
-    locator is committed and read from any directory and any clone, so the
-    path it names must not depend on where `add` happened to run.
+    are touched, and only when the value is a bare relative path or starts
+    with `~`: URLs (`s3://`, `file://`, `ducklake:`...) and absolute paths
+    pass through. A locator is committed and read from any directory and any
+    clone, so the path it names must not depend on where `add` happened to
+    run -- nor on the reader's own `~`, which the libraries behind some
+    backends expand and others take for a directory named `~`.
     """
     from urllib.parse import urlparse
 
@@ -1112,9 +1115,14 @@ def absolutize_locator(backend: ObjectBackend, locator: Locator, base: Path) -> 
         prefixes = (p for p in backend.LOCAL_PATH_PREFIXES if value.startswith(p))
         prefix = max(prefixes, key=len, default="")
         path = value[len(prefix) :]
-        if not path or urlparse(path).scheme or Path(path).is_absolute():
+        if not path or urlparse(path).scheme:
             continue
-        out[key] = prefix + str((base / path).resolve())
+        expanded = os.path.expanduser(path)
+        if Path(expanded).is_absolute():
+            if expanded != path:
+                out[key] = prefix + expanded
+            continue
+        out[key] = prefix + str((base / expanded).resolve())
     return out
 
 

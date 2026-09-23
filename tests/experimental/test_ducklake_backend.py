@@ -227,6 +227,65 @@ def test_relative_metadata_path_is_stored_absolute(
         assert got["metadata"] == stored, given
 
 
+def test_home_and_bare_sqlite_duckdb_metadata_paths_are_stored_absolute(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ducklake:~/lake.ducklake` worked in 0.1.0b3 (DuckDB expands `~`) and
+    was then stored as `<cwd>/~/lake.ducklake`; `sqlite:` and `duckdb:`
+    without `ducklake:` in front stayed relative. Every local spelling is
+    stored absolute -- `~` expanded, a relative path against the directory
+    `add` ran in -- and remote catalogs pass through."""
+    from tether.backends.base import absolutize_locator
+    from tether.repo import Repo
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    _sql(_lake(home, "lake"), "CREATE TABLE w.t (a INTEGER)")
+    repo = Repo.init(vcs_root)
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+    repo.add(
+        "home",
+        "ducklake",
+        {"metadata": "ducklake:~/lake.ducklake", "data_path": "~/lake_files/"},
+    )
+    loc = repo.objects["home"].locator
+    assert loc == {
+        "metadata": f"ducklake:{home / 'lake.ducklake'}",
+        "data_path": f"{home / 'lake_files'}/",
+    }
+    monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere"))
+    assert repo.backend_for("ducklake").fingerprint(loc, None)["snapshot_id"] == 1
+
+    b = repo.backend_for("ducklake")
+    base = Path("/work")
+    for given, stored in (
+        ("~/cat.ducklake", f"{home}/cat.ducklake"),
+        ("ducklake:~/cat.ducklake", f"ducklake:{home}/cat.ducklake"),
+        ("ducklake:duckdb:~/cat.duckdb", f"ducklake:duckdb:{home}/cat.duckdb"),
+        ("ducklake:sqlite:~/cat.db", f"ducklake:sqlite:{home}/cat.db"),
+        ("sqlite:~/cat.db", f"sqlite:{home}/cat.db"),
+        ("sqlite:cat.db", f"sqlite:{base / 'cat.db'}"),
+        ("sqlite:sub/../cat.db", f"sqlite:{base / 'cat.db'}"),
+        ("duckdb:cat.duckdb", f"duckdb:{base / 'cat.duckdb'}"),
+        ("sqlite:/abs/cat.db", "sqlite:/abs/cat.db"),
+        ("ducklake:postgres:dbname=lake host=db", None),
+        ("postgres:dbname=lake host=db", None),
+        ("ducklake:md:lake", None),
+        ("md:lake", None),
+    ):
+        got = absolutize_locator(b, {"metadata": given}, base)
+        assert got["metadata"] == (stored or given), given
+    for given, stored in (
+        ("~/files/", f"{home}/files/"),
+        ("files/", str(base / "files")),
+        ("s3://bucket/files/", "s3://bucket/files/"),
+    ):
+        got = absolutize_locator(b, {"data_path": given}, base)
+        assert got["data_path"] == stored, given
+
+
 def test_attach_sql_quotes_and_options() -> None:
     assert (
         attach_sql("ducklake:a'b.db", "x")
