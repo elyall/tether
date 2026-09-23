@@ -1564,6 +1564,92 @@ def test_one_writer_per_checkout(vcs_root: Path) -> None:
     repo.new(bookmark="work")
 
 
+def test_threads_sharing_one_repo_take_the_checkout_lock_in_turn(
+    vcs_root: Path,
+) -> None:
+    """Port of the review's `engine/r8` and `e6`: the lock's re-entrancy
+    counter was per Repo, so a second thread entering while the first held
+    the lock walked in as if nested -- no mutual exclusion -- and the counter
+    could end at -1, after which that Repo never took the lock, or refreshed,
+    again. The depth is per thread now, and threads take turns."""
+    import threading
+
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    inside: list[str] = []
+    a_in = threading.Event()
+    release_a = threading.Event()
+
+    def thread_a() -> None:
+        with repo._writer_lock():
+            inside.append("A in")
+            a_in.set()
+            release_a.wait(5)
+            inside.append("A out")
+
+    def thread_b() -> None:
+        a_in.wait(5)
+        with repo._writer_lock():
+            inside.append("B in")
+
+    ta, tb = threading.Thread(target=thread_a), threading.Thread(target=thread_b)
+    ta.start()
+    tb.start()
+    assert a_in.wait(5)
+    time.sleep(0.3)  # B has had every chance to slip in
+    assert inside == ["A in"]  # ... and is waiting instead
+    release_a.set()
+    ta.join(5)
+    tb.join(5)
+    assert inside == ["A in", "A out", "B in"]
+    assert getattr(repo._lock_depth, "writer", 0) == 0
+
+    # The Repo still excludes another Repo (another process) afterwards, and
+    # gives up after `LOCK_TIMEOUT` as before.
+    other = Repo.find(vcs_root)
+    repo.LOCK_TIMEOUT = 0.3
+    with (
+        other._writer_lock(),
+        pytest.raises(TetherError, match="another tether command is writing"),
+        repo._writer_lock(),
+    ):
+        pass  # pragma: no cover - the lock must not be granted
+    repo.commit("after")  # and works once the other has let go
+
+
+def test_without_fcntl_writing_commands_refuse_and_reading_ones_work(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the platform has no `fcntl` (Windows) nothing orders two tether
+    processes in one checkout, so commands that write stop with one clear
+    message; `status`, `verify`, `snapshot` and a dry-run `gc` go ahead."""
+    from tether.repo import _core
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    store.write(system, "main", {"v": 2})
+    monkeypatch.setattr(_core, "fcntl", None)
+
+    assert repo.snapshot()["db"] == {"snapshot_id": store.resolve(system, "main")}
+    (db,) = repo.status().objects
+    assert db.changed
+    assert all(v.ok for v in repo.verify().values())
+    assert repo.gc(dry_run=True).dry_run
+    for attempt in (
+        lambda: repo.commit("refused"),
+        lambda: repo.new(bookmark="work"),
+        lambda: repo.add("late", "memory", {"system": system, "branch": "main"}),
+        lambda: repo.gc(dry_run=False),
+        lambda: repo.open("db", read_only=False),
+    ):
+        with pytest.raises(TetherError, match="no `fcntl`"):
+            attempt()
+    assert "late" not in repo.objects and repo.workspace.bookmark == "main"
+    assert repo.open("db", read_only=True).read_only
+
+
 def test_relative_local_paths_are_pinned_down_at_add(
     vcs_root: Path,
     monkeypatch: pytest.MonkeyPatch,

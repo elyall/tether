@@ -6,9 +6,10 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import threading
 import warnings
 
-try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
+try:  # POSIX advisory locks; without them (Windows) writing commands refuse
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
@@ -187,71 +188,108 @@ class RepoCore:
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
-        self._lock_depth = 0
-        self._repo_lock_depth = 0
+        self._lock_depth = threading.local()
+        """Per thread: how deep this thread is in `_writer_lock` (`writer`) and
+        `_repo_lock` (`repo`). A Repo shared by threads (a service) must not
+        let a second thread in because the first holds the lock."""
+        self._writer_guard = threading.RLock()
+        self._repo_guard = threading.RLock()
         self._op_parent: str | None = None
         """The operation the ones journaled now are steps of (see `_as_step_of`)."""
 
+    NO_FCNTL_MESSAGE = (
+        "tether cannot take its checkout lock on this platform (no `fcntl`), so "
+        "commands that write -- to the stores, the manifests or the workspace -- "
+        "are refused here; read-only ones (status, verify, diff, log, ops, "
+        "gc --dry-run) work. Run the writing commands from a POSIX system, or "
+        "WSL, until the lock has a Windows implementation"
+    )
+    """Why a writing command stops where `fcntl` is missing (Windows)."""
+
     @contextlib.contextmanager
-    def _writer_lock(self) -> Iterator[None]:
+    def _writer_lock(self, *, readonly: bool = False) -> Iterator[None]:
         """One writer per checkout, for the duration of a writing command.
 
         Two `tether` processes racing in the same checkout would interleave
         journal entries and `workspace.toml` writes and plan against each
         other's half-done work. The lock is advisory (`flock` on
-        `.tether/lock`), re-entrant within one `Repo`, and held only while the
-        command runs, so a stale file after a crash locks nothing.
+        `.tether/lock`), re-entrant within one thread of one `Repo`, and held
+        only while the command runs, so a stale file after a crash locks
+        nothing. Two threads sharing one `Repo` (a service) take turns: the
+        depth that makes it re-entrant is per thread, and a process-level
+        `RLock` orders the threads before the `flock` orders the processes.
 
         Taking the lock also re-reads `workspace.toml` and the manifests: a
         `Repo` that has lived a while (a notebook, a service) must not write
         back the workspace it loaded at construction over what another
         process wrote since. Between commands a `Repo` holds no unsaved state,
         so the refresh loses nothing.
-        """
-        if self._lock_depth:
-            self._lock_depth += 1
-            try:
-                yield
-            finally:
-                self._lock_depth -= 1
-            return
-        if fcntl is None:
-            # No advisory locks (Windows): still one refresh per outermost
-            # entry, and nested entries must not re-read half-written state.
-            self._lock_depth = 1
-            try:
-                self._refresh()
-                yield
-            finally:
-                self._lock_depth = 0
-            return
-        import time
 
-        path = _m.tether_path(self.root) / _m.LOCK_FILENAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as fh:
-            # Wait, as the repository lock does: a `status` running while a
-            # `commit` finishes should follow it, not fail.
-            deadline = time.monotonic() + self.LOCK_TIMEOUT
-            while True:
-                try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TetherError(
-                            "another tether command is writing in this checkout "
-                            f"({path} is locked); wait for it to finish"
-                        ) from exc
-                    time.sleep(0.05)
-            self._lock_depth = 1
+        Where there is no `fcntl` (Windows) nothing can order two processes,
+        so a command that writes is refused (:data:`NO_FCNTL_MESSAGE`);
+        `readonly` says the caller only reads under the lock (`snapshot`, a
+        dry-run `gc`) and may go ahead with the refresh alone.
+
+        Raises:
+            TetherError: The lock is held by another process (after
+                `LOCK_TIMEOUT`) or thread, or the platform has no `fcntl` and
+                the command writes.
+        """
+        if fcntl is None and not readonly:
+            raise TetherError(self.NO_FCNTL_MESSAGE)
+        depth = getattr(self._lock_depth, "writer", 0)
+        if depth:
+            self._lock_depth.writer = depth + 1
             try:
-                self._refresh()
                 yield
             finally:
-                self._lock_depth = 0
-                with contextlib.suppress(OSError):
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                self._lock_depth.writer = depth
+            return
+        if not self._writer_guard.acquire(timeout=self.LOCK_TIMEOUT):
+            raise TetherError(
+                "another thread of this process is writing in this checkout "
+                "through the same Repo; wait for it to finish"
+            )
+        try:
+            if fcntl is None:
+                # No advisory locks: still one refresh per outermost entry,
+                # and nested entries must not re-read half-written state.
+                self._lock_depth.writer = 1
+                try:
+                    self._refresh()
+                    yield
+                finally:
+                    self._lock_depth.writer = 0
+                return
+            import time
+
+            path = _m.tether_path(self.root) / _m.LOCK_FILENAME
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a+", encoding="utf-8") as fh:
+                # Wait, as the repository lock does: a `status` running while
+                # a `commit` finishes should follow it, not fail.
+                deadline = time.monotonic() + self.LOCK_TIMEOUT
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if time.monotonic() >= deadline:
+                            raise TetherError(
+                                "another tether command is writing in this checkout "
+                                f"({path} is locked); wait for it to finish"
+                            ) from exc
+                        time.sleep(0.05)
+                self._lock_depth.writer = 1
+                try:
+                    self._refresh()
+                    yield
+                finally:
+                    self._lock_depth.writer = 0
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._writer_guard.release()
 
     REPO_LOCK_TIMEOUT = 60.0
     """Seconds a command waits for the repository-wide lock before giving up."""
@@ -273,40 +311,49 @@ class RepoCore:
         fork: two `--shared` checkouts must not both find it absent), take
         this lock -- a `flock` on `tether.lock` in the store every checkout
         shares (git's common dir, jj's repo dir). Waiting, not failing: these
-        commands are short.
+        commands are short. Re-entrant per thread, as `_writer_lock` is.
         """
-        if self._repo_lock_depth or fcntl is None:
-            self._repo_lock_depth += 1
+        depth = getattr(self._lock_depth, "repo", 0)
+        if depth or fcntl is None:
+            self._lock_depth.repo = depth + 1
             try:
                 yield
             finally:
-                self._repo_lock_depth -= 1
+                self._lock_depth.repo = depth
             return
-        import time
+        if not self._repo_guard.acquire(timeout=self.REPO_LOCK_TIMEOUT):
+            raise TetherError(
+                "another thread of this process is committing, collecting or "
+                "forking through the same Repo; wait for it to finish"
+            )
+        try:
+            import time
 
-        path = self.vcs.shared_dir() / "tether.lock"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as fh:
-            deadline = time.monotonic() + self.REPO_LOCK_TIMEOUT
-            while True:
+            path = self.vcs.shared_dir() / "tether.lock"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a+", encoding="utf-8") as fh:
+                deadline = time.monotonic() + self.REPO_LOCK_TIMEOUT
+                while True:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if time.monotonic() >= deadline:
+                            raise TetherError(
+                                "another tether command is committing, collecting "
+                                f"or forking in a checkout of this repository ({path} "
+                                "is locked); wait for it to finish"
+                            ) from exc
+                        time.sleep(0.05)
+                self._lock_depth.repo = 1
                 try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TetherError(
-                            "another tether command is committing, collecting or "
-                            f"forking in a checkout of this repository ({path} is "
-                            "locked); wait for it to finish"
-                        ) from exc
-                    time.sleep(0.05)
-            self._repo_lock_depth = 1
-            try:
-                yield
-            finally:
-                self._repo_lock_depth = 0
-                with contextlib.suppress(OSError):
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    yield
+                finally:
+                    self._lock_depth.repo = 0
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._repo_guard.release()
 
     def _refresh(self) -> None:
         """Reload the per-checkout state from disk (see `_writer_lock`).

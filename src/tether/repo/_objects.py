@@ -431,8 +431,9 @@ class ObjectOps(RepoCore):
         # refreshes it), not from the one this Repo loaded, which another
         # process may have moved to a different bookmark since. Reading first
         # and locking only the write would cache one bookmark's states under
-        # another's name.
-        with self._writer_lock():
+        # another's name. Read-only as far as the lock is concerned: what it
+        # writes is this checkout's own cache, so it works without `fcntl`.
+        with self._writer_lock(readonly=True):
             moving = set(self.moving_keys())
             # Upstream only means something where the position *could* follow
             # it: on the trunk (or on no bookmark). A feature bookmark forked

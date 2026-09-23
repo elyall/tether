@@ -734,8 +734,9 @@ class GcOps(RepoCore):
                 create (kept and listed as `keep-pin` by default; see `plan_gc`).
         """
         # Plan and apply under one lock: planning sees the state the lock
-        # refreshed, and nothing in this checkout moves in between.
-        with self._writer_lock():
+        # refreshed, and nothing in this checkout moves in between. Planning
+        # only reads; `apply_gc` takes the lock as a writer itself.
+        with self._writer_lock(readonly=True):
             plan = self.plan_gc(
                 prune_bookmarks=prune_bookmarks,
                 keep_bookmarks=keep_bookmarks,

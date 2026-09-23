@@ -60,6 +60,19 @@ checkout of the repository -- keeps the pins that entry names. Re-running the
 commit finishes what it started; `forget-workspace` retires the log with the
 checkout. Re-run `tether verify` after merging manifests across branches.
 
+### One writer per checkout, one per repository
+
+Every command that writes takes an advisory lock on the checkout
+(`.tether/lock`), and the ones that create or release references -- `commit`,
+`pull`, `gc`, `undo`, `abandon`, `new`, the first writable `open` of a
+`--shared` bookmark -- also one on the repository, shared by every checkout of
+it; a second command waits, then gives up with a message naming the lock.
+Threads sharing one `Repo` take turns the same way. On Windows, which has no
+`fcntl`, nothing can order two processes, so commands that write are refused
+there with one clear message while `status`, `verify`, `diff`, `log`, `ops`
+and `gc --dry-run` work; run the writing commands from a POSIX system or WSL
+until the lock has a Windows implementation.
+
 ### Forks are lazy
 
 `new` records which branch each object *will* get; the first writable `open`
