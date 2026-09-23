@@ -43,6 +43,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Partial success (`undo`, `repair`, `upgrade`, `forget-workspace` that could
+  not reverse or rebuild everything) exits 3; 2 is Click's usage error.
+- `--help` keeps bracketed text such as `[experimental]`; `add --kind` lists
+  each kind with its maturity.
+- Lance objects on a working branch and every Neon object read as changed
+  once after upgrading: their state keys changed (`branch_id`; `commit_xid`
+  for `next_xid`). No migration.
+
 - A plan must carry the preconditions its command requires; one that lacks
   them -- saved by an older tether, or edited -- is refused as stale. Every
   plan binds to the checkout that made it (`--plan FILE` persists the
@@ -91,7 +99,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `neon`: pins are unprotected unless `protected_pins = true`; Free has no
   protected branches, and paid plans allow a few.
 
+### Removed
+
+- The `lakefs` backend, `tether add --repository`/`--prefix`, `LakeFSHandle`
+  and the `lakefs` extra.
+
 ### Fixed
+
+- Delta `history` and `diff` attached the wrong commit to each version below
+  the head.
+- Lance states off `main` carry the branch id; a state from a re-created
+  branch verifies as missing instead of opening another branch's data.
+- `tether diff` with no arguments compares against jj's `@-`, not the working
+  copy commit.
+- File backend: `allow_http` (and the other HTTP client options) work on S3;
+  directory and dangling symlinks count by their target; the racy-stat guard
+  covers every timestamp granularity, not only whole seconds.
+- `tether status` labels an object it cannot read `error`, reports the rest,
+  and exits 1 instead of aborting on the first failure.
+- `tether init --json` prints only JSON.
 
 - Two `--shared` checkouts materializing one lazy fork: the second listed the
   branch as absent while the first forked and wrote, then forked onto the pin
@@ -162,6 +188,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An operation-log entry appended after a torn line is no longer lost with it.
 - `--from-plan` refuses `--dry-run` and `--plan`; `commit --from-plan p.json
   --dry-run` committed.
+
+### Experimental
+
+- `neon`: `add` requires `database` and `role`; every connection URI names its
+  endpoint; busy answers (423, 429, 503) are retried with backoff; content is
+  keyed on `commit_xid`, so a compute restart no longer reads as a write.
+- `dolt`: a merge that hits conflicts or constraint violations raises
+  `MergeConflict` (the merge runs inside a transaction and is aborted).
+- `iceberg`: tables with no snapshot yet are accepted; requires
+  `pyiceberg >= 0.11`.
+- `ducklake`: a relative `metadata` path is stored absolute, like every other
+  local path.
 
 ## [0.1.0b3] - 2026-09-18
 
