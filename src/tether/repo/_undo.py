@@ -80,9 +80,10 @@ class UndoOps(RepoCore):
         interrupted operation): undoing the `new` before a `drop` would have
         brought back half of what the drop threw away. `tether undo ID`
         names an older operation; only the `workspace.toml` fields that
-        operation changed come back, never what later ones did to the rest.
-        The steps a `drop` journals (its `new`, its `gc`) are undone with it
-        or not at all. What "reverse" means per command:
+        operation changed come back, and of those only the ones no later
+        operation changed again (the rest are reported as left). The steps a
+        `drop` journals (its `new`, its `gc`) are undone with it or not at
+        all. What "reverse" means per command:
 
         - `commit`: uncommit. The dataset commit becomes working-tree changes
           again (jj `squash --into @`, git `reset --soft`) if it is still the
@@ -94,7 +95,10 @@ class UndoOps(RepoCore):
           it was if it has not moved since. A branch the op *reset* is not
           re-pointed -- the report names its old head and `restore` /
           `new --discard` put it where you want. A created branch that gained
-          writes since the op is refused unless `discard`.
+          writes since the op is refused unless `discard`. A `new` whose
+          bookmark the checkout still works on, under a working copy that
+          has moved on since (a commit there), is refused: the checkout
+          cannot go back, so `tether new` is the way off it.
         - `gc`: forgotten working refs and deleted listings come back (the
           latter from the VCS); the workspace is restored. Deleted branches
           and pins are *irreversible* -- `repair` recreates a bookmark's
@@ -155,7 +159,8 @@ class UndoOps(RepoCore):
                     f"cannot undo {target.command!r}"
                     + (
                         f" ({target.id}, the newest operation); `tether undo ID` "
-                        "names an older one"
+                        "names an older one, and takes back only what nothing "
+                        "since has changed again"
                         if op_id is None
                         else ""
                     )
@@ -218,38 +223,97 @@ class UndoOps(RepoCore):
         self.objects = read_objects(self.root)
         self.workspace = read_workspace(self.root)
 
-    def _restore_workspace(self, entry: OpEntry, report: UndoReport) -> None:
-        """Put back the `workspace.toml` fields `entry` changed, and only those.
-
-        The whole file from before the operation would also take back what
-        later operations did to other fields: undoing an old `add` moved the
-        checkout to the bookmark it was on then, with that bookmark's working
-        refs, under a working copy the VCS had elsewhere. What the operation
-        changed is the difference between the file before it (`pre`) and
-        after it -- the next journaled operation's `pre`, or the file as it
-        is now when nothing was journaled since.
-        """
+    def _states_around(
+        self, entry: OpEntry
+    ) -> tuple[WorkspaceState, WorkspaceState] | None:
+        """`workspace.toml` right before `entry` and right after it: the next
+        journaled operation's `pre`, or the file as it is now when nothing
+        was journaled since. `None` when `entry` recorded no workspace."""
         text = entry.pre.get("workspace")
         if text is None:
-            return
-        before = WorkspaceState.from_toml(str(text))
+            return None
         after_text = self._workspace_after(entry)
         after = (
             WorkspaceState.from_toml(after_text)
             if after_text is not None
             else self.workspace
         )
+        return WorkspaceState.from_toml(str(text)), after
+
+    def _bookmark_kept(self, entry: OpEntry, *, vcs_back: bool = False) -> str | None:
+        """Why undoing `entry` must leave this checkout on the bookmark it is on
+        now, or `None` when it may go back. A later operation moved it on, or
+        the VCS working copy is no longer on the bookmark `entry` left
+        (`vcs_back`: the undo is about to return it there): a workspace put
+        back on the trunk under a working copy that stays on a bookmark's
+        commit writes straight to the store's main."""
+        around = self._states_around(entry)
+        if around is None:
+            return None
+        before, after = around
+        if before.bookmark == after.bookmark:
+            return None
+        if self.workspace.bookmark != after.bookmark:
+            return (
+                "a later operation moved this checkout to "
+                f"{self.workspace.bookmark or 'no bookmark'}"
+            )
+        if (
+            not vcs_back
+            and before.bookmark is not None
+            and before.bookmark not in self._vcs_bookmarks_here()
+        ):
+            return (
+                f"the VCS working copy has moved on from {before.bookmark} since "
+                f"(it is on {', '.join(self._vcs_bookmarks_here()) or 'no bookmark'})"
+            )
+        return None
+
+    def _restore_workspace(self, entry: OpEntry, report: UndoReport) -> None:
+        """Put back the `workspace.toml` fields `entry` changed, and only those
+        nothing has changed again since.
+
+        The whole file from before the operation would also take back what
+        later operations did to other fields: undoing an old `add` moved the
+        checkout to the bookmark it was on then, with that bookmark's working
+        refs, under a working copy the VCS had elsewhere. What the operation
+        changed is the difference between the file before it (`pre`) and
+        after it (`_states_around`). A field whose value now differs from its
+        value right after the operation was set by something later -- an
+        older `new -b` undone after a second `new` sent the checkout to main
+        -- and is left, and reported. So is the bookmark while the checkout
+        cannot go back to it (`_bookmark_kept`), and with it the per-object
+        tables that describe that bookmark's branches.
+        """
+        around = self._states_around(entry)
+        if around is None:
+            return
+        before, after = around
         changed: list[str] = []
+        left: list[str] = []
+        bookmark_kept = self._bookmark_kept(entry, vcs_back=False)
         if before.bookmark != after.bookmark:
-            self.workspace.bookmark = before.bookmark
-            changed.append("bookmark")
+            if bookmark_kept is None:
+                self.workspace.bookmark = before.bookmark
+                changed.append("bookmark")
+            else:
+                left.append(
+                    f"bookmark {self.workspace.bookmark or '(none)'} and its working "
+                    f"refs ({bookmark_kept})"
+                )
         tables: list[str] = []
         keys: set[str] = set()
+        later: list[str] = []
         for table in _WORKSPACE_TABLES:
+            if bookmark_kept is not None and table != "last_snapshot":
+                continue
             was, then = getattr(before, table), getattr(after, table)
             now = getattr(self.workspace, table)
             for key in sorted(set(was) | set(then)):
                 if was.get(key) == then.get(key):
+                    continue
+                if now.get(key) != then.get(key):
+                    later.append(f"{table} of {key}")
                     continue
                 if key in was:
                     now[key] = was[key]
@@ -260,6 +324,10 @@ class UndoOps(RepoCore):
                     tables.append(table)
         if tables:
             changed.append(f"{', '.join(tables)} of {', '.join(sorted(keys))}")
+        if later:
+            left.append(f"{', '.join(later)} (changed again by a later operation)")
+        if left:
+            report.skipped.append(f"workspace.toml: left {'; '.join(left)}")
         if not changed:
             return
         write_workspace(self.root, self.workspace)
@@ -437,6 +505,34 @@ class UndoOps(RepoCore):
     def _undo_new(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         r = entry.result
         refs = r.get("working_refs") or {}
+        before, after = entry.pre.get("vcs"), r.get("vcs")
+        plan_ctx = (entry.plan or {}).get("context") or {}
+        made = r.get("created_bookmark")
+        moved_vcs = bool((plan_ctx.get("rev") or made) and before and after)
+        around = self._states_around(entry)
+        now = self.vcs.position()
+        # Where `new` left it, on the same branch (git's id is the commit, and
+        # a later `new -b` at that commit only switches branches), and still
+        # the checkout's bookmark.
+        vcs_back = (
+            moved_vcs
+            and now.get("id") == after.get("id")
+            and now.get("branch") == after.get("branch")
+            and (around is None or self.workspace.bookmark == around[1].bookmark)
+        )
+        kept = self._bookmark_kept(entry, vcs_back=vcs_back)
+        if kept is not None and around is not None:
+            before_ws, after_ws = around
+            if self.workspace.bookmark == after_ws.bookmark:
+                # Still on the bookmark this `new` put it on, and unable to
+                # leave it: its branches are the ones the checkout writes
+                # through, and nothing else of the `new` is left to undo.
+                raise TetherError(
+                    f"cannot undo {entry.id} (new): {kept}, and this checkout "
+                    f"still works on {after_ws.bookmark}; `tether new "
+                    f"{before_ws.bookmark}` leaves it (its branches stay until "
+                    "`gc --prune-bookmarks`)"
+                )
         self._undo_branches(
             entry,
             report,
@@ -444,19 +540,13 @@ class UndoOps(RepoCore):
             created={k: refs[k] for k in r.get("created") or [] if k in refs},
             reset={k: refs[k] for k in r.get("reset") or [] if k in refs},
         )
+        if vcs_back and before:
+            self.vcs.goto(before)
+            self.objects = read_objects(self.root)
+            report.restored.append("VCS working copy back where it was")
+        elif moved_vcs:
+            report.skipped.append("VCS working copy has moved since; not returning it")
         self._restore_workspace(entry, report)
-        before, after = entry.pre.get("vcs"), r.get("vcs")
-        plan_ctx = (entry.plan or {}).get("context") or {}
-        made = r.get("created_bookmark")
-        if (plan_ctx.get("rev") or made) and before and after:
-            if self.vcs.position().get("id") == after.get("id"):
-                self.vcs.goto(before)
-                self.objects = read_objects(self.root)
-                report.restored.append("VCS working copy back where it was")
-            else:
-                report.skipped.append(
-                    "VCS working copy has moved since; not returning it"
-                )
         if made and after:
             marks = self.vcs.bookmarks()
             if made in marks and marks[made] == (

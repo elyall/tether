@@ -4,6 +4,6 @@ undid 85dbb59077c7 (new: forked code, features, qc/focus, scratch/embeddings, za
   restored   qc/focus: deleted tether.ws.0a1b2c3d.again
   restored   scratch/embeddings: deleted tether.ws.0a1b2c3d.again
   restored   zarr/imaging: deleted tether.ws.0a1b2c3d.again
-  restored   workspace.toml restored (bookmark; base_states, working_refs, pending_forks, fork_points, last_snapshot of code, features, qc/focus, scratch/embeddings, scratch/probe, zarr/imaging)
   restored   VCS working copy back where it was
+  restored   workspace.toml restored (bookmark; base_states, working_refs, pending_forks, fork_points, last_snapshot of code, features, qc/focus, scratch/embeddings, scratch/probe, zarr/imaging)
   restored   bookmark again deleted

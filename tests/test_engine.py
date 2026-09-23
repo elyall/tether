@@ -2730,6 +2730,111 @@ def test_undo_of_an_older_op_reverts_only_the_workspace_fields_it_changed(
     assert store.read(system, wref) == {"x": "meant for feat"}
 
 
+@pytest.mark.parametrize("later", ["new -b other", "add", "commit"])
+def test_undo_of_an_older_new_never_sends_the_checkout_to_main(
+    vcs_root: Path, later: str
+) -> None:
+    """Port of the review's D3: `tether undo ID` on an older `new -b feat`
+    reverted every field that `new` had changed -- the bookmark back to main
+    -- although a later `new -b other` had changed it again, so the next
+    `open` wrote straight to the store's main. A field comes back only while
+    it still holds what the operation left, and the bookmark only while the
+    VCS working copy can be on it: after a later `new` the checkout stays on
+    `other`; after a commit on `feat` the undo is refused; after an `add`
+    (nothing moved) the whole checkout goes back to main, VCS included.
+    Whatever happened, the checkout and the VCS agree afterwards and writes
+    reach main only from a checkout that is really on it."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="feat", eager=True)
+    new_op = repo.ops()[0]
+    feat_ref = repo.workspace.working_refs["db"]
+    if later == "new -b other":
+        repo.new(bookmark="other", eager=True)
+    elif later == "add":
+        _mem_object(repo, "aux")
+    else:
+        store.write(system, feat_ref, {"x": "feat"})
+        repo.commit("on feat")
+    workspace = repo.workspace.to_toml()
+    main_head = store.resolve(system, "main")
+
+    if later == "commit":
+        with pytest.raises(TetherError, match="still works on feat"):
+            repo.undo(new_op.id)
+        assert repo.workspace.to_toml() == workspace
+        assert feat_ref in store.system(system).branches
+    else:
+        report = repo.undo(new_op.id)
+        assert feat_ref not in store.system(system).branches  # it created it
+        assert "feat" not in repo.vcs.bookmarks()
+        if later == "new -b other":
+            assert repo.workspace.bookmark == "other"
+            assert any(
+                "left bookmark other" in s and "moved this checkout to other" in s
+                for s in report.skipped
+            )
+            assert not any("restored (bookmark" in r for r in report.restored)
+        else:
+            assert repo.workspace.bookmark == "main" and "aux" in repo.objects
+            assert "VCS working copy back where it was" in report.restored
+    repo = Repo.find(vcs_root)
+    assert repo.bookmark_drift() == []
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"x": "a later write"})
+    on_main = repo.workspace.bookmark == "main"
+    assert (store.resolve(system, "main") != main_head) is on_main
+    assert on_main is (later == "add")
+
+
+def test_undo_of_an_older_restore_leaves_the_fields_a_later_one_changed(
+    vcs_root: Path,
+) -> None:
+    """The per-field rule for the tables: two `restore`s of one object, the
+    older one undone -- its fork point and snapshot were set again by the
+    newer restore and stay as it left them, reported, not rolled back to
+    before the first."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="feat", eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"x": 2})
+    c2 = repo.commit("two").vcs_commit
+    store.write(system, wref, {"x": 3})
+    c3 = repo.commit("three").vcs_commit
+    assert c2 and c3
+    repo.restore(["db"], c2)
+    older = repo.ops()[0]
+    repo.restore(["db"], c3)
+    fork_point = dict(repo.workspace.fork_points["db"])
+
+    report = repo.undo(older.id)
+    assert repo.workspace.fork_points["db"] == fork_point
+    assert any(
+        "fork_points of db" in s and "changed again by a later operation" in s
+        for s in report.skipped
+    )
+    assert repo.workspace.working_refs["db"] == wref
+
+
+def test_the_newest_op_refusal_says_what_undo_id_takes_back(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo._log_op("repair", result={})
+    with pytest.raises(
+        TetherError,
+        match=r"the newest operation\); `tether undo ID` names an older one, and "
+        "takes back only what nothing since has changed again",
+    ):
+        repo.undo()
+
+
 def test_undo_of_an_older_new_keeps_a_branch_a_commit_since_recorded(
     vcs_root: Path,
 ) -> None:
@@ -2759,9 +2864,14 @@ def test_undo_of_an_older_new_keeps_a_branch_a_commit_since_recorded(
     assert result.vcs_commit is not None and state is not None
     assert repo.objects["db"].pin is None
 
-    with pytest.raises(TetherError, match="a state the manifest records") as exc:
-        repo.undo(new_op.id)
-    assert wref in str(exc.value) and "--discard" in str(exc.value)
+    # The checkout still works on `probe` under a working copy that moved on
+    # (the commit), so the `new` cannot be taken back at all -- not even with
+    # `--discard`, which used to delete the branch and put the workspace on
+    # main under that working copy.
+    for discard in (False, True):
+        with pytest.raises(TetherError, match="still works on probe") as exc:
+            repo.undo(new_op.id, discard=discard)
+        assert "`tether new main` leaves it" in str(exc.value)
     assert store.resolve(system, wref) == state["snapshot_id"]
     assert repo.workspace.bookmark == "probe"
     assert repo.workspace.working_refs["db"] == wref

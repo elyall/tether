@@ -1132,8 +1132,9 @@ def undo(
     promote: refused, with the previous base heads printed. drop, and the
     `new` and `gc` it runs: refused (the VCS's undo brings the commits back,
     `repair` the branches and pins). An older operation, named by id, gets
-    back only the workspace fields it changed. Exit code 3 when part of the
-    work could not be reversed; the rest was.
+    back only the workspace fields it changed that no later operation changed
+    again; the rest are listed as skipped. Exit code 3 when part of the work
+    could not be reversed; the rest was.
     """
     repo = _repo()
     try:
