@@ -267,10 +267,13 @@ class RepoCore:
         another workspace of the same repository, and that pair races: the
         commit references a pin after gc decided it was unreferenced and
         before it was released. Commands that create references to pins
-        (`commit`, `pull`) or release pins (`gc`), and the ones that remove
-        commits from history (`undo`, `abandon`), take this lock -- a `flock`
-        on `tether.lock` in the store every checkout shares (git's common
-        dir, jj's repo dir). Waiting, not failing: these commands are short.
+        (`commit`, `pull`) or release pins (`gc`), the ones that remove
+        commits from history (`undo`, `abandon`), and the ones that create a
+        bookmark's store branch (`new`, a writable `open` materializing a
+        fork: two `--shared` checkouts must not both find it absent), take
+        this lock -- a `flock` on `tether.lock` in the store every checkout
+        shares (git's common dir, jj's repo dir). Waiting, not failing: these
+        commands are short.
         """
         if self._repo_lock_depth or fcntl is None:
             self._repo_lock_depth += 1
@@ -292,9 +295,9 @@ class RepoCore:
                 except OSError as exc:
                     if time.monotonic() >= deadline:
                         raise TetherError(
-                            "another tether command is committing or collecting "
-                            f"in a checkout of this repository ({path} is locked); "
-                            "wait for it to finish"
+                            "another tether command is committing, collecting or "
+                            f"forking in a checkout of this repository ({path} is "
+                            "locked); wait for it to finish"
                         ) from exc
                     time.sleep(0.05)
             self._repo_lock_depth = 1

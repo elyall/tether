@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -872,7 +873,7 @@ def test_commit_and_gc_serialize_across_checkouts_of_one_repository(
     # What apply_gc holds while it decides and releases:
     with (
         repo._repo_lock(),
-        pytest.raises(TetherError, match="committing or collecting"),
+        pytest.raises(TetherError, match="committing, collecting or forking"),
     ):
         other.commit("racing")
     other.commit("after")  # released: no lock error
@@ -2856,6 +2857,161 @@ def test_restore_checks_the_branch_of_a_pending_fork_too(
         b.apply_restore(plan)
     b.restore(["db"], base, discard=True)
     assert store.system(system).branches[ref] == f"{system}:s0"
+
+
+def test_shared_peers_materialize_one_lazy_fork_under_the_repository_lock(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Port of the review's `engine/e12` and `r3`: two `--shared` checkouts
+    materialized the same lazy fork at once. `materialize_fork` held only the
+    per-checkout lock, so the slower one listed the branch as absent while
+    the faster one forked and wrote, then forked onto the pin itself and the
+    reset contract threw the write away. The listing and the fork are one
+    step under the repository lock now: the second checkout finds the branch
+    the first created and joins it."""
+    import threading
+
+    a = Repo.init(vcs_root)
+    if a.vcs.kind == "git":
+        pytest.skip("git cannot check one branch out in two worktrees")
+    system = _mem_object(a)
+    store = default_store()
+    a.commit("baseline")
+    a.new(bookmark="feat")  # lazy: pending fork
+    b = _second_checkout(a, vcs_root, tmp_path / "peer")
+    b.new("feat", shared=True)
+    assert "db" in a.workspace.pending_forks and "db" in b.workspace.pending_forks
+
+    # b has listed the branch (absent) and is inside its fork when a starts.
+    b_backend = b.backend_for("memory")
+    real_verify = b_backend.verify
+    b_in_window = threading.Event()
+    a_started = threading.Event()
+    failures: list[BaseException] = []
+
+    def slow_verify(*args: Any, **kwargs: Any) -> Any:
+        b_in_window.set()
+        a_started.wait(5)
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(b_backend, "verify", slow_verify)
+
+    def b_opens() -> None:
+        try:
+            b.open("db")
+        except BaseException as exc:  # reported to the test
+            failures.append(exc)
+
+    thread = threading.Thread(target=b_opens, name="peer")
+    thread.start()
+    assert b_in_window.wait(5)
+    a_started.set()
+    handle = a.open("db")  # waits for b's fork, then joins the branch
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"a": "wrote this"})
+    thread.join(10)
+    assert not thread.is_alive() and not failures
+
+    ref = a.workspace.working_refs["db"]
+    assert b.workspace.working_refs["db"] == ref
+    assert store.read(system, ref) == {"a": "wrote this"}  # nothing reset it
+    assert [e.command for e in b.ops()][:1] == ["fork"]
+    assert "fork" not in [e.command for e in a.ops()]  # a joined; b forked
+
+
+def test_a_fork_moves_a_branch_only_from_the_head_it_listed(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Port of the review's `engine/r3` for a peer that shares no lock file
+    (a clone on another machine): the fork itself is conditional -- the
+    branch must still be absent -- so a branch another checkout created and
+    wrote to between the listing and the fork is left as it is, and this
+    checkout is told to run `new` again."""
+    import contextlib
+
+    a = Repo.init(vcs_root)
+    if a.vcs.kind == "git":
+        pytest.skip("git cannot check one branch out in two worktrees")
+    system = _mem_object(a)
+    store = default_store()
+    a.commit("baseline")
+    a.new(bookmark="feat")
+    b = _second_checkout(a, vcs_root, tmp_path / "peer")
+    b.new("feat", shared=True)
+    monkeypatch.setattr(b, "_repo_lock", contextlib.nullcontext)  # no shared lock
+
+    b_backend = b.backend_for("memory")
+    real_list = b_backend.list_working_refs
+    fired: list[str] = []
+
+    def racing_list(locator: Locator) -> list[str]:
+        out = real_list(locator)
+        if not fired:  # b has just decided "absent"; a forks and writes now
+            handle = a.open("db")
+            assert isinstance(handle, MemoryHandle)
+            fired.append(handle.ref)
+            handle.write({"a": "wrote this"})
+        return out
+
+    monkeypatch.setattr(b_backend, "list_working_refs", racing_list)
+    with pytest.raises(StaleWorkingCopyError, match="created by another checkout"):
+        b.open("db")
+    (ref,) = fired
+    assert store.read(system, ref) == {"a": "wrote this"}  # a's write survived
+    assert "db" in b.workspace.pending_forks and not b.workspace.working_refs
+    attempt = b.ops()[0]
+    assert attempt.command == "fork" and not attempt.incomplete
+    assert attempt.result.get("failed")
+    # a has committed: the branch is at the pin again, and b joins it.
+    a.commit("a's write")
+    b.new("feat", shared=True)
+    assert b.workspace.working_refs["db"] == ref
+
+
+def test_restore_stops_at_a_branch_that_moved_under_it(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each reset moves its branch only from the head the plan reviewed. A
+    write that lands in between (a clone sharing no lock) stops the restore
+    there: the branches already reset are recorded as such, the moved one is
+    left alone, and the journal entry closes as a failed attempt."""
+    repo = Repo.init(vcs_root)
+    sys_a = _mem_object(repo, "a")
+    sys_b = _mem_object(repo, "b")
+    store = default_store()
+    store.write(sys_a, "main", {"v": 0})
+    store.write(sys_b, "main", {"v": 0})
+    repo.commit("v0")
+    c0 = repo.vcs.resolve("@-" if repo.vcs.kind == "jj" else "HEAD")
+    store.write(sys_a, "main", {"v": 1})
+    s1b = store.write(sys_b, "main", {"v": 1})
+    repo.commit("v1")
+    repo.new(bookmark="work", eager=True)
+    refs = dict(repo.workspace.working_refs)
+
+    plan = repo.plan_restore(["a", "b"], c0)
+    assert [a.key for a in plan.actions if a.op == "fork"] == ["a", "b"]
+    backend = repo.backend_for("memory")
+    real_fork = backend.fork
+
+    def racing(
+        locator: Locator, source: Pin | State, name: str, *, expected: State | None
+    ) -> str:
+        if locator["system"] == sys_b:  # a peer writes just before b's reset
+            store.write(sys_b, refs["b"], {"peer": 1})
+        return real_fork(locator, source, name, expected=expected)
+
+    monkeypatch.setattr(backend, "fork", racing)
+    with pytest.raises(StalePlanError, match=r"restore b: .*a restored and recorded"):
+        repo.apply_restore(plan)
+    assert store.read(sys_a, refs["a"]) == {"v": 0}  # reset, as planned
+    assert store.read(sys_b, refs["b"]) == {"peer": 1}  # left alone
+    assert repo.workspace.fork_points["a"] == {"snapshot_id": f"{sys_a}:s1"}
+    assert repo.workspace.fork_points["b"] == {"snapshot_id": s1b}
+    entry = repo.ops()[0]
+    assert entry.command == "restore" and not entry.incomplete
+    assert entry.result["reset"] == ["a"] and "expected" in entry.result["failed"]
+    assert not repo.incomplete_ops()
 
 
 def test_restore_refuses_a_head_it_cannot_read(

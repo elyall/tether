@@ -20,6 +20,8 @@ from tether.backends.base import (
 from tether.errors import (
     ConfigError,
     MultiObjectError,
+    RefMovedError,
+    StalePlanError,
     StaleWorkingCopyError,
     TetherError,
 )
@@ -450,7 +452,12 @@ class ForkOps(RepoCore):
             StalePlanError: The manifests at the target differ from the plan's.
             MultiObjectError: A pin is missing or a fork failed.
         """
-        with self._writer_lock():
+        # The repository lock too: the plan's `ref_head` / `ref_absent`
+        # checks and the forks they vouch for must be one step against the
+        # other checkouts of this repository (a `--shared` peer materializing
+        # the same fork); each fork then moves its branch only from the head
+        # the plan reviewed, which also holds against a clone elsewhere.
+        with self._writer_lock(), self._repo_lock():
             self._verify_plan(plan, "new", verify=verify)
             refused = [a for a in plan.actions if a.op == "refuse"]
             if refused:
@@ -553,7 +560,9 @@ class ForkOps(RepoCore):
 
             def fork_one(key: str) -> str:
                 m = self.objects[key]
-                ref = self._fork_from_manifest(m, forks[key].target)
+                ref = self._fork_from_manifest(
+                    m, forks[key].target, expected=_expected_head(forks[key].params)
+                )
                 self._progress(op, "fork", key=key, ref=ref)
                 return ref
 
@@ -758,54 +767,78 @@ class ForkOps(RepoCore):
                         self.workspace.fork_points[k] = dict(state)
                 self._mark_base_states(keys)
 
-            if name in backend.list_working_refs(m.locator):
-                # The branch exists. A writable open resets it only when `new`
-                # reviewed exactly this head and agreed (`pending_resets`); a
-                # branch already at this object's pin, or one a sibling of the
-                # same scope already writes through, is reused as it is; any
-                # other head -- it moved since `new` -- stops here and `new`
-                # decides again.
-                head = backend.fingerprint(m.locator, name)
-                owned = any(
-                    r == name
-                    and k != key
-                    and k in self.objects
-                    and (
-                        self.objects[k].kind,
-                        self.backend_for(self.objects[k].kind).branch_scope(
-                            self.objects[k].locator
-                        ),
+            # Listing the branch and creating it are one step against the other
+            # checkouts of this repository: a `--shared` peer materializing the
+            # same fork would otherwise list "absent" while this one forks and
+            # writes, then fork onto the pin itself and throw the write away
+            # (the reset contract). The repository lock orders the two; the
+            # fork's `expected` (absent, or the very head agreed to below)
+            # refuses the same interleaving with a clone that shares no lock.
+            with self._repo_lock():
+                expected: State | None = ABSENT
+                if name in backend.list_working_refs(m.locator):
+                    # The branch exists. A writable open resets it only when
+                    # `new` reviewed exactly this head and agreed
+                    # (`pending_resets`); a branch already at this object's
+                    # pin, or one a sibling of the same scope already writes
+                    # through, is reused as it is; any other head -- it moved
+                    # since `new` -- stops here and `new` decides again.
+                    head = backend.fingerprint(m.locator, name)
+                    owned = any(
+                        r == name
+                        and k != key
+                        and k in self.objects
+                        and (
+                            self.objects[k].kind,
+                            self.backend_for(self.objects[k].kind).branch_scope(
+                                self.objects[k].locator
+                            ),
+                        )
+                        == scope
+                        for k, r in self.workspace.working_refs.items()
                     )
-                    == scope
-                    for k, r in self.workspace.working_refs.items()
-                )
-                if owned or (m.state is not None and self._same(m.kind, head, m.state)):
-                    adopt(name, [key, *siblings()])
-                    write_workspace(self.root, self.workspace)
-                    return name
-                agreed = self.workspace.pending_resets.get(key)
-                if agreed is None or not self._same(m.kind, head, agreed):
+                    if owned or (
+                        m.state is not None and self._same(m.kind, head, m.state)
+                    ):
+                        adopt(name, [key, *siblings()])
+                        write_workspace(self.root, self.workspace)
+                        return name
+                    agreed = self.workspace.pending_resets.get(key)
+                    if agreed is None or not self._same(m.kind, head, agreed):
+                        raise StaleWorkingCopyError(
+                            f"branch {name} holds writes ({short_state(head)}) that "
+                            "`new` did not see; a writable open never resets a "
+                            "branch -- run `tether new` to decide (it refuses while "
+                            "the branch holds uncommitted writes; --discard throws "
+                            "them away)"
+                        )
+                    pre["heads"] = {key: head}
+                    expected = head
+                op = self._begin_op("fork", pre=pre)
+                try:
+                    ref = self._fork_from_manifest(m, name, expected=expected)
+                except RefMovedError as exc:
+                    # Nothing was written: a failed attempt, not an interrupted
+                    # one. Another clone forked the bookmark's branch (and may
+                    # have written to it) between the listing and the fork.
+                    self._end_op(op, result={"key": key, "failed": str(exc)})
                     raise StaleWorkingCopyError(
-                        f"branch {name} holds writes ({short_state(head)}) that `new` "
-                        f"did not see; a writable open never resets a branch -- run "
-                        "`tether new` to decide (it refuses while the branch holds "
-                        "uncommitted writes; --discard throws them away)"
-                    )
-                pre["heads"] = {key: head}
-            op = self._begin_op("fork", pre=pre)
-            ref = self._fork_from_manifest(m, name)
-            adopt(ref, [key, *siblings()])
-            write_workspace(self.root, self.workspace)
-            self._end_op(
-                op,
-                result={
-                    "key": key,
-                    "ref": ref,
-                    "kind": m.kind,
-                    "locator": dict(m.locator),
-                },
-            )
-            return ref
+                        f"branch {name} was created by another checkout since it was "
+                        f"listed ({exc}); a writable open never resets a branch -- "
+                        "run `tether new` to decide"
+                    ) from exc
+                adopt(ref, [key, *siblings()])
+                write_workspace(self.root, self.workspace)
+                self._end_op(
+                    op,
+                    result={
+                        "key": key,
+                        "ref": ref,
+                        "kind": m.kind,
+                        "locator": dict(m.locator),
+                    },
+                )
+                return ref
 
     def new(
         self: Repo,
@@ -1118,7 +1151,10 @@ class ForkOps(RepoCore):
                 revision is gone.
             StalePlanError: The manifests changed since the plan was made.
         """
-        with self._writer_lock():
+        # The repository lock too, as `apply_new`: the heads the plan checks
+        # and the resets they vouch for are one step against the other
+        # checkouts of this repository.
+        with self._writer_lock(), self._repo_lock():
             self._require_command(plan, "restore")
             refused = [a for a in plan.actions if a.op == "refuse"]
             if refused:
@@ -1156,11 +1192,43 @@ class ForkOps(RepoCore):
             # is written after *each* reset -- with the siblings that share
             # the branch -- so a process killed between two resets leaves
             # every branch that was reset described as such.
+            def result() -> dict[str, Any]:
+                return {
+                    "created": sorted(
+                        a.key
+                        for a in forks
+                        if a.key in done and not a.params.get("existing")
+                    ),
+                    "reset": sorted(
+                        a.key
+                        for a in forks
+                        if a.key in done and a.params.get("existing")
+                    ),
+                    "working_refs": dict(done),
+                    "from_commit": plan.context.get("from_commit"),
+                }
+
             for a in forks:
                 m = ObjectManifest.from_toml(str(a.params["then"]))
-                ref = self._fork_from_manifest(
-                    m, a.target, expected=_expected_head(a.params)
-                )
+                try:
+                    ref = self._fork_from_manifest(
+                        m, a.target, expected=_expected_head(a.params)
+                    )
+                except RefMovedError as exc:
+                    # The head moved between the plan's check and this reset
+                    # (a clone that shares no lock): the branches reset so far
+                    # are recorded as such, this one and the rest wait for a
+                    # plan that has seen the new head.
+                    self._end_op(op, result={**result(), "failed": str(exc)})
+                    raise StalePlanError(
+                        f"restore {a.key}: {exc}; "
+                        + (
+                            f"{', '.join(sorted(done))} restored and recorded, "
+                            if done
+                            else ""
+                        )
+                        + "re-run the plan for the rest"
+                    ) from exc
                 self._progress(op, "fork", key=a.key, ref=ref)
                 adopt(a.key, ref, dict(a.params["then_state"]))
                 for sibling in shares.values():
@@ -1170,19 +1238,7 @@ class ForkOps(RepoCore):
                 # working tree's manifest as far as staleness is concerned.
                 self._mark_base_states(done)
                 write_workspace(self.root, self.workspace)
-            self._end_op(
-                op,
-                result={
-                    "created": sorted(
-                        k
-                        for k, a in ((a.key, a) for a in forks)
-                        if not a.params.get("existing")
-                    ),
-                    "reset": sorted(a.key for a in forks if a.params.get("existing")),
-                    "working_refs": done,
-                    "from_commit": plan.context.get("from_commit"),
-                },
-            )
+            self._end_op(op, result=result())
             return done
 
     def restore(
