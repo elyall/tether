@@ -18,15 +18,18 @@ plumbing works there), which is ~50x cheaper per read.
 
 from __future__ import annotations
 
-import dataclasses
+import atexit
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,9 +77,17 @@ _JJ_ISOLATION = (
 Snapshots follow the user's `snapshot` settings: a new file of theirs lands
 in the change it was made in before tether moves the working copy, as under
 their own jj commands. tether's own paths are left out of that
-(`_JJ_TETHER_PATHS`) and tracked by name (`JjAdapter._track`). Revsets use
-operator forms (`::`, `x::`) where one exists, so a
-`revset-aliases."all()"` cannot redefine what gc walks."""
+(`_JJ_TETHER_PATHS`) and tracked by name (`JjAdapter._track`).
+
+Aliases are kept out in two ways. The user's config file is replaced by
+`_jj_user_layer` (`JJ_CONFIG`), which carries `_JJ_USER_KEYS` and no alias.
+jj still loads the repo- and workspace-level config (kept outside the
+checkout, written by `jj config set --repo/--workspace`), and a command-line
+layer cannot restore a builtin an alias shadows. So templates call keywords
+as methods (`self.commit_id()`, which no alias can shadow), and the revsets
+gc, drop and promote judge by use operators and commit ids only (`::`, `~`,
+`x-`): no `all()`, `conflicts()`, `working_copies()`, `root()`, `tags()` or
+`remote_bookmarks()`."""
 
 _JJ_TETHER_PATHS = 'root-glob:"**/.tether/**"'
 """Taken out of the user's `snapshot.auto-track` for tether's calls. A
@@ -84,6 +95,73 @@ manifest `add` wrote goes wherever the checkout goes (an undo's return
 included) until a commit tracks it by name, and a per-checkout file
 (`secrets.toml`, the op log) is never tracked by tether, even where the
 committed `.gitignore` misses it."""
+
+_JJ_USER_KEYS = (
+    "core.",
+    "fsmonitor.",
+    "git.",
+    "signing.",
+    "snapshot.",
+    "user.",
+    "working-copy.",
+)
+"""The user's jj settings tether's calls keep: identity and signing (what
+its commits carry), how the working copy is snapshotted, and git interop.
+Everything else in their config -- aliases, templates, revset settings --
+is left behind."""
+
+_jj_layers: dict[str, str] = {}
+_jj_layers_lock = threading.Lock()
+
+
+def _jj_user_layer(exe: str, root: Path) -> str:
+    """A config file of the user's `_JJ_USER_KEYS` settings, for `JJ_CONFIG`.
+
+    Read with `jj config list --user` under the user's own environment, in
+    `root` (so `--when.repositories` scopes resolve). One file per distinct
+    content per process, removed at exit.
+    """
+    out = _run(
+        [
+            exe,
+            *_JJ_ISOLATION,
+            "config",
+            "list",
+            "--user",
+            "-T",
+            'self.name() ++ "\\x1f" ++ self.value() ++ "\\x1e"',
+        ],
+        cwd=root,
+    )
+    entries: list[str] = []
+    for record in out.stdout.split(_RS):
+        name, sep, value = record.strip("\n").partition(_US)
+        if not sep or not name.startswith(_JJ_USER_KEYS):
+            continue
+        entry = f"{name} = {value}\n"
+        try:
+            tomllib.loads(entry)
+        except tomllib.TOMLDecodeError:
+            continue  # not expressible as one line of TOML; jj's default holds
+        entries.append(entry)
+    text = "".join(entries)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    with _jj_layers_lock:
+        path = _jj_layers.get(digest)
+        if path is None or not os.path.isfile(path):
+            fd, path = tempfile.mkstemp(prefix="tether-jj-", suffix=".toml")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            _jj_layers[digest] = path
+    return path
+
+
+@atexit.register
+def _remove_jj_layers() -> None:
+    for path in _jj_layers.values():
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
 
 _JJ_TRACK_ONLY = (
     "--config",
@@ -723,26 +801,35 @@ class JjAdapter:
         self._version_checked = False
         self._parking = threading.local()
         self._auto_track: str | None = None
+        self._user_layer: str | None = None
 
     def _jj(self, *args: str, check: bool = True) -> _Run:
         self._require_version()
+        if self._user_layer is None:
+            self._user_layer = _jj_user_layer(self._exe, self.root)
+        layer = self._user_layer
         if getattr(self._parking, "depth", 0):
             track = _JJ_PARKED
         else:
-            value = json.dumps(self._user_auto_track())
+            value = json.dumps(self._user_auto_track(layer))
             track = ("--config", f"snapshot.auto-track={value}")
         return _run(
-            [self._exe, *_JJ_ISOLATION, *track, *args], cwd=self.root, check=check
+            [self._exe, *_JJ_ISOLATION, *track, *args],
+            cwd=self.root,
+            check=check,
+            env={"JJ_CONFIG": layer},
         )
 
-    def _user_auto_track(self) -> str:
+    def _user_auto_track(self, layer: str) -> str:
         """The user's `snapshot.auto-track` (jj's default: `all()`) without
-        tether's paths (`_JJ_TETHER_PATHS`); read once per adapter."""
+        tether's paths (`_JJ_TETHER_PATHS`); read once per adapter, through
+        the same config layer as every call."""
         if self._auto_track is None:
             out = _run(
                 [self._exe, *_JJ_ISOLATION, "config", "get", "snapshot.auto-track"],
                 cwd=self.root,
                 check=False,
+                env={"JJ_CONFIG": layer},
             )
             theirs = out.stdout.strip() if out.returncode == 0 else ""
             self._auto_track = f"({theirs or 'all()'}) ~ {_JJ_TETHER_PATHS}"
@@ -811,7 +898,7 @@ class JjAdapter:
             "-r",
             rev,
             "-T",
-            "commit_id",
+            "self.commit_id()",
         )
         commit = out.stdout.strip()
         if not commit:
@@ -874,24 +961,41 @@ class JjAdapter:
             "-r",
             "::",
             "-T",
-            'commit_id ++ "\\n"',
+            'self.commit_id() ++ "\\n"',
         )
         return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
-    def history_digest(self) -> str:
-        # Not the working-copy commits: jj re-snapshots them on any command,
-        # so a digest over `::` would stale a saved gc plan after `jj log`.
-        # A commit that lands in any workspace still changes the set.
+    def _scan(self) -> list[tuple[str, bool, bool, bool]]:
+        """`(commit id, conflicted, some workspace's working copy, this
+        workspace's)` for every visible commit, from one `jj log` that names
+        no revset function (see `_JJ_ISOLATION`)."""
         out = self._jj(
             "log",
             "--no-graph",
             "--ignore-working-copy",
             "-r",
-            ":: ~ working_copies()",
+            "::",
             "-T",
-            'commit_id ++ "\\n"',
+            'self.commit_id() ++ "\\x1f" ++ self.conflict() ++ "\\x1f"'
+            ' ++ self.current_working_copy() ++ "\\x1f" ++ self.working_copies()'
+            ' ++ "\\x1e"',
         )
-        return _digest_revs([line.strip() for line in out.stdout.splitlines() if line])
+        rows = []
+        for record in out.stdout.split(_RS):
+            fields = record.strip("\n").split(_US)
+            if len(fields) == 4 and fields[0]:
+                commit, conflict, current, copies = fields
+                here = current == "true"
+                # jj names the workspaces only when there are several.
+                wc = here or bool(copies.strip())
+                rows.append((commit, conflict == "true", wc, here))
+        return rows
+
+    def history_digest(self) -> str:
+        # Not the working-copy commits: jj re-snapshots them on any command,
+        # so a digest over `::` would stale a saved gc plan after `jj log`.
+        # A commit that lands in any workspace still changes the set.
+        return _digest_revs([c for c, _conflict, wc, _here in self._scan() if not wc])
 
     def shared_dir(self) -> Path:
         repo = self.root / ".jj" / "repo"
@@ -945,7 +1049,7 @@ class JjAdapter:
             "-r",
             "::",
             "-T",
-            'commit_id ++ " " ++ change_id ++ "\\n"',
+            'self.commit_id() ++ " " ++ self.change_id() ++ "\\n"',
         )
         pairs = (line.split() for line in out.stdout.splitlines() if line.strip())
         return {commit: change for commit, change in pairs}
@@ -962,11 +1066,12 @@ class JjAdapter:
             ]
         # No git plumbing: one templated `jj log` for the requested revisions.
         template = (
-            'commit_id ++ "\\x1f" ++ parents.map(|p| p.commit_id()).join(" ")'
-            ' ++ "\\x1f" ++ author.name() ++ "\\x1f" ++ author.email() ++ "\\x1f"'
-            ' ++ author.timestamp().format("%+") ++ "\\x1f"'
-            ' ++ committer.timestamp().format("%+") ++ "\\x1f"'
-            ' ++ description ++ "\\x1e"'
+            'self.commit_id() ++ "\\x1f"'
+            ' ++ self.parents().map(|p| p.commit_id()).join(" ") ++ "\\x1f"'
+            ' ++ self.author().name() ++ "\\x1f" ++ self.author().email() ++ "\\x1f"'
+            ' ++ self.author().timestamp().format("%+") ++ "\\x1f"'
+            ' ++ self.committer().timestamp().format("%+") ++ "\\x1f"'
+            ' ++ self.description() ++ "\\x1e"'
         )
         out = self._jj(
             "log",
@@ -1003,45 +1108,46 @@ class JjAdapter:
         # change itself (only right after `init`) may therefore report the
         # pre-snapshot id -- callers that need the live answer pass the
         # bookmark *name* to `is_ancestor` instead of this id.
+        return {
+            name: targets[0]
+            for name, remote, conflict, targets in self._refs("bookmark")
+            if not remote and not conflict and len(targets) == 1
+        }
+
+    def _refs(
+        self, kind: str, *, all_remotes: bool = False
+    ) -> list[tuple[str, str, bool, list[str]]]:
+        """`(name, remote or "", conflicted, target commit ids)` for every
+        bookmark or tag `jj {kind} list` shows, with no `if()` in the template
+        for an alias to change."""
         out = self._jj(
-            "bookmark",
+            kind,
             "list",
+            *(["--all-remotes"] if all_remotes else []),
             "--ignore-working-copy",
             "-T",
-            'if(normal_target, if(remote, "", '
-            'name ++ " " ++ normal_target.commit_id() ++ "\\n"))',
+            'self.name() ++ "\\x1f" ++ self.remote() ++ "\\x1f" ++ self.conflict()'
+            ' ++ "\\x1f" ++ self.added_targets().map(|t| t.commit_id()).join(" ")'
+            ' ++ "\\x1e"',
             check=False,
         )
-        found: dict[str, str] = {}
-        for line in out.stdout.splitlines():
-            parts = line.split()
-            if len(parts) == 2:
-                found[parts[0]] = parts[1]
-        return found
+        refs = []
+        for record in out.stdout.split(_RS):
+            fields = record.strip("\n").split(_US)
+            if len(fields) == 4 and fields[0]:
+                name, remote, conflict, targets = fields
+                refs.append((name, remote, conflict == "true", targets.split()))
+        return refs
 
     def conflicted_bookmarks(self) -> list[str]:
-        out = self._jj(
-            "bookmark",
-            "list",
-            "--ignore-working-copy",
-            "-T",
-            'if(conflict, if(remote, "", name ++ "\\n"), "")',
-            check=False,
-        )
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        return [
+            name
+            for name, remote, conflict, _targets in self._refs("bookmark")
+            if conflict and not remote
+        ]
 
     def conflicted_commits(self) -> list[str]:
-        out = self._jj(
-            "log",
-            "--no-graph",
-            "--ignore-working-copy",
-            "-r",
-            "conflicts()",
-            "-T",
-            'commit_id ++ "\\n"',
-            check=False,
-        )
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        return [commit for commit, conflict, _wc, _here in self._scan() if conflict]
 
     def bookmark_set(self, name: str, rev: str) -> None:
         self._jj("bookmark", "set", name, "-r", rev, "--allow-backwards")
@@ -1053,39 +1159,43 @@ class JjAdapter:
         marks = self.bookmarks()
         if bookmark not in marks:
             raise VcsError(f"no bookmark {bookmark!r}")
-        others = sorted({c for n, c in marks.items() if n != bookmark})
         # Everything else that keeps a commit visible: other local bookmarks,
         # tags, remote bookmarks (a pushed `B@origin` outlives the local
-        # delete), and other workspaces' working copies. Not this
-        # workspace's: on the bookmark it sits on top of the line.
-        keep = " | ".join(
-            [*others, "tags()", "remote_bookmarks()", "working_copies() ~ @"]
-        )
+        # delete; `@git` is jj's view of the colocated repo, not a remote),
+        # and other workspaces' working copies. Not this workspace's: on the
+        # bookmark it sits on top of the line.
+        keep = {c for n, c in marks.items() if n != bookmark}
+        for _name, _remote, _conflict, targets in self._refs("tag"):
+            keep.update(targets)
+        for _name, remote, _conflict, targets in self._refs(
+            "bookmark", all_remotes=True
+        ):
+            if remote and remote != "git":
+                keep.update(targets)
+        keep.update(c for c, _conflict, wc, here in self._scan() if wc and not here)
+        revset = f"::{marks[bookmark]}"
+        if keep:
+            revset += f" ~ ::({' | '.join(sorted(keep))})"
         out = self._jj(
             "log",
             "--no-graph",
             "--reversed",
             "-r",
-            f"(::{marks[bookmark]}) ~ (::({keep})) ~ root()",
+            revset,
             "-T",
-            'commit_id ++ "\\n"',
+            'self.commit_id() ++ "\\n"',
         )
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        # jj's virtual root commit (all zeros) is no one's to drop.
+        return [c for c in out.stdout.split() if c.strip("0")]
 
     def remote_counterparts(self, bookmark: str) -> list[str]:
-        out = self._jj(
-            "bookmark",
-            "list",
-            "--all-remotes",
-            "--ignore-working-copy",
-            "-T",
-            'if(remote, name ++ "@" ++ remote ++ "\\n", "")',
-            check=False,
-        )
-        found = [line.strip() for line in out.stdout.splitlines() if line.strip()]
         # `@git` is jj's own view of the colocated repo, not a remote.
         return sorted(
-            r for r in found if r.startswith(f"{bookmark}@") and not r.endswith("@git")
+            f"{name}@{remote}"
+            for name, remote, _conflict, _targets in self._refs(
+                "bookmark", all_remotes=True
+            )
+            if name == bookmark and remote and remote != "git"
         )
 
     def files_at_many(self, revs: list[str], reldir: str) -> dict[str, dict[str, str]]:
@@ -1111,7 +1221,7 @@ class JjAdapter:
             "-r",
             rev,
             "-T",
-            'local_bookmarks.map(|b| b.name()).join("\\n") ++ "\\n"',
+            'self.local_bookmarks().map(|b| b.name()).join("\\n") ++ "\\n"',
             check=False,
         )
         return [b for b in out.stdout.split() if b]
@@ -1142,7 +1252,7 @@ class JjAdapter:
             "--limit",
             "1",
             "-T",
-            "commit_id",
+            "self.commit_id()",
             check=False,
         )
         return out.returncode == 0 and bool(out.stdout.strip())
@@ -1168,7 +1278,7 @@ class JjAdapter:
             "list",
             "--ignore-working-copy",
             "-T",
-            'name ++ "\n"',
+            'self.name() ++ "\\n"',
             check=False,
         )
         roots: list[Path] = []
@@ -1189,7 +1299,7 @@ class JjAdapter:
 
     def forget_workspace(self, root: Path) -> str | None:
         names = self._jj(
-            "workspace", "list", "--ignore-working-copy", "-T", 'name ++ "\\n"'
+            "workspace", "list", "--ignore-working-copy", "-T", 'self.name() ++ "\\n"'
         ).stdout.split()
         target = root.resolve()
         for name in names:
@@ -1261,8 +1371,8 @@ class JjAdapter:
             "-r",
             "@",
             "-T",
-            'change_id ++ "\\n" ++ commit_id ++ "\\n" ++ if(empty, "1", "0") ++ "\\n"'
-            ' ++ parents.map(|c| c.commit_id()).join(",")',
+            'self.change_id() ++ "\\n" ++ self.commit_id() ++ "\\n" ++ self.empty()'
+            ' ++ "\\n" ++ self.parents().map(|c| c.commit_id()).join(",")',
         )
         fields = [*out.stdout.rstrip("\n").split("\n"), "", "", "", ""]
         change, commit, empty, parents = fields[:4]
@@ -1271,7 +1381,7 @@ class JjAdapter:
             "id": change,
             "commit": commit,
             "parent": parents.split(",")[0] if parents else None,
-            "empty": empty == "1",
+            "empty": empty == "true",
         }
 
     def goto(self, position: dict[str, Any]) -> None:
@@ -1284,7 +1394,7 @@ class JjAdapter:
 
     def uncommit(self, commit: str) -> bool:
         parents = self._jj(
-            "log", "--no-graph", "-r", "@-", "-T", 'commit_id ++ "\\n"'
+            "log", "--no-graph", "-r", "@-", "-T", 'self.commit_id() ++ "\\n"'
         ).stdout.split()
         if parents != [commit]:
             return False
@@ -1302,7 +1412,7 @@ class JjAdapter:
             "-r",
             f"({commit}:: ~ ({commit} | @))",
             "-T",
-            'commit_id ++ "\\n"',
+            'self.commit_id() ++ "\\n"',
         )
         return out.stdout.split()
 
@@ -1317,7 +1427,7 @@ class JjAdapter:
             "-r",
             commit,
             "-T",
-            "change_id",
+            "self.change_id()",
             check=False,
         )
         if change.returncode != 0 or not change.stdout.strip():
@@ -1329,7 +1439,7 @@ class JjAdapter:
             "-r",
             change.stdout.strip(),
             "-T",
-            "commit_id",
+            "self.commit_id()",
             check=False,
         )
         return visible.returncode == 0 and bool(visible.stdout.strip())
@@ -1346,7 +1456,7 @@ class JjAdapter:
             "-r",
             "::",
             "-T",
-            'change_id ++ "\\n"',
+            'self.change_id() ++ "\\n"',
             check=False,
         )
         if visible.returncode != 0:
@@ -1359,7 +1469,7 @@ class JjAdapter:
             "-r",
             " | ".join(commits),
             "-T",
-            'commit_id ++ " " ++ change_id ++ "\\n"',
+            'self.commit_id() ++ " " ++ self.change_id() ++ "\\n"',
             check=False,
         )
         if asked.returncode != 0:
@@ -1380,7 +1490,7 @@ class JjAdapter:
             "-r",
             f"({union}):: ~ ({union})",
             "-T",
-            'change_id ++ " " ++ commit_id ++ "\\n"',
+            'self.change_id() ++ " " ++ self.commit_id() ++ "\\n"',
         )
         pairs = [line.split() for line in out.stdout.splitlines() if line.strip()]
         descendants = [change for change, _commit in pairs]
@@ -1441,18 +1551,18 @@ class JjAdapter:
             "--no-graph",
             "--reversed",
             "-r",
-            f'files("{reldir}") ~ root()',
+            f'files("{reldir}")',
             "-T",
-            'change_id ++ " " ++ commit_id ++ "\\n"',
+            'self.change_id() ++ " " ++ self.commit_id() ++ "\\n"',
         )
         changes = [line.split() for line in touched.stdout.splitlines() if line.strip()]
         affected = self._jj(
             "log",
             "--no-graph",
             "-r",
-            f'files("{reldir}"):: ~ root()',
+            f'files("{reldir}")::',
             "-T",
-            'change_id ++ " " ++ commit_id ++ "\\n"',
+            'self.change_id() ++ " " ++ self.commit_id() ++ "\\n"',
         )
         descendants = [
             line.split() for line in affected.stdout.splitlines() if line.strip()

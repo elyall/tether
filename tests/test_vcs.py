@@ -350,6 +350,102 @@ def test_jj_history_walk_reads_every_side_of_a_conflicted_commit(
     assert "main" not in vcs.bookmarks()  # what made the guard necessary
 
 
+def test_jj_calls_carry_the_users_identity_and_snapshot_settings_only(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tether's jj calls replace the user's config file with one of their
+    identity, signing, snapshot, working-copy and git settings: what its
+    commits must carry, and nothing an alias or template could bend."""
+    import tomllib
+
+    from tether.vcs import _jj_user_layer
+
+    vcs = detect_vcs(vcs_root)
+    if vcs.kind != "jj":
+        pytest.skip("jj config layers")
+    cfg = tmp_path_factory.mktemp("jjuser") / "user.toml"
+    cfg.write_text(
+        '[user]\nname = "Ada Lovelace"\nemail = "ada@example.org"\n'
+        '[signing]\nbehavior = "drop"\n'
+        '[snapshot]\nmax-new-file-size = "2KiB"\n'
+        "[template-aliases]\ncommit_id = 'self.change_id()'\n"
+        '[revset-aliases]\n"conflicts()" = "none()"\nHEAD = "@-"\n'
+        '[ui]\neditor = "false"\n'
+        '[revsets]\nlog = "@"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JJ_CONFIG", str(cfg))
+    layer = Path(_jj_user_layer("jj", vcs_root)).read_text(encoding="utf-8")
+    assert tomllib.loads(layer) == {
+        "user": {"name": "Ada Lovelace", "email": "ada@example.org"},
+        "signing": {"behavior": "drop"},
+        "snapshot": {"max-new-file-size": "2KiB"},
+    }
+    vcs = detect_vcs(vcs_root)
+    _write(vcs_root, ".tether/objects/a.toml", "key='a'\n")
+    vcs.commit([".tether/objects"], "first")  # finalizes the change `init` made
+    _write(vcs_root, ".tether/objects/b.toml", "key='b'\n")
+    commit = vcs.commit([".tether/objects"], "second")
+    (info,) = vcs.commit_info([commit])
+    assert (info.author_name, info.author_email) == ("Ada Lovelace", "ada@example.org")
+
+
+def test_repo_level_aliases_do_not_bend_what_tether_reads(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """jj loads repo-level config whatever `JJ_CONFIG` says, and a
+    command-line layer cannot restore a builtin an alias shadows. Keywords
+    called as methods and revsets of operators and ids are out of reach."""
+    vcs = detect_vcs(vcs_root)
+    if vcs.kind != "jj":
+        pytest.skip("jj config layers")
+    # Where jj keeps repo-level config: outside the checkout.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+    for key, value in [
+        ("template-aliases.commit_id", "self.change_id()"),
+        ("template-aliases.change_id", "self.commit_id()"),
+        ("template-aliases.name", 'self.name() ++ "_aliased"'),
+        ("template-aliases.conflict", "false"),
+        ('revset-aliases."conflicts()"', "none()"),
+        ('revset-aliases."working_copies()"', "none()"),
+        ('revset-aliases."root()"', "none()"),
+    ]:
+        subprocess.run(
+            ["jj", "config", "set", "--repo", key, f"'{value}'"],
+            cwd=vcs_root,
+            check=True,
+            capture_output=True,
+        )
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'base'\n")
+    base = vcs.commit([".tether/objects"], "base")
+    assert len(base) == 40 and int(base, 16) >= 0
+    vcs.bookmark_set("main", base)
+    assert vcs.bookmarks() == {"main": base}
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'feat'\n")
+    feat = vcs.commit([".tether/objects"], "feat")
+    vcs.bookmark_set("feat", feat)
+    vcs.new(base)
+    _write(vcs_root, ".tether/objects/db.toml", "state = 'trunk'\n")
+    trunk = vcs.commit([".tether/objects"], "trunk")
+    vcs.bookmark_set("main", trunk)
+    digest = vcs.history_digest()
+    _write(vcs_root, "README", "a user edit\n")
+    assert vcs.position()["commit"] != vcs.resolve("@-")
+    assert vcs.history_digest() == digest
+    subprocess.run(
+        ["jj", "rebase", "-b", "feat", "-d", "main"],
+        cwd=vcs_root,
+        check=True,
+        capture_output=True,
+    )
+    assert vcs.conflicted_commits() == [vcs.bookmarks()["feat"]]
+    assert "0" * 40 not in vcs.exclusive_commits("feat")
+
+
 def test_a_refused_git_commit_leaves_nothing_staged(vcs_root: Path) -> None:
     """`git add` then `git commit`: when a hook refuses the commit, the index
     must not keep the manifests `add` staged, or the user's next plain

@@ -100,15 +100,25 @@ def hostile_vcs_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> Path:
     """A user whose jj and git settings would break every id tether parses if
-    they reached its calls: colour forced on, `all()` aliased to the working
-    copy, new files never tracked and capped at 1 KiB, signatures shown,
-    paths quoted, untracked files hidden from `git status`. Tests that take
-    this fixture must behave exactly as under the plain config."""
+    they reached its calls: colour forced on, the keywords tether's
+    templates read aliased (`commit_id` and `change_id` swapped, bookmark
+    names suffixed, `conflict` always false), `all()` aliased to the working
+    copy and `conflicts()`, `working_copies()` and `root()` to nothing, new
+    files never tracked and capped at 1 KiB, signatures shown, paths quoted,
+    untracked files hidden from `git status`. jj itself still works under
+    it. Tests that take this fixture must behave exactly as under the plain
+    config; their own jj templates call keywords as methods."""
     cfg = tmp_path_factory.mktemp("hostile")
     (cfg / "jj.toml").write_text(
         '[user]\nname = "tether tests"\nemail = "tests@tether.dev"\n'
         '[ui]\ncolor = "always"\n'
-        '[revset-aliases]\n"all()" = "@"\n'
+        "[template-aliases]\n"
+        "commit_id = 'self.change_id()'\n"
+        "change_id = 'self.commit_id()'\n"
+        "name = 'self.name() ++ \"_aliased\"'\n"
+        "conflict = 'false'\n"
+        '[revset-aliases]\n"all()" = "@"\n"conflicts()" = "none()"\n'
+        '"working_copies()" = "none()"\n"root()" = "none()"\n'
         '[snapshot]\nauto-track = "none()"\nmax-new-file-size = "1KiB"\n',
         encoding="utf-8",
     )

@@ -31,7 +31,11 @@ def _write(repo: Repo, key: str, payload: dict) -> None:
 
 def _jj(root: Path, *args: str) -> str:
     return subprocess.run(
-        ["jj", *args], cwd=root, check=True, capture_output=True, text=True
+        ["jj", "--color=never", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
 
 
@@ -78,6 +82,102 @@ def test_core_loop_and_gc_under_a_hostile_user_config(
     assert repo.vcs_drift() == []
     st = repo.status()
     assert st.bookmark_drift == [] and all(not o.changed for o in st.objects)
+
+
+def _commit_id(root: Path, revset: str) -> str:
+    return _jj(root, "log", "--no-graph", "-r", revset, "-T", "self.commit_id()")
+
+
+def test_promote_refuses_a_conflicted_trunk_under_hostile_aliases(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    """`conflict = 'false'` in the user's template aliases hid the trunk's
+    two targets from promote's guard, and `conflicts()` aliased to nothing
+    hid them from gc's."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicted bookmarks")
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    _write(repo, "db", {"x": "feat"})
+    repo.commit("feat write")
+    _jj(vcs_root, "new", "--no-edit", "main", "-m", "landed elsewhere 1")
+    _jj(vcs_root, "new", "--no-edit", "main", "-m", "landed elsewhere 2")
+    s1 = _commit_id(vcs_root, 'description(glob:"landed elsewhere 1*")')
+    s2 = _commit_id(vcs_root, 'description(glob:"landed elsewhere 2*")')
+    op = _jj(vcs_root, "op", "log", "--no-graph", "-n1", "-T", "self.id()").strip()
+    _jj(vcs_root, "bookmark", "set", "main", "-r", s1)
+    _jj(vcs_root, "--at-op", op, "bookmark", "set", "main", "-r", s2)
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.conflicted_bookmarks() == ["main"]
+    assert "feat" in repo.vcs.bookmarks()  # names as jj has them, no suffix
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_gc()
+    plan = repo.plan_promote()
+    assert plan.actions and all(a.op == "refuse" for a in plan.actions)
+    assert "conflicting targets" in plan.actions[0].detail
+
+
+def test_gc_and_drop_refuse_a_conflicted_manifest_under_hostile_aliases(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicts")
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    _write(repo, "db", {"x": "feat"})
+    repo.commit("feat write")
+    repo.new("main")
+    _write(repo, "db", {"x": "main"})
+    repo.commit("trunk write")
+    _jj(vcs_root, "rebase", "-b", "feat", "-d", "main")
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.conflicted_commits() == [_commit_id(vcs_root, "feat")]
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_gc()
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_drop("feat")
+
+
+def test_a_gc_plan_outlives_a_working_copy_snapshot_under_hostile_aliases(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    """The history digest leaves the working-copy commits out, which jj
+    rewrites on every snapshot. With `working_copies()` aliased to nothing
+    it counted them, and any edit between plan and apply staled the plan."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj working-copy commits")
+    readme = vcs_root / "README"
+    readme.write_text("one\n", encoding="utf-8")
+    _jj(vcs_root, "file", "track", "README")
+    _mem_object(repo)
+    repo.commit("baseline")
+    plan = repo.plan_gc()
+    readme.write_text("two\n", encoding="utf-8")
+    _jj(vcs_root, "status")  # the edit lands in the working-copy commit
+    repo.apply_gc(plan)
+
+
+def test_exclusive_commits_never_include_the_root_under_hostile_aliases(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    """With nothing else keeping history visible, only the removal of jj's
+    root commit kept it out of a bookmark's commits; `root()` aliased to
+    nothing put it back, and `drop` would ask jj to abandon it."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj root commit")
+    (vcs_root / "a").write_text("a\n", encoding="utf-8")
+    _jj(vcs_root, "file", "track", "a")
+    _jj(vcs_root, "commit", "-m", "only")
+    _jj(vcs_root, "bookmark", "delete", "main")
+    _jj(vcs_root, "bookmark", "create", "solo", "-r", "@-")
+    assert _commit_id(vcs_root, "solo-") == "0" * 40
+    assert repo.vcs.exclusive_commits("solo") == [_commit_id(vcs_root, "solo")]
 
 
 @pytest.mark.parametrize("first", ["fresh", "new-key", "nested-key"])
