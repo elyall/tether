@@ -390,6 +390,71 @@ def test_pinned_index_seed_claims_only_pins_this_clone_created(
     assert theirs.ref in default_store().system(system).tags
 
 
+@pytest.mark.parametrize("name", ["ops.jsonl", "workspace.toml"])
+def test_gc_skips_another_checkouts_state_file_the_vcs_tracks(
+    vcs_root: Path, tmp_path: Path, name: str
+) -> None:
+    """S1 refuses this checkout's `ops.jsonl` and `workspace.toml` while the
+    VCS tracks them, but gc read every other live checkout's copies too: a
+    tracked op log there -- one a clone shipped -- claimed a stray pin as
+    this clone's, and gc released it. Another checkout's tracked file is
+    skipped with a warning naming that checkout; gc goes on."""
+    import json
+
+    from tether.manifest import compute_pin_id
+    from tether.oplog import pinned_path
+
+    a, system = _baseline(vcs_root)
+    backend = a.backend_for("memory")
+    m = a.objects["db"]
+    state = {"snapshot_id": default_store().write(system, "main", {"v": 9})}
+    identity = backend.identity(m.locator)
+    stray = backend.pin(
+        m.locator,
+        state,
+        compute_pin_id("memory", identity, state, a.config.dataset_id),
+    )
+    other = tmp_path / "other"
+    _other_checkout(a, vcs_root, other, a.vcs.bookmarks()["main"])
+    tdir = other / ".tether"
+    if name == "ops.jsonl":
+        claim = [
+            {"id": "a" * 12, "at": "2026-01-01T00:00:00+00:00", "command": "commit"},
+            {"progress": "a" * 12, "action": "pin", "key": "db", "ref": stray.ref},
+            {"done": "a" * 12, "result": {}},
+        ]
+        (tdir / name).write_text("".join(json.dumps(x) + "\n" for x in claim))
+    lines = (tdir / ".gitignore").read_text().splitlines()
+    (tdir / ".gitignore").write_text(
+        "".join(f"{x}\n" for x in lines if x != f"/{name}")
+    )
+    if a.vcs.kind == "jj":
+        _jj(other, "file", "track", f".tether/{name}")
+        assert f".tether/{name}" in _jj(other, "file", "list").split()
+    else:
+        subprocess.run(
+            ["git", "add", f".tether/{name}"],
+            cwd=other,
+            check=True,
+            capture_output=True,
+        )
+    pinned_path(a.vcs.shared_dir()).unlink()  # the next gc seeds from op logs
+
+    a = Repo.find(vcs_root)
+    with pytest.warns(
+        UserWarning, match=rf"skipping \.tether/{name} of checkout "
+    ) as record:
+        plan = a.plan_gc()
+    named = {f"of checkout {p}:" for p in (other, other.resolve())}
+    assert any(n in str(w.message) for w in record for n in named)
+    verdicts = {x.target: x.op for x in plan.actions if x.op in ("unpin", "keep-pin")}
+    assert verdicts == {stray.ref: "keep-pin"}, plan.render()
+    if name == "workspace.toml":
+        assert [r.resolve() for r, _ws in a._iter_live_workspaces()] == [
+            vcs_root.resolve()
+        ]
+
+
 @pytest.mark.parametrize("how", ["gc", "rollback", "gc-then-reseed"])
 def test_a_released_pin_recreated_by_another_clone_is_not_released_again(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch, how: str

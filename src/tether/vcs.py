@@ -665,11 +665,15 @@ class VcsAdapter(Protocol):
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
 
-    def tracked(self, relpaths: list[str]) -> list[str]:
+    def tracked(
+        self, relpaths: list[str], *, checkout: Path | None = None
+    ) -> list[str]:
         """Which of ``relpaths`` (files) the VCS tracks: in jj's working-copy
         commit as last snapshotted, in git's index. One call and no snapshot,
         so `Repo.find` can afford it on every run: a per-checkout file the VCS
-        tracks came with a clone (or was committed by hand) and is refused."""
+        tracks came with a clone (or was committed by hand) and is refused.
+        ``checkout`` asks another checkout of this repository (a root from
+        `workspace_roots`), with ``relpaths`` relative to it."""
 
     def commit_alive(self, commit: str) -> bool:
         """Whether ``commit`` -- or, in jj, the change it belonged to -- is still
@@ -849,7 +853,7 @@ class JjAdapter:
         self._auto_track: str | None = None
         self._user_layer: str | None = None
 
-    def _jj(self, *args: str, check: bool = True) -> _Run:
+    def _jj(self, *args: str, check: bool = True, cwd: Path | None = None) -> _Run:
         self._require_version()
         if self._user_layer is None:
             self._user_layer = _jj_user_layer(self._exe, self.root)
@@ -861,7 +865,7 @@ class JjAdapter:
             track = ("--config", f"snapshot.auto-track={value}")
         return _run(
             [self._exe, *_JJ_ISOLATION, *track, *args],
-            cwd=self.root,
+            cwd=cwd or self.root,
             check=check,
             env={"JJ_CONFIG": layer},
         )
@@ -1404,15 +1408,25 @@ class JjAdapter:
         out = self._jj("diff", "--summary", "-r", "@", *relpaths)
         return bool(out.stdout.strip())
 
-    def tracked(self, relpaths: list[str]) -> list[str]:
+    def tracked(
+        self, relpaths: list[str], *, checkout: Path | None = None
+    ) -> list[str]:
         if not relpaths:
             return []
         # `root-file:` matches exactly that file from the root, whatever the
         # path holds (spaces, fileset operators); a path absent from `@` is
-        # a warning on stderr, not an error.
+        # a warning on stderr, not an error. Run in another workspace, `@`,
+        # the root and the printed paths are that workspace's.
         patterns = [f"root-file:{json.dumps(p, ensure_ascii=False)}" for p in relpaths]
         out = self._jj(
-            "file", "list", "--ignore-working-copy", "-r", "@", "--", *patterns
+            "file",
+            "list",
+            "--ignore-working-copy",
+            "-r",
+            "@",
+            "--",
+            *patterns,
+            cwd=checkout,
         )
         listed = {line.strip() for line in out.stdout.splitlines()}
         return [p for p in relpaths if p in listed]
@@ -1799,10 +1813,16 @@ class GitAdapter:
         )
         return bool(out.stdout.strip())
 
-    def tracked(self, relpaths: list[str]) -> list[str]:
+    def tracked(
+        self, relpaths: list[str], *, checkout: Path | None = None
+    ) -> list[str]:
         if not relpaths:
             return []
-        out = self._git("--literal-pathspecs", "ls-files", "-z", "--", *relpaths)
+        # Under `-C`, the index and the paths are the other worktree's.
+        where = ["-C", str(checkout)] if checkout is not None else []
+        out = self._git(
+            *where, "--literal-pathspecs", "ls-files", "-z", "--", *relpaths
+        )
         listed = set(filter(None, out.stdout.split("\0")))
         return [p for p in relpaths if p in listed]
 

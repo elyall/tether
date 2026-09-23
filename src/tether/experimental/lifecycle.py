@@ -81,7 +81,6 @@ from tether.oplog import (
     TouchedStore,
     append_index_entry,
     read_jsonl,
-    read_ops,
     read_touched,
     remove_index_entry,
     remove_touched,
@@ -370,10 +369,9 @@ def _store_context(
     # actor's -- one who fetched the bookmark and works in the store with
     # commits this clone does not have.
     known_slugs = set(keep_slugs)
-    for root, _ws in repo._iter_live_workspaces():
-        for op in read_ops(root):
-            if op.command == "new" and op.result.get("bookmark"):
-                known_slugs.add(bookmark_slug(str(op.result["bookmark"])))
+    for op in repo._live_ops():
+        if op.command == "new" and op.result.get("bookmark"):
+            known_slugs.add(bookmark_slug(str(op.result["bookmark"])))
     return _StoreContext(
         in_use, keep_slugs, known_slugs, repo._known_pins(), referenced
     )

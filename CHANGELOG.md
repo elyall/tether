@@ -27,6 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `secrets.toml` naming `git_path` ran that program on `tether status`.
 - git 2.38 is the minimum version, checked by the VCS adapter and the `git`
   backend; an older git ignores `safe.bareRepository` without a word.
+- Another live checkout's `workspace.toml` or `ops.jsonl` that the VCS tracks
+  there is skipped, with a warning naming the checkout: a shipped op log could
+  make `gc` release pins as this clone's.
 
 ### Added
 

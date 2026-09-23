@@ -294,6 +294,9 @@ class RepoCore:
         # Manifest text -> parsed manifest. History walks re-read the same
         # (unchanged) manifest at hundreds of commits; parse each text once.
         self._manifest_cache: dict[str, ObjectManifest] = {}
+        self._own_files: dict[tuple[Path, int, int, int], bool] = {}
+        """(path, size, mtime, inode) of another checkout's per-checkout file
+        -> whether it is that checkout's own (see `_own_file`)."""
         self._lock_depth = threading.local()
         """Per thread: how deep this thread is in `_writer_lock` (`writer`) and
         `_repo_lock` (`repo`). A Repo shared by threads (a service) must not
@@ -987,14 +990,65 @@ class RepoCore:
         Walks the VCS's workspaces / worktrees (`VcsAdapter.workspace_roots`)
         and reads each one's state at the dataset's relative path; checkouts
         that never ran tether have no file and are skipped, as is one whose
-        file cannot be read (a checkout mid-write, an older format).
+        file cannot be read (a checkout mid-write, an older format) or is
+        tracked by the VCS there (`_own_file`).
         """
         rel = self._dataset_rel()
         for root in self.vcs.workspace_roots():
             if not workspace_path(root / rel).is_file():
                 continue
+            if not self._own_file(root, rel, _m.WORKSPACE_FILENAME):
+                continue
             with contextlib.suppress(Exception):
                 yield (root / rel), read_workspace(root / rel)
+
+    def _live_ops(self) -> Iterator[OpEntry]:
+        """The op-log entries of every live checkout of this dataset that has
+        run tether, this checkout's included, but for an op log the VCS
+        tracks in another checkout (`_own_file`)."""
+        rel = self._dataset_rel()
+        for root in self.vcs.workspace_roots():
+            if not workspace_path(root / rel).is_file():
+                continue
+            if self._own_file(root, rel, OPS_FILENAME):
+                yield from read_ops(root / rel)
+
+    def _own_file(self, root: Path, rel: Path, name: str) -> bool:
+        """Whether the `.tether/<name>` of the checkout at VCS root `root` is
+        that checkout's own record: always for this checkout (whose files
+        `_refuse_tracked` vetted at open), else when the VCS does not track
+        it there. A tracked copy came with a clone or was committed by hand,
+        and an op log could claim pins as this clone's to release; it is
+        skipped with a warning naming the checkout. One VCS call per state of
+        the file."""
+        dataset = root / rel
+        if dataset.resolve() == self.root.resolve():
+            return True
+        path = _m.tether_path(dataset) / name
+        try:
+            st = path.stat()
+        except OSError:
+            return True  # nothing there to trust or not
+        key = (path, st.st_size, st.st_mtime_ns, st.st_ino)
+        own = self._own_files.get(key)
+        if own is not None:
+            return own
+        relpath = (rel / _m.TETHER_DIR / name).as_posix()
+        try:
+            own = not self.vcs.tracked([relpath], checkout=root)
+            why = f"{self.vcs.kind} tracks it there"
+        except VcsError as exc:
+            own = False
+            why = f"cannot tell whether {self.vcs.kind} tracks it there ({exc})"
+        self._own_files[key] = own
+        if not own:
+            warnings.warn(
+                f"skipping {relpath} of checkout {root}: {why}, so it is not "
+                "that checkout's own record (a tracked copy comes with every "
+                "clone); untrack it in that checkout to count it again",
+                stacklevel=3,
+            )
+        return own
 
     def _known_pins(self) -> set[str]:
         """Pin ids this clone created and has not released, from
@@ -1021,9 +1075,7 @@ class RepoCore:
         shared = self.vcs.shared_dir()
         if pinned_path(shared).is_file():
             return
-        ops = [
-            op for root, _ws in self._iter_live_workspaces() for op in read_ops(root)
-        ]
+        ops = list(self._live_ops())
         ours: dict[str, tuple[str, str]] = {}
         for op in sorted(ops, key=lambda op: op.at):
             if op.result.get("rolled_back"):
@@ -1108,21 +1160,20 @@ class RepoCore:
         live checkout set out to create or have created: a `commit` between
         its pins and its VCS commit names them in no history yet."""
         ids: set[str] = set()
-        for root, _ws in self._iter_live_workspaces():
-            for op in read_ops(root):
-                if not op.incomplete:
-                    continue
-                for a in (op.plan or {}).get("actions") or []:
-                    pid = (a.get("params") or {}).get("pin_id")
-                    if a.get("op") in ("pin", "repin") and pid:
-                        ids.add(str(pid))
-                for record in op.progress:
-                    if record.get("action") in ("pin", "repin"):
-                        pid = pin_id_of_ref(
-                            str(record.get("ref") or record.get("target") or "")
-                        )
-                        if pid:
-                            ids.add(pid)
+        for op in self._live_ops():
+            if not op.incomplete:
+                continue
+            for a in (op.plan or {}).get("actions") or []:
+                pid = (a.get("params") or {}).get("pin_id")
+                if a.get("op") in ("pin", "repin") and pid:
+                    ids.add(str(pid))
+            for record in op.progress:
+                if record.get("action") in ("pin", "repin"):
+                    pid = pin_id_of_ref(
+                        str(record.get("ref") or record.get("target") or "")
+                    )
+                    if pid:
+                        ids.add(pid)
         return ids
 
     def _refuse_conflicts(self, what: str) -> None:
