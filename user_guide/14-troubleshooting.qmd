@@ -1,0 +1,104 @@
+---
+title: "Troubleshooting"
+guide-section: "Reference"
+---
+
+Every refusal is a `TetherError`, printed as `error: ...` with exit status 1
+(2 is a usage error, 3 a partial success; see
+[exit codes](07-cli.qmd#exit-codes-and-errors)). This page goes by error
+class: what each one means, and the way out. From Python, catch the same
+classes: `from tether import StalePlanError`, and `RefMovedError` from
+`tether.errors`. Every `BackendError` message starts with the object's
+`[key]` or the backend's `[kind]`.
+
+## By error class
+
+| Error | It means | The way out |
+| --- | --- | --- |
+| `StaleWorkingCopyError` | An object's committed state changed since this checkout forked its branches (a teammate committed on a `--shared` bookmark, a bookmark moved by hand, a `jj undo`), or the checkout has no working ref yet (on no bookmark). Writable `open` and `commit` refuse for the whole workspace; reads work. | `tether status` names the stale objects. `tether new` re-forks from the current pins; it refuses to reset a branch holding uncommitted writes until you `commit` them or pass `--discard`. On no bookmark, `tether new NAME` or `new -b NAME`. See [Stale working copies](04-branching-and-writing.qmd#stale-working-copies). |
+| `StalePlanError` | What the plan saw no longer holds: the manifests, a branch head it would move, the history digest, the bookmark, or the checkout itself (a plan applies only where it was made). Also a plan that lacks a precondition this tether requires ("predates the ... precondition(s)"), or a plan saved before 0.1.0b1. Nothing was written. | Re-plan (`--dry-run`, then `--plan FILE`) and read what moved. For `restore`, a head that moved under it is reported with what was reset; plan again for the rest. See [Plans](07-cli.qmd#plans). |
+| `RefMovedError` | A store ref moved between the plan's check and the act: `fork`, `promote` or `merge` asked the store to move it only from the head the plan reviewed, and it held something else. Nothing was written. | Someone else wrote to that branch: another checkout or clone on the same bookmark, or a writer using the store directly. Re-plan, and look at the branch with the store's own tools before applying. |
+| `MergeConflict` | `promote` ran the system's three-way merge (git, Dolt) and it stopped on conflicts; `conflicts` names the units. The base is untouched, the plan's fast-forwards were held, exit 1. | Resolve with the system's tools (a `git merge` by hand on the base branch; Dolt's `dolt_conflicts` tables), `tether commit`, then `promote` again. Or `--strategy ff` to refuse merges outright, or `tether promote KEY...` to land the other systems by name. |
+| `PinDriftError` | A pin's native ref exists but points at another state than the manifest recorded: someone moved the tag. `open --rev`, `new` and `promote --rev` refuse it rather than serve the wrong data under a commit's name. | `tether verify` reports it `drifted`. `repair` never overwrites a drifted pin: move the tag back with the store's tools, or delete it and let `repair` recreate it from the recorded state while the store still has it. |
+| `ImmutableObjectModified` | A `file` object registered `--file immutable` (the default) changed: the *bytes*, not the timestamp. `status --snapshot`, `commit` and `pull` stop. | Find out what wrote there. If the change is legitimate, accept it as a re-registration: `tether remove KEY`, `tether add KEY ... --kind file`, `commit`. See [Drift](03-pinning.qmd#drift). |
+| `UnpinnedStateError` | `commit --strict` met an Observed object, whose state can be recorded but not pinned. | Drop `--strict`, or move the object to a store that can hold a pin (a versioned bucket for a single file, `--file versioned`). |
+| `CapabilityError` | The backend cannot do what was asked: a writable `open` on a non-Forkable object, `open --rev` on an Observed one, `--at` on `neon` or `file`. | Check the object's tier (`tether status`, `tether backends`, [Backends](09-backends.qmd)); open read-only, or register the object in a system that has the capability. |
+| `BackendError` | The store or its library said no: credentials, network, a missing ref or snapshot (`pin missing` on a lazy fork whose pin `gc` released elsewhere), a Neon compute that stayed busy after the retries, active writers at `commit` (`NEEDS_QUIESCENCE`), a git `path` that is relative or inside the checkout. | Read the message; the `[key]` says which object. Credentials go in `.tether/secrets.toml` ([Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). A missing ref: `tether verify`, then `repair`. Active writers: wait, or `commit --force`. Transient answers: run the command again; what it did before the failure is journaled and finished by the re-run ([below](#an-interrupted-command)). |
+| `MultiObjectError` | Several objects failed in one fan-out (`status --snapshot`, `verify`, `commit`); the message lists each with its own error. | Fix each object as its line says. `tether status` keeps reporting the others and marks the failing ones `error`. |
+| `ConfigError` | `tether.toml` or a manifest is invalid, names an unknown key, or sets a committed key the trust boundary forbids (`[vcs] git_path`, `[import] query`, an endpoint, an option outside a backend's allowlist); the dataset's `[tether] version` is older or newer than this tether; `no such object`. | The message says where a forbidden key belongs (`.tether/secrets.toml`). An older dataset: `tether upgrade --dry-run`, then `tether upgrade`; a newer one: upgrade `tether-vcs`. |
+| `VcsError` | jj or git failed: a jj older than the minimum ([versions](07-cli.qmd#versions-and-environment)), a commit hook that refused (nothing is left staged), a conflicted bookmark or commit (`gc` and `drop` refuse until it is resolved; `promote` refuses its plan), a new commit whose tree lacks a manifest (the dataset sits under an ignored directory). | The message names the command. Fix the VCS side -- `jj bookmark list`, `jj resolve`, the ignore rule, the hook -- and run the tether command again. |
+| `TetherError` (the lock) | `another tether command is writing in this checkout` after 30 s, or the repository lock after 60 s; on Windows, that there is no `fcntl` and commands that write are refused. | Wait for, or stop, the other command (`tether ops` shows what it was; a killed one leaves the lock free). Writes need a POSIX system or WSL ([Caveats](12-caveats-and-performance.qmd#one-writer-per-checkout-one-per-repository)). |
+
+## An interrupted command
+
+A store-writing command journals its plan before the first side effect and
+marks completion afterwards, so a process killed in between leaves an entry
+marked `INCOMPLETE` in `tether ops`. Three commands read it:
+
+- `tether repair --dry-run` lists what the operation got done (which pins,
+  forks, unpins, fast-forwards) and what was planned.
+- Running the same command again finishes what is left; `commit` first
+  releases the pins its failed attempt created, unless the VCS commit already
+  landed, in which case the commit stands.
+- `tether gc` keeps every pin an unfinished operation names, from any
+  checkout of the repository.
+
+`tether undo` refuses an `INCOMPLETE` entry: what it did is not fully known.
+The contract is in [The operation log](07-cli.qmd#the-operation-log).
+
+## Warnings `status` prints
+
+These are not errors, and the line says what to do:
+
+- `(STALE: key, ...)` in the header: see `StaleWorkingCopyError` above.
+- `warning: bookmark ... is gone / renamed / moved / left`: the VCS moved the
+  bookmark behind tether's back. `tether new NAME` returns to it or continues
+  under the new name; `gc --prune-bookmarks` releases a gone bookmark's
+  branches ([Workspaces and bookmarks](04-branching-and-writing.qmd#workspaces-and-bookmarks)).
+- `warning: dataset commit ... is no longer in VCS history`: a `jj undo`,
+  `jj abandon` or `git reset` removed a commit tether made. Its pins are
+  unreferenced: `gc` releases them, `repair` recreates them if the commit
+  comes back ([`undo`](07-cli.qmd#undo)).
+- `error` as an object's state: its fingerprint failed; the reason follows on
+  stderr and `status` exits 1. The other objects are reported as usual.
+
+## Removing tether from a repository
+
+There is no `tether uninstall` yet (it is on the roadmap); until then the
+recipe is manual. The point is the refs tether left in the stores: every pin
+is `tether.<id>.<hash>` (Icechunk repins add a generation, `.2`, `.3`), every
+working branch `tether.ws.<id>.<bookmark>`, where `<id>` is the 8-hex
+`[dataset] id` in `tether.toml`. Nothing else in a store is tether's.
+
+1. **Let tether release what it can.** `tether drop NAME --no-dry-run` for
+   every bookmark but the trunk releases their pins and branches; then
+   `tether gc --prune-bookmarks --no-dry-run`, with `--release-foreign` if
+   this is the last clone. Stores made with `add --create` go with
+   `--delete-stores` while their manifests are still in the tree
+   ([Stores tether created](05-reclaiming-storage.qmd#stores-tether-created)).
+2. **Find the stores.** Every commit's manifests name them; `tether export
+   refs.sqlite` puts them in one table (`SELECT DISTINCT kind, uri FROM
+   objects`), or read `.tether/objects/*.toml` at each commit.
+3. **Delete the remaining refs, per store.** History still names the trunk's
+   pins, so they must go by hand:
+
+   | Kind | List | Delete |
+   | --- | --- | --- |
+   | `icechunk` | `repo.list_tags()`, `repo.list_branches()` | `repo.delete_tag(name)`, `repo.delete_branch(name)` |
+   | `lance` | `ds.tags.list()`, `ds.branches.list()` | `ds.tags.delete(name)` first, then `ds.branches.delete(name)` (a branch a tag references cannot be deleted) |
+   | `git` | `git tag -l 'tether.*'`, `git branch --list 'tether.ws.*'` | `git tag -d NAME`; `git push REMOTE --delete NAME` where pins were pushed; `git branch -D NAME` |
+   | `neon` | the project's branch list (console or API), names `tether.*` | the pin branches first (children of the working branches; unprotect the protected ones), then the `tether.ws.*` branches |
+   | `iceberg` | `table.refs()` | `table.manage_snapshots().remove_tag(name)` / `.remove_branch(name)` |
+   | `dolt` | `SELECT tag_name FROM dolt_tags`, `SELECT name FROM dolt_branches` | `CALL DOLT_TAG('-d', name)`, `CALL DOLT_BRANCH('-D', name)` |
+   | `delta`, `ducklake`, `file` | -- | nothing: these hold no refs. A `file` directory `add --create` made has a `.tether-owner` marker to remove |
+
+   Delete only names carrying *this* dataset's id: another dataset pinning
+   the same store uses its own. Releasing a ref makes the data eligible for
+   the system's own expiry (`expire_snapshots`, `cleanup_old_versions`,
+   `expire_snapshots` in Iceberg); run that afterwards to reclaim the bytes.
+4. **Remove the files.** Delete `tether.toml` and `.tether/` from the working
+   tree and commit; delete `tether.lock`, `tether-pinned.jsonl`,
+   `tether-created.jsonl` and `tether-touched.jsonl` from the VCS's shared
+   directory (`.jj/repo/` or `.git/`). Every other checkout deletes its own
+   `.tether/`. Old commits keep their manifests as text; rewriting history to
+   remove them is optional and the VCS's job.

@@ -1,0 +1,155 @@
+---
+title: "Sharing and CI"
+guide-section: "Core Workflows"
+---
+
+A dataset is a git or jj repository, so sharing it is `jj git push` or
+`git push`, and a clone on the other side. This page is about what the clone
+does *not* carry, and what a teammate or a CI job has to bring before the
+first command works.
+
+## What a clone carries, and what it does not
+
+The repository holds `tether.toml` and one manifest per object: kind,
+locator, recorded state, pin. So a clone has the whole history, every pin's
+name, and every object's address. It does not have:
+
+| Not in the clone | Why it matters |
+| --- | --- |
+| the data | Pins live in the stores. A teammate needs access to every store the manifests name, with their own credentials. |
+| `.tether/secrets.toml` | Untracked and per checkout. Each clone writes its own (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
+| `.tether/workspace.toml` | Which bookmark a checkout works on. A fresh clone is on *no* bookmark until `tether new`. |
+| `.tether/ops.jsonl` | The operation log is per checkout: `tether undo` there covers only what that checkout did. |
+| `tether-pinned.jsonl` and the other indexes in `.jj/repo/` or `.git/` | A clone did not create your pins, so its `gc` keeps them as `keep-pin` ([below](#gc-across-clones)). |
+| local paths | Locators store local paths absolute, as they were on the machine that ran `add` ([below](#local-paths-travel-badly)). |
+
+## Cloning a dataset: a teammate's checklist
+
+1. Install the same tether release and the extras the dataset's kinds need
+   (`pip install "tether-vcs[cli,icechunk,lance]"`); `tether backends` shows
+   what is installed. Install a jj or git that meets the minimum in
+   [Versions and environment](07-cli.qmd#versions-and-environment).
+2. Clone: `jj git clone URL` or `git clone URL`. Read `tether.toml` and
+   `.tether/objects/*.toml` before the first command. A clone is untrusted
+   input, and the manifests name the stores every command will contact
+   ([Security model](08-configuration.qmd#security-model)).
+3. Write `.tether/secrets.toml` for your identity: a `profile` or `role_arn`
+   per URI prefix, `NEON_API_KEY` or `api_key_env`, a Dolt server entry.
+   `chmod 600` it.
+4. `tether status`. The first command mints the checkout's workspace id and
+   takes a snapshot, since there is none yet, so every store is contacted; one
+   you cannot reach is reported as `error` and the rest are listed. The
+   working copy is on no bookmark: reads work, writes do not.
+5. `tether verify`: the pins resolve for you too.
+6. To write: `tether new main` for the trunk (shared by nature), `tether new
+   -b NAME` for a bookmark of your own, or `tether new NAME` to join one a
+   teammate pushed (`jj git fetch` first).
+
+For read-only jobs, steps 4 to 6 reduce to `TETHER_REV=<commit>` and
+`repo.open(key)`.
+
+## Two clones, one bookmark
+
+tether sees only the checkouts of *your* clone. A bookmark another live
+checkout in the same clone works on is refused without `--shared`; a checkout
+in another clone is invisible, so two clones on one bookmark are `--shared`
+whether you asked or not. Both write the same store branch,
+`tether.ws.<dataset>.<bookmark>`, and whoever commits second finds the
+working copy stale after fetching: `tether new` re-forks from the new pins,
+and asks for `--discard` before it throws uncommitted writes away
+([Stale working copies](04-branching-and-writing.qmd#stale-working-copies)).
+One bookmark per person, or the trunk, avoids the question.
+
+Bookmarks travel like any jj bookmark or git branch: `jj git push -b NAME` /
+`git push origin NAME` to share one, `jj git fetch` / `git fetch` to see a
+teammate's. `tether pull` is not `git pull`: it reads the *stores*, not the
+remote.
+
+## Local paths travel badly
+
+`add` resolves a relative local path against the directory it ran in and
+stores it absolute, so the committed locator says
+`/home/ann/data/imaging.icechunk`, not `../data/imaging.icechunk`. On another
+machine that path is wrong: `status` reports the object as `error`, lists the
+rest, and exits 1. Three ways out:
+
+- Mount the data at the same absolute path (a shared filesystem, as in
+  [Pinning](03-pinning.qmd#register-the-objects)), or a symlink there.
+- Move the object to an object store and register it again:
+  `tether remove KEY`, `tether add KEY s3://... --kind icechunk`, `commit`.
+  History keeps the old locator; the new commits use the new one.
+- A `git` object's `path` must be absolute and outside the dataset's
+  checkout, so a teammate clones the code repository to the same path, or
+  re-registers it.
+
+The same holds for `file` directories, `lance` and `delta` local URIs, and a
+DuckLake catalog's `metadata` and `data_path`.
+
+## `gc` across clones
+
+`gc` releases only pins *this clone created* (recorded in
+`tether-pinned.jsonl`), so a fresh clone cannot release yours by accident:
+an unreferenced pin it did not create is listed as `keep-pin`. Fetch every
+bookmark before running `gc`, so the other clones' commits count as
+references; pass `--release-foreign` only for a clone you know is gone. For
+`--prune-bookmarks`, `--keep-bookmark NAME` protects a bookmark that lives
+only on another machine. `drop` notes when a pushed `NAME@origin` still
+reaches the commits; the next `jj git push` (or
+`git push origin --delete NAME`) removes the remote side. The rules are in
+[Reclaiming Storage](05-reclaiming-storage.qmd#pins-this-clone-did-not-create).
+
+## A CI recipe
+
+Three commands make CI gates, because each exits 1 when something is wrong
+([exit codes](07-cli.qmd#exit-codes-and-errors)):
+
+| Command | Catches | When |
+| --- | --- | --- |
+| `tether verify --all-history --deep` | a pin that no longer resolves, or a recorded state the system expired | nightly, and on every push |
+| `tether status --snapshot` | drift: an `immutable` file changed, an upstream branch moved, an object unreachable | nightly |
+| `tether promote --strategy ff` | a bookmark that cannot land as a fast-forward everywhere | when a bookmark is approved |
+
+`--deep` opens each recorded state. Without it a Delta, DuckLake or
+`--pin record` state reports `unknown`, which is "not ok" and exits 1.
+`promote --dry-run` exits 0 whatever the plan says, so gate on the real
+command, or on the plan's JSON.
+
+Credentials come from the runner's secret store, written into the untracked
+`.tether/secrets.toml` before the first command (tether does not expand
+`${...}`; write the values in). A GitHub Actions job:
+
+```yaml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # verify --all-history walks every commit
+      - run: pip install "tether-vcs[cli,icechunk,lance]"
+      - name: Credentials for this checkout only
+        run: |
+          mkdir -p .tether && umask 077
+          cat > .tether/secrets.toml <<EOF
+          [uris."s3://lab-bucket/"]
+          access_key_id = "${{ secrets.LAB_KEY_ID }}"
+          secret_access_key = "${{ secrets.LAB_SECRET }}"
+          EOF
+      - run: tether verify --all-history --deep
+```
+
+A role the runner can assume needs no literal keys: `role_arn = "..."` in the
+same entry, with `boto3` installed. A git checkout in CI is on a branch, and
+`git` needs no jj; a jj clone needs a jj on `PATH` that meets the minimum
+([versions](07-cli.qmd#versions-and-environment)).
+
+Two things not to run from CI without a review step: `gc --no-dry-run` (a CI
+clone knows only what it fetched; save the plan with `--plan FILE` and apply
+it from a reviewed job with `--from-plan`), and `promote` without
+`--strategy ff` (a merge lands a state no commit has pinned yet, and needs a
+`commit` and a second `promote`). `tether publish` after each commit on
+`main` is safe to automate: it is idempotent and incremental
+([Registries and SQL](10-registries-and-sql.qmd#publish)).
+
+For a reproducible job, pin the read: `TETHER_REV=$(jj log -r main
+--no-graph -T commit_id)` (git: `git rev-parse main`) makes every
+`repo.open(key)` in the job read-only at that commit's pins.
