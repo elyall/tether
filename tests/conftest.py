@@ -102,8 +102,8 @@ def hostile_vcs_config(
     """A user whose jj and git settings would break every id tether parses if
     they reached its calls: colour forced on, `all()` aliased to the working
     copy, new files never tracked and capped at 1 KiB, signatures shown,
-    paths quoted. Tests that take this fixture must behave exactly as under
-    the plain config."""
+    paths quoted, untracked files hidden from `git status`. Tests that take
+    this fixture must behave exactly as under the plain config."""
     cfg = tmp_path_factory.mktemp("hostile")
     (cfg / "jj.toml").write_text(
         '[user]\nname = "tether tests"\nemail = "tests@tether.dev"\n'
@@ -114,7 +114,7 @@ def hostile_vcs_config(
     )
     (cfg / "gitconfig").write_text(
         "[color]\n\tui = always\n[log]\n\tshowSignature = true\n"
-        "[core]\n\tquotePath = true\n",
+        "[core]\n\tquotePath = true\n[status]\n\tshowUntrackedFiles = no\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("JJ_CONFIG", str(cfg / "jj.toml"))

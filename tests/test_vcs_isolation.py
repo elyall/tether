@@ -74,6 +74,36 @@ def test_core_loop_and_gc_under_a_hostile_user_config(
     assert st.bookmark_drift == [] and all(not o.changed for o in st.objects)
 
 
+@pytest.mark.parametrize("first", ["fresh", "new-key", "nested-key"])
+def test_commit_after_a_no_vcs_commit_lands_manifests_no_commit_tracked_yet(
+    vcs_root: Path, hostile_vcs_config: Path, first: str
+) -> None:
+    """`commit --no-vcs` leaves manifests the VCS has never tracked; the next
+    `commit` must commit them. Under `status.showUntrackedFiles = no` git
+    listed nothing, `dirty` said clean, and `commit` did nothing without an
+    error -- for the whole `.tether/` of a fresh dataset, a new key in an
+    already-tracked directory, and a key nested in a new subdirectory."""
+    repo = Repo.init(vcs_root)
+    if first == "fresh":
+        _mem_object(repo)
+        keys = ["db"]
+    else:
+        _mem_object(repo)
+        assert repo.commit("baseline").vcs_commit is not None
+        key = "extra" if first == "new-key" else "plates/2026/raw"
+        _mem_object(repo, key)
+        keys = ["db", key]
+    silent = repo.commit("pins only", vcs=False)
+    assert silent.vcs_commit is None
+    assert repo.vcs.dirty(repo._vcs_paths())
+    landed = repo.commit("now the manifests")
+    assert landed.vcs_commit is not None
+    committed = repo._objects_at(landed.vcs_commit)
+    assert sorted(committed) == sorted(keys)
+    assert all(committed[k].state == repo.objects[k].state for k in keys)
+    assert not repo.vcs.dirty(repo._vcs_paths())
+
+
 def test_commit_refuses_to_report_success_when_the_manifests_were_left_out(
     vcs_root: Path,
 ) -> None:

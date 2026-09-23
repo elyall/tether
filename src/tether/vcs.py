@@ -87,10 +87,14 @@ _GIT_ISOLATION = (
     "log.showSignature=false",
     "-c",
     "core.quotePath=false",
+    "-c",
+    "status.showUntrackedFiles=all",
 )
 """What every git call gets: `log.showSignature = true` put the verification
 banner in front of the commit id `git log` printed; `core.quotePath` spelled
-a non-ASCII manifest path in octal."""
+a non-ASCII manifest path in octal; `status.showUntrackedFiles = no` hid a
+manifest no commit had tracked yet from `dirty`, so `commit` found nothing
+to do."""
 
 
 @dataclass(frozen=True)
@@ -1544,7 +1548,9 @@ class GitAdapter:
         return f"git worktree {target} removed"
 
     def dirty(self, relpaths: list[str]) -> bool:
-        out = self._git("status", "--porcelain", "--", *relpaths)
+        out = self._git(
+            "status", "--porcelain", "--untracked-files=all", "--", *relpaths
+        )
         return bool(out.stdout.strip())
 
     def tracked(self, relpaths: list[str]) -> list[str]:
