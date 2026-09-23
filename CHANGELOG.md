@@ -8,93 +8,75 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
-- `git`: a manifest's `path` must be absolute and outside the checkout, and
-  git runs no fsmonitor, hook, `ext::` transport or implicit bare repository.
-- git calls ignore an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`
-  or `GIT_CONFIG_*`, which retargeted tether run from a git hook.
-- `git`: a committed `remote` must name a remote the repository has
-  configured; a URL goes in `.tether/secrets.toml` (`[objects."<key>"] remote`).
+- `git`: a manifest's `path` must be absolute and outside the checkout; git
+  runs no fsmonitor, hook, `ext::` transport or implicit bare repository, and
+  ignores an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` or
+  `GIT_CONFIG_*`.
+- `git`: a committed `remote` must name a configured remote; a URL goes in
+  `.tether/secrets.toml` (`[objects."<key>"] remote`).
 - `import`: `[import] query` is read from `.tether/secrets.toml`, not
-  `tether.toml`, and runs as one read-only statement; a committed query could
-  write, even under `--dry-run`.
+  `tether.toml`, and runs as one read-only statement.
 - `dolt`: credentials come only from the server's `[uris."mysql://host:port"]`
   entry in `.tether/secrets.toml` (`password_env` / `user_env` move there);
   `$DOLT_PASSWORD` went to any host a manifest named.
 - Object keys may not contain `\` or a drive letter, and are checked when a
-  manifest is read: on Windows such a key wrote outside `.tether/objects/`.
+  manifest is read.
 
 ### Added
 
 - `ObjectBackend.fork`, `promote` and `merge` take `expected=`, the head the
   caller reviewed (or `ABSENT`): the ref moves only from there, else
-  `RefMovedError` and nothing moves. git and Icechunk use their native
-  compare-and-swap (`update-ref` with the old value, `reset_branch(...,
-  from_snapshot_id=)` where the installed icechunk has it); the other backends
-  compare just before acting; a backend written without the keyword is called
-  as before. The engine passes the heads its plans reviewed.
-- The conformance suite checks conditional forks, `PROMOTE`, `MERGE`,
-  `ancestor_of`, and opening an older recorded state.
-- `tether.plan.REQUIRED_PRECONDITIONS` (per command) and
-  `REQUIRED_ACTION_PRECONDITIONS` (per action), and a `workspace_bookmark`
+  `RefMovedError` and nothing moves. Backends without the keyword work as
+  before; the engine passes the heads its plans reviewed.
+- `tether.plan.REQUIRED_PRECONDITIONS` per command, and a `workspace_bookmark`
   precondition: the checkout's bookmark as `workspace.toml` and the VCS see it.
+- The conformance suite checks conditional forks, `PROMOTE`, `MERGE`,
+  `ancestor_of` and opening an older recorded state.
 
 - `gc --release-foreign` (`Repo.gc(release_foreign=)`): also release
   unreferenced pins this clone did not create.
 
 ### Changed
 
-- Partial success (`undo`, `repair`, `upgrade`, `forget-workspace` that could
-  not reverse or rebuild everything) exits 3; 2 is Click's usage error.
+- Partial success (an `undo`, `repair`, `upgrade` or `forget-workspace` that
+  could not do everything) exits 3; 2 is Click's usage error.
 - `--help` keeps bracketed text such as `[experimental]`; `add --kind` lists
   each kind with its maturity.
 - Lance objects on a working branch and every Neon object read as changed
-  once after upgrading: their state keys changed (`branch_id`; `commit_xid`
-  for `next_xid`). No migration.
+  once after upgrading: their state keys changed. No migration.
 
-- A plan must carry the preconditions its command requires; one that lacks
-  them -- saved by an older tether, or edited -- is refused as stale. Every
-  plan binds to the checkout that made it (`--plan FILE` persists the
-  workspace id first), and `commit`, `restore`, `promote` and `drop` plans to
-  its bookmark.
-- `promote` lands committed states only: a working branch with writes since
-  the last commit is refused (`tether commit` them first). Merges run before
-  fast-forwards, which are held when a merge does not land; the trunk moves to
-  the commit the plan reviewed, and a second promote after a merge moves it
-  once every base holds what that commit records.
-- `restore` checks the head of every branch it would reset -- a fork `new`
-  deferred included, which a `--shared` peer may have created -- and wants
-  `--discard` for writes nobody committed; a head it cannot read is refused.
-- `undo` reverses the newest operation and refuses, rather than reaches past,
-  one it cannot undo; `tether undo ID` puts back only the `workspace.toml`
-  fields that entry changed. The `new` and `gc` a `drop` runs are journaled
-  as its steps (`parent`; `(step of ID)` in `tether ops`) and cannot be undone
-  on their own.
-- `new`, `restore` and the first writable `open` on a bookmark hold the
-  repository lock while they check and fork, and fork only onto the head the
-  plan saw; a restore stopped by a branch that moved under it records what it
-  did reset and asks for a new plan for the rest.
-- Where the platform has no `fcntl` (Windows), commands that write are
-  refused with one message; `status`, `verify`, `diff`, `log`, `ops` and
-  `gc --dry-run` work.
+- A plan must carry the preconditions its command requires; one saved by an
+  older tether, or edited, is refused as stale. Every plan binds to the
+  checkout that made it, and `commit`, `restore`, `promote` and `drop` plans
+  to its bookmark.
+- `promote` lands committed states only (`tether commit` uncommitted writes
+  first). Merges run before fast-forwards, which are held when a merge does
+  not land; the trunk moves to the commit the plan reviewed.
+- `restore` checks the head of every branch it would reset, deferred forks
+  included, wants `--discard` for uncommitted writes, and refuses a head it
+  cannot read.
+- `undo` reverses the newest operation only and refuses one it cannot undo
+  rather than reaching past it; `tether undo ID` restores only the
+  `workspace.toml` fields that entry changed. The `new` and `gc` a `drop` runs
+  are its steps (`(step of ID)` in `tether ops`) and cannot be undone alone.
+- `new`, `restore` and the first writable `open` hold the repository lock
+  while they check and fork, and fork only onto the head the plan saw.
+- Without `fcntl` (Windows), writing commands are refused; `status`, `verify`,
+  `diff`, `log`, `ops` and `gc --dry-run` work.
 
-- `gc` and `drop` release only pins this clone created, recorded in
-  `tether-pinned.jsonl` beside the repository lock (seeded from the op logs on
-  first use). Any other unreferenced pin is kept and listed as `keep-pin` --
-  it may be another clone's, made by commits not fetched yet -- until it is
-  fetched or `--release-foreign` is passed. `keep-pin` is informational, like
-  `keep-branch`; `GcReport.kept_pins` and `gc --json` `kept_pins` list them.
-- jj 0.43 is the minimum version; tether checks once and refuses an older one.
-- Every jj call gets `--color=never --no-pager` and overrides for `ui.color`,
-  `ui.paginate`, `snapshot.auto-track` and `snapshot.max-new-file-size`;
-  tether tracks its own paths by name before committing, and its revsets use
-  operator forms (`::`). A user config with colour forced on, `all()` aliased
-  or auto-tracking off put escape codes in every commit id, made empty
-  dataset commits, or shrank the history `gc` walks to one commit. Every git
-  call gets `-c color.ui=never -c log.showSignature=false -c core.quotePath=false`.
+- `gc` and `drop` release only pins this clone created (recorded in
+  `tether-pinned.jsonl` beside the repository lock, seeded from the op logs).
+  Any other unreferenced pin is kept as informational `keep-pin` until it is
+  fetched or `--release-foreign` is passed; `GcReport.kept_pins` and `gc
+  --json` list them.
+- jj 0.43 is the minimum version; an older one is refused.
+- jj and git run with tether's own colour, pager, auto-tracking and revset
+  settings, whatever the user's config says; colour forced on, `all()`
+  aliased or auto-tracking off had corrupted commit ids, made empty commits,
+  or shrunk the history `gc` walks.
 - `file`, `icechunk`, `lance`, `delta`: `/p` and `file:///p` are one store to
-  pin ids, listings and `gc`; spelled both ways, each spelling released the
-  other's pins. No migration: pin ids of objects registered with a `file://`
-  spelling change, as the Neon identity change did.
+  pin ids, listings and `gc`. No migration: pin ids of objects registered as
+  `file://` change.
 
 - `neon`: pins are unprotected unless `protected_pins = true`; Free has no
   protected branches, and paid plans allow a few.
@@ -108,1142 +90,599 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Delta `history` and `diff` attached the wrong commit to each version below
   the head.
-- Lance states off `main` carry the branch id; a state from a re-created
+- Lance states off `main` carry the branch id, so a state from a re-created
   branch verifies as missing instead of opening another branch's data.
 - `tether diff` with no arguments compares against jj's `@-`, not the working
   copy commit.
-- File backend: `allow_http` (and the other HTTP client options) work on S3;
-  directory and dangling symlinks count by their target; the racy-stat guard
-  covers every timestamp granularity, not only whole seconds.
-- `tether status` labels an object it cannot read `error`, reports the rest,
-  and exits 1 instead of aborting on the first failure.
+- `file`: `allow_http` and the other HTTP client options work on S3; symlinks
+  to directories and dangling ones count by their target; the racy-timestamp
+  guard covers every timestamp granularity.
+- `tether status` labels an unreadable object `error`, reports the rest and
+  exits 1 instead of aborting.
 - `tether init --json` prints only JSON.
 
-- Two `--shared` checkouts materializing one lazy fork: the second listed the
-  branch as absent while the first forked and wrote, then forked onto the pin
-  and threw the write away.
-- `undo <older new>` after a commit on the branch it created deleted the
-  branch -- the committed state counted as "known" -- which for a
-  `pin = "record"` object held the only copy of what the commit recorded; the
-  branch is refused without `--discard`, and the workspace no longer rolls
-  back to the bookmark of that time. Undoing an older `add` moved the checkout
-  to `main` with no working refs, and the next write went to the store's
+- Two `--shared` checkouts materializing one lazy fork could throw the first
+  one's write away.
+- Undoing an older `new` after a commit on its branch deleted the branch, for
+  `pin = "record"` the only copy of that state; it now needs `--discard`, and
+  the workspace no longer rolls back to that time's bookmark. Undoing an older
+  `add` moved the checkout to `main`, so the next write went to the store's
   `main`.
-- Two `tether undo`s after a `drop` revived the abandoned commit, naming a
-  deleted pin, bookmark and branch.
-- jj: undoing a commit that other commits were built on squashed it away and
-  rewrote them; refused now (`jj backout` reverts it in place).
-- `promote` landed a working branch's uncommitted writes and moved the trunk
-  to a commit recording an older state; a merge that conflicted left the
-  fast-forwards beside it landed; a saved plan applied on another bookmark
-  moved the trunk to that bookmark's commit; the reset after a merge discarded
-  a write that landed during it.
-- A long-lived `Repo`'s writable `open` used the workspace it loaded at
-  construction: after another process ran `new`, its handle was still on the
-  trunk's upstream branch. The open re-reads the checkout first.
-- `new` kept the snapshot cache of the bookmark it left, so `status` without a
-  snapshot reported the old branch's head under the new bookmark and
-  `commit --no-snapshot` pinned it as the new bookmark's state.
-- AWS credentials from a profile or role were resolved once per operation and
-  never refreshed; they are cached with their expiry and resolved again five
-  minutes before it, Icechunk repositories and file stores are rebuilt when
-  the keys change, and the file store cache is keyed per credential rule and
-  region rather than per bucket root (two prefixes of one bucket with
-  different rules shared the first's credentials).
-- The checkout and repository locks' re-entrancy was per `Repo`, not per
-  thread: a second thread walked in while the first held the lock, and the
-  counter could end at -1, after which that `Repo` never locked or refreshed
-  again.
-- jj: `drop` from a bookmark whose working copy had edits planned no leave
-  (jj reports no bookmark for a non-empty `@`), and the abandon rebased the
-  working copy onto the trunk while `workspace.toml` still named the bookmark.
+- Two `undo`s after a `drop` revived the abandoned commit.
+- jj: undoing a commit other commits were built on rewrote them; refused now
+  (`jj backout` reverts in place).
+- `promote` landed uncommitted writes and moved the trunk to a commit
+  recording an older state; a conflicted merge left its fast-forwards landed;
+  a saved plan applied on another bookmark moved the trunk there; the reset
+  after a merge discarded a concurrent write.
+- A long-lived `Repo`'s writable `open` ignored a `new` another process ran
+  since it was constructed.
+- `new` kept the previous bookmark's snapshot cache, so `status` and
+  `commit --no-snapshot` used the old branch's head under the new bookmark.
+- AWS profile or role credentials were never refreshed (now five minutes
+  before expiry), and two prefixes of one bucket with different credential
+  rules shared the first's.
+- The locks were re-entrant per `Repo`, not per thread; a second thread could
+  leave that `Repo` unable to lock again.
+- jj: `drop` from a bookmark whose working copy had edits planned no leave and
+  left `workspace.toml` naming the dropped bookmark.
 
 - `gc` counts every live checkout's working-tree manifests and the pins of
-  operations still running or interrupted as references; it released a pin
-  another checkout's undone or `--no-vcs` commit named, and one a commit had
-  cut just before it was killed. `--prune-bookmarks` keeps every branch any
-  live checkout works on or has pending; it deleted the branch a `--shared`
-  sibling was writing to.
+  running or interrupted operations as references; `--prune-bookmarks` keeps
+  every branch a live checkout works on or has pending.
 - `gc`, `drop` and `promote` refuse while jj reports a conflicted bookmark or
-  commit (`gc` and `drop` raise; `promote` refuses the plan). A conflicted
-  bookmark was left out of what history reaches, and `promote` moved a
-  conflicted trunk onto its own bookmark, dropping the other side. `status`
-  and `commit` name a conflicted bookmark instead of calling it gone.
+  commit; `status` and `commit` name a conflicted bookmark instead of calling
+  it gone.
 - `commit` raises when the new commit's tree lacks a manifest (a dataset under
-  an ignored directory made an empty commit that `status` called clean).
-- git: a `git commit` a hook refused left the manifests staged, naming the pins
-  the rollback released; the index is reset to what it was.
-- jj: the history walk reads every side and base of a conflicted commit, so
-  `gc` counts the pins each side names; it read only the side jj shows.
-- `file`: a local path holding `#` or `?` was cut short at that character, and
+  an ignored directory made an empty commit `status` called clean).
+- git: a hook-refused `git commit` left the manifests staged; the index is
+  reset.
+- jj: the history walk reads every side of a conflicted commit, so `gc`
+  counts the pins each side names.
+- `file`: a local path holding `#` or `?` was cut short there, and
   `add --create` on a `file://` URI made a stray `file:` directory.
 
-- A saved `drop` plan applies only in the checkout that made it (0.1.0b3
-  plans included), and only while that checkout, as the VCS sees it, is
-  still on (or off) the bookmark.
-- A checkout writes its workspace id the first time tether opens it, so a
-  plan saved in a fresh clone or worktree applies there.
-- `drop` closes its journal entry when the store half fails; it stayed
-  `started`, with nothing a re-run could finish.
-- An operation-log entry appended after a torn line is no longer lost with it.
+- A saved `drop` plan applies only in the checkout that made it, and only
+  while that checkout is still on (or off) the bookmark as the VCS sees it.
+- A checkout writes its workspace id on first open, so a plan saved in a
+  fresh clone or worktree applies there.
+- `drop` closes its journal entry when the store half fails.
+- An op-log entry appended after a torn line is no longer lost with it.
 - `--from-plan` refuses `--dry-run` and `--plan`; `commit --from-plan p.json
   --dry-run` committed.
 
 ### Experimental
 
-- `neon`: `add` requires `database` and `role`; every connection URI names its
-  endpoint; busy answers (423, 429, 503) are retried with backoff; content is
-  keyed on `commit_xid`, so a compute restart no longer reads as a write.
-- `dolt`: a merge that hits conflicts or constraint violations raises
-  `MergeConflict` (the merge runs inside a transaction and is aborted).
+- `neon`: `add` requires `database` and `role`; connection URIs name their
+  endpoint; busy answers (423, 429, 503) are retried with backoff; a compute
+  restart no longer reads as a write.
+- `dolt`: a merge with conflicts or constraint violations raises
+  `MergeConflict` and writes nothing.
 - `iceberg`: tables with no snapshot yet are accepted; requires
   `pyiceberg >= 0.11`.
-- `ducklake`: a relative `metadata` path is stored absolute, like every other
-  local path.
+- `ducklake`: a relative `metadata` path is stored absolute.
 
 ## [0.1.0b3] - 2026-09-18
 
 ### Experimental
 
-- `neon`: `database` is out of the object identity, as `role` already was. A
-  Neon branch at an LSN is a snapshot of the whole project, so two objects on
-  two databases of one project are one snapshot to tether: one pin branch per
-  commit instead of two identical ones cut off the same LSN, one working
-  branch per bookmark (as `branch_scope` already arranged), and `open` on
-  each connects to its own database through them. No migration: existing
-  pins keep their recorded ids and refs, stay referenced by the history that
-  made them, and verify and repair as before; the next `commit` of content
-  already pinned under an old id pins it once more under the new one.
+- `neon`: `database` is out of the object identity, as `role` already was:
+  two objects on two databases of one project share one pin per commit and
+  one working branch per bookmark, and `open` connects each to its own
+  database. No migration: existing pins keep their ids; the next `commit`
+  re-pins their content under the new id.
 
 ### Fixed
 
-- `commit` pins once per pin id. Two objects with one identity and one
-  content state name one snapshot; the second is now recorded at the state
-  the pin was cut at instead of its own fingerprint of the same content,
-  whose volatile address (a Neon LSN) could differ and made the backend
-  refuse the second pin as hanging off the wrong LSN.
+- `commit` pins once per pin id: two objects with one identity and one content
+  state share the pin, instead of the second being refused for a differing
+  volatile address (a Neon LSN).
 
 ## [0.1.0b2] - 2026-09-17
 
 ### Added
 
-- `tether drop BOOKMARK` (`Repo.plan_drop` / `apply_drop` / `drop`): throwing
-  a bookmark away is one command, the opposite of `promote`. In order: leave
-  the bookmark when this checkout is on it (`--to`, default the trunk), drop
-  the commits only it reaches (jj: `jj abandon`; git: nothing reaches them
-  once the branch is gone), delete it, then the store side -- `gc
-  --prune-bookmarks` restricted to its branches, the pins nothing references
-  once the commits are gone, and with `--delete-stores` the experimental
-  created-store step. One rule is `drop`'s own: a branch whose head a dropped
-  commit pinned or recorded is deleted (committed work thrown away by name),
-  where `gc` keeps it as "unpinned writes"; uncommitted writes still need
-  `--force-prune`. Dry-run by default; the plan previews the store side as it
-  will be once the commits are gone and apply re-plans it live; the set of
-  commits only the bookmark reaches is re-derived at apply and a saved plan is
-  refused if another bookmark has come to reach one of them. "Only the
-  bookmark reaches" counts every reacher the VCS knows -- other bookmarks,
-  tags, remote bookmarks, other workspaces' working copies -- and the plan
-  notes a `feature@origin` that still reaches the line. Refused for the
-  trunk, for a bookmark another live checkout works on, and when `--to`
-  names one; not undoable by tether (the CLI guide gives the three-step
-  recovery). New plan verbs `leave-bookmark`, `abandon-commit`,
-  `delete-bookmark`; precondition `bookmark_head`; `GcScope` for
-  `plan_gc(scope=)`; `VcsAdapter.exclusive_commits` / `remote_counterparts`
-  / `files_at_many` / `drop_bookmark`. The use-cases story's three
-  retirements are one line each now. `abandon REV [--gc]` stays as the
-  surgical form: commits off a bookmark you keep.
+- `tether drop BOOKMARK` (`Repo.drop`) throws a bookmark away: it leaves the
+  bookmark if this checkout is on it (`--to`, default the trunk), drops the
+  commits only it reaches, deletes it, then releases its branches and the
+  pins nothing references (`--delete-stores` adds the created-store step).
+- A branch whose head a dropped commit pinned or recorded is deleted, where
+  `gc` would keep it as unpinned writes; writes no commit recorded still need
+  `--force-prune`.
+- `drop` is a dry run by default, refused for the trunk and for a bookmark
+  another live checkout works on, and not undoable by tether. What "only the
+  bookmark reaches" counts other bookmarks, tags, remote bookmarks and other
+  workspaces, and is re-derived at apply. `abandon REV [--gc]` stays for
+  commits off a bookmark you keep.
 
 ### Fixed
 
 - `keep-store` is an informational plan action: a gc plan holding only
-  `keep-store` lines is empty, like one holding only `keep-branch`.
+  `keep-store` lines is empty.
 
 ## [0.1.0b1] - 2026-09-15
 
-The alpha-exit release, and the first beta. Two security fixes, the engine
-bugs an external review found, a hardened backend contract, one migration
-for every alpha format (removed at 0.1.0 -- see Deprecated), an
-`experimental` package that is an import boundary with a seamless graduation
-path, a narrower `undo` that reverses only what an operation created,
-`tether.repo` as a package of one module per command family, and -- as an
-experimental feature -- a store lifecycle: `add --create` makes a store
-tether owns and `gc --delete-stores` reclaims it. What still has to run
-against real services, and what graduates or goes before 0.1.0, is in
-`ROADMAP.md`.
+The alpha-exit release and first beta: two security fixes, the engine bugs
+an external review found, a hardened backend contract, one migration for
+every alpha format (removed at 0.1.0; see Deprecated), a `tether.experimental`
+import boundary, a narrower `undo`, and an experimental store lifecycle. What
+still has to run against real services is in `ROADMAP.md`.
 
 Upgrade with `tether upgrade`; move `[vcs] git_path`/`jj_path`,
-`[backends.neon]`, `[backends.ducklake] init_sql`, `[backends.lakefs]`, and
-any endpoint or credential option out of `tether.toml` into
-`.tether/secrets.toml`.
+`[backends.neon]`, `[backends.ducklake] init_sql`, `[backends.lakefs]` and any
+endpoint or credential option out of `tether.toml` into `.tether/secrets.toml`.
 
 ### Security
 
 - **A cloned dataset is untrusted input.** The committed `tether.toml` could
-  choose the executables tether runs (`[vcs] git_path`/`jj_path`), the
-  endpoint credentials are sent to (`[backends.neon] api_url`,
-  `storage_options.endpoint`, lakeFS client kwargs), SQL to run
-  (`[backends.ducklake] init_sql`), and which environment variable is sent as
-  a password (`[backends.dolt] password_env`). Backends now declare
-  `SAFE_CONFIG_KEYS`; a committed key outside the allowlist -- or an
-  endpoint-/credential-shaped key inside an allowed option table -- is
-  refused with a message saying where it belongs. Those settings live in the
-  new untracked `.tether/secrets.toml` (`[vcs]`, `[backends.<kind>]`) or the
-  environment (`TETHER_GIT`, `TETHER_JJ`). An Iceberg locator's `catalog`
-  table is screened the same way.
-- **git argument injection.** Manifest and state values (`ref`, `at`,
-  `remote`, a pin's ref, a `sha`) reached git positionally without
-  `--end-of-options`, so `at = "--output=FILE"` made `git log` write FILE.
-  Every git call now passes `--end-of-options` before its positionals, a
-  `sha` must be hex, and a `ref`/`at`/`remote`/`path` beginning with `-` is
-  refused at `add` (`ObjectBackend.validate_locator`) and at use.
+  choose the executables tether runs, the endpoints credentials go to, SQL to
+  run, and the environment variable sent as a password. A committed key
+  outside a backend's allowlist is refused, naming where it belongs: the
+  untracked `.tether/secrets.toml` or the environment (`TETHER_GIT`,
+  `TETHER_JJ`).
+- **git argument injection.** Manifest and state values reached git
+  positionally, so `at = "--output=FILE"` made `git log` write FILE. A `sha`
+  must be hex, and a `ref`/`at`/`remote`/`path` beginning with `-` is refused.
 
 ### Fixed
 
 - `promote` moved the trunk bookmark backwards or sideways when the trunk had
-  gained commits the bookmark lacked, dropping them off `main`. A full
-  promotion is refused at plan unless the trunk is an ancestor of the
-  bookmark's commit (merge or rebase the manifests first, or name keys); at
-  apply the trunk is never moved backwards (`PromoteReport.trunk_held`).
-- `new` on an existing bookmark (`reuse`) overwrote the branch's fork point
-  with its own head, so the next `promote` saw a spurious "base moved" and
-  merged (or refused) where a fast-forward was right. A kept branch keeps its
-  fork point, and `promote` asks the store's own history first
-  (`ancestor_of`), using the recorded fork point only where the backend has
-  no DAG.
+  commits the bookmark lacked. A full promotion needs the trunk to be an
+  ancestor of the bookmark's commit; the trunk never moves backwards
+  (`PromoteReport.trunk_held`).
+- `new` on an existing bookmark overwrote the branch's fork point, so the next
+  `promote` merged or refused where a fast-forward was right.
 - Neon put the branch *name* in the content state, so an untouched fork read
-  as modified, `commit` pinned a child of the working branch for no data
-  change, and `new` on the bookmark demanded `--discard`. The state's
-  `branch` is now the lineage (the object's source branch when the fork
-  descends from it) and the timeline actually read is the volatile
-  `timeline`, so a fork with no writes has the pin's content -- the Lance
-  pattern. Neon runs the shared conformance suite and a full `Repo` lifecycle
-  against the API fake; the suite's stability and fork checks compare
-  content states (up to `VOLATILE_KEYS`).
-- `status` spawned two VCS processes per commit in the op log to detect
-  drift; `vcs_drift` now asks once (`VcsAdapter.alive_commits`).
-- Opening a dataset rewrote `.tether/.gitignore`; `Repo.find` now writes it
-  only when an untracked file that exists is not yet ignored (so an older
-  dataset's new `secrets.toml` never reaches a commit). `init` and `upgrade`
-  write the full list.
-- The checkout lock failed outright when another command held it; it now
-  waits up to `Repo.LOCK_TIMEOUT` (30 s) like the repository lock, and the
-  no-`fcntl` branch is re-entrant.
-- A saved `gc` plan under jj went stale after any snapshot: the digest now
-  covers `all() ~ working_copies()` and binds to the working copy's parent.
-- `name.2` working refs (a Neon or Lance sibling of a branch that could not be
-  reset) are parsed back to their bookmark, and an 8-hex bookmark with a
-  suffix is no longer mistaken for a legacy workspace id; `new -b` refuses a
-  bookmark name ending in `.<number>`.
+  as modified and `new` demanded `--discard`.
+- `status` spawned two VCS processes per op-log commit to detect drift.
+- Opening a dataset rewrote `.tether/.gitignore`; it is written only when an
+  existing untracked file is not yet ignored.
+- The checkout lock failed outright when another command held it; it waits up
+  to 30 s.
+- A saved `gc` plan under jj went stale after any snapshot.
+- `name.2` working refs (a Neon or Lance sibling) parse back to their
+  bookmark; `new -b` refuses a name ending in `.<number>`.
 
 ### Deprecated
 
-- **The alpha upgrade path.** `tether.upgrade` (the one composed migration
-  from any 0.1.0aN format, its history rewriters, and the legacy working-ref
-  parsing) ships with the 0.1.0 betas and is removed at 0.1.0. After that, a
-  dataset at an alpha version fails at open with a message naming the last
-  beta: install `tether-vcs==<last beta>`, run `tether upgrade`, reinstall.
-  `Repo.plan_upgrade` / `apply_upgrade` / `upgrade` are thin delegates that
-  import the package on first use; `repo.py` and `vcs.py` read without it.
-  `tether.migrations` is now `tether.upgrade.migrations`; `UpgradeReport`
-  still imports from `tether`.
+- **The alpha upgrade path.** `tether.upgrade`, the one migration from any
+  0.1.0aN format, ships with the 0.1.0 betas and is removed at 0.1.0. After
+  that an alpha-format dataset fails at open naming the last beta: install
+  `tether-vcs==<last beta>`, run `tether upgrade`, reinstall.
+  `tether.migrations` is now `tether.upgrade.migrations`.
 
 ### Changed
 
-- **`tether.repo` is a package.** The 5,500-line `repo.py` is split by
-  command family -- `_core` (state, locks, construction, backends, the op
-  log, plan verification), `_objects` (add/remove, set, pull, snapshot and
-  status, open, history, verify, diff), `_commit`, `_fork` (new, restore),
-  `_promote`, `_gc` (gc, forget-workspace, abandon), `_undo` (undo, repair),
-  and `_reports` (the result dataclasses) -- each a mixin over `RepoCore`,
-  assembled into the same public `Repo`. A pure move: the same 128 methods,
-  the same `tether.repo` exports. Along the way the four workspace-walking
-  loops became one `_iter_live_workspaces()`, and `plan_promote` reads every
-  object's base and working branch in one fan-out instead of two round
-  trips per object.
-- Round-2 review corrections: committed option tables (`storage_options`,
-  `catalog`) are screened by a per-backend `SAFE_OPTION_KEYS` allowlist
-  rather than a substring blocklist, so an option tether has never named is
-  refused by name; `Repo.backend_for` reads the class contract via
-  `backend_class()` instead of building a probe instance; `tether open`
-  prints a Neon connection URL with the password redacted unless
-  `--with-password` (never under `--json`); Icechunk, Delta, and DuckLake
-  implement `validate_locator` (URI scheme, numeric `at`); Neon takes one
-  branch listing per operation and documents the `next_xid` collision
-  between sibling branches; `PromoteReport.trunk_moved` has its docstring
-  back.
 - **Plan preconditions.** What a plan saw is recorded as typed
-  `Plan.preconditions` (`manifest_hash`, `workspace_id`, `vcs_head`,
-  `history_digest`, `config_version`, `ref_absent`, `ref_head`, `base_state`,
-  `pin_state`, `no_new_holders`) instead of being re-implemented inline per
-  command; one `Repo._verify_plan()` runs them before any `apply_*` acts.
-  Saved plans are format 2; a format-1 plan (before 0.1.0b1) is refused with
-  "re-run the plan". Same semantics for every command, one place to audit
-  the drift contract.
-- Hygiene: `forget-workspace` lost its dead `delete-branch`/`keep-branch`
-  actions and the `--force-prune` compatibility flag (branches belong to
-  bookmarks; `gc --prune-bookmarks` judges them); `Handle.key` is documented
-  as a display label, not an identity; the docs describe staleness as the
-  code enforces it (detected per object, refused workspace-wide) and drop
-  the stale `--prune-workspaces` / `--write direct` references; the test
-  suite finds `jj` on `PATH` (or `TETHER_TEST_BIN`) instead of a hard-coded
-  path.
-- **`undo` reverses what an operation created, and reports the rest.**
-  `undo new`/`fork`/`restore` delete the branches the op created and restore
-  `workspace.toml` and the VCS position; a branch the op *reset* is no longer
-  re-pointed to a recorded head (the store may not allow it and the head to
-  choose is yours) -- it is reported with its old head and the tool that
-  moves it (`restore KEY --from REV`, `new --discard`). `undo gc` restores
-  forgotten working refs and listings but no longer recreates deleted
-  branches (`repair` does, from the manifests). `undo --to` and
-  `Repo.undo_to` are gone: several slips are several `undo`s, newest first.
+  `Plan.preconditions` and checked before any apply acts. Saved plans are
+  format 2; a format-1 plan is refused (re-run it).
+- **`undo` reverses what an operation created and reports the rest.** A
+  branch an operation *reset* is reported with its old head and the command
+  that moves it, not re-pointed; `undo gc` no longer recreates deleted
+  branches (`repair` does).
 - **`tether.experimental`.** The backends tested only against fakes (Neon,
-  lakeFS, Dolt, DuckLake, Iceberg) moved to `tether.experimental.backends`,
-  and the registry layer (`export`, `publish`, `import`) to
-  `tether.experimental.registry`. Nothing users type or import changes: kind
-  names, extras, CLI commands, the `Repo` methods, and the
-  `tether.ExportBundle` / `ImportSpec` / `ImportReport` / `PublishReport` /
-  `build_bundle` / `specs_from_rows` re-exports are the stable surface.
-  It is an import boundary: `Repo.export`/`plan_import`/`apply_import`/
-  `import_objects` are thin delegates to `tether.experimental.registry.ops`
-  imported on first call, the `tether.<Symbol>` names resolve lazily, and
-  the CLI commands are attached from `tether.experimental.cli`, so
-  `import tether` loads none of it. The alpha-era module paths
-  (`tether.backends.{neon,lakefs,dolt,ducklake,iceberg}`, `tether.export`,
-  `tether.registry`) are removed without a deprecation window.
-  `export`/`publish`/`import` print the experimental note `add` already
-  printed for experimental kinds. Graduating a backend is a file move plus
-  `MATURITY = "stable"` (documented in Extending).
-- **One migration.** `tether upgrade` brings any alpha dataset to the
-  current version in a single step whose parts run on what the dataset shows
-  (old-format pins, `write =` or mtime file states, misplaced manifests or
-  relative locators), not on its recorded version. One version write at the
-  end, one VCS commit; store renames still fail closed before any history
-  rewrite. The plan records its `parts`.
-- **Backend contract.** Icechunk, Iceberg, Delta, Dolt, Neon, `file`, and
-  DuckLake re-raise their library's exceptions as `BackendError`
-  (`wrap_library_errors`), so a network blip or a missing ref is a refusal at
-  the engine's `except TetherError` sites, not a traceback from inside a
-  client. The `ObjectBackend` protocol's own `fingerprint`/`pin`/`fork`/`open`
-  bodies raise `NotImplementedError` instead of returning `None`.
-- Icechunk `pin` resolves the snapshot before spending a tag name (a missing
-  snapshot no longer burns generations); `fork` leaves a branch already at
-  the source alone and wraps `reset_branch` errors. Git `fork` skips
-  `branch -f` when the branch is at the source. Delta `verify --deep` reads
-  the version's data files (a vacuumed version is `missing`). `file` refuses
-  to fingerprint a prefix whose objects report no ETag instead of digesting
-  names alone; its listing cache is guarded by the hash-cache lock. Neon pins
-  are protected by default with `protected_pins = false` for the free tier,
-  `delete_working_ref` re-lists to confirm, and `NeonHandle` keeps the
-  password out of `repr` (`redacted_url`). Dolt `branch_head`/`resolve` no
-  longer read a lost connection as "no such ref".
-- Conformance suite: the "already at source is left alone" half of the fork
-  contract, `pin(same id, other state)` raises, and `open`/`unpin` of a
-  missing ref raise `BackendError` (never a library exception). Iceberg is
+  lakeFS, Dolt, DuckLake, Iceberg) and the registry layer (`export`,
+  `publish`, `import`) live under `tether.experimental`. Kind names, extras,
+  commands, `Repo` methods and the `tether.*` re-exports are unchanged;
+  `import tether` loads none of it; `export`/`publish`/`import` print the
+  experimental note.
+- **One migration.** `tether upgrade` brings any alpha dataset to the current
+  version in one step, acting on what the dataset shows rather than its
+  recorded version; store renames still fail closed before any history
+  rewrite.
+- **Backend contract.** Library exceptions surface as `BackendError`, never a
+  raw traceback. The conformance suite checks that a fork already at the
+  source is left alone, that re-pinning an id at another state raises, and
+  that `open`/`unpin` of a missing ref raise `BackendError`. Iceberg is
   `experimental` until it runs against a real catalog.
+- Committed option tables (`storage_options`, `catalog`) are screened by a
+  per-backend allowlist of option keys; Icechunk, Delta and DuckLake validate
+  locators at `add`.
+- `tether open` redacts the password in a Neon connection URL unless
+  `--with-password` (never under `--json`).
+- Icechunk `pin` resolves the snapshot before spending a tag name; Delta
+  `verify --deep` reads data files (a vacuumed version is `missing`); `file`
+  refuses to fingerprint a prefix with no ETags; Dolt no longer reads a lost
+  connection as "no such ref".
+
+### Removed
+
+- `undo --to` and `Repo.undo_to`: several slips are several `undo`s, newest
+  first.
+- `forget-workspace --force-prune` and its `delete-branch`/`keep-branch`
+  actions: `gc --prune-bookmarks` judges branches.
+- The alpha-era module paths
+  `tether.backends.{neon,lakefs,dolt,ducklake,iceberg}`, `tether.export` and
+  `tether.registry`, without a deprecation window.
 
 ### Added
 
-- `.tether/secrets.toml` also carries per-URI-prefix and per-object
-  credentials: `profile`, `role_arn` (resolved through `boto3` into explicit
-  keys), `endpoint_url`, `region`, or literal keys. Icechunk passes them to
-  `s3_storage` instead of `from_env`; `file`, Delta, and Lance take them as
-  storage options. Resolution: object entry, longest URI prefix, kind
-  section, then the environment -- an object with no entry behaves as before.
-  tether warns when the file is readable by other users and never prints its
-  contents. `ObjectBackend.configure_secrets`/`secrets_for` are the hooks.
+- `.tether/secrets.toml` carries per-URI-prefix and per-object credentials
+  (`profile`, `role_arn`, `endpoint_url`, `region` or literal keys) for
+  Icechunk, `file`, Delta and Lance; resolution is object entry, longest URI
+  prefix, kind section, then environment. tether warns when the file is
+  readable by others and never prints it.
 
 ### Experimental
 
-The store lifecycle below lives in `tether.experimental.lifecycle`: the one
-operation with no `repair` path, not yet run against real resources (an S3
-prefix, a second clone). `add --create` and `gc --delete-stores` say so.
-Graduation criteria are in the module docstring.
+The store lifecycle lives in `tether.experimental.lifecycle`: the one
+operation with no `repair` path, not yet run against real resources. The
+commands say so.
 
-- **Store lifecycle: create and reclaim.** `tether add KEY LOCATOR --kind KIND
-  --create` (`Repo.add(..., create=True)`) has the backend make an empty store,
-  write an owner marker *in the store* naming the dataset, and record it in a
-  repository-wide untracked index (`tether-created.jsonl` next to the
-  repository lock in `.jj/repo/` or `.git/`); the manifest carries
-  `origin = "created"` and `status` shows `(created)`. On a non-trunk bookmark
-  the new store's working branch is forked at once, so no second `new` is
-  needed before the first write. `Repo.create(key, kind, locator)` is
-  `add(create=True)` plus `open` -- a throwaway environment's whole setup in
-  one line; `open` itself is unchanged. `add --create` journals before it
-  writes to the store, like every other store-writing command. `undo add`
-  removes the store `--create` made while it is still empty.
-- `gc --delete-stores` (opt-in: a deleted store has no `repair`, and `gc`
-  only knows the history this clone has fetched) reclaims created stores
-  after the pin and branch decisions. A store is planned for `delete-store`
-  -- last in the plan, behind a `store_empty` precondition re-checked right
-  before the delete -- when its marker names this dataset, no manifest in
-  history or in any live checkout's working tree references it, every
-  same-dataset branch in it belongs to a bookmark this clone can account for
-  (the one it was created on, a live one, or one a `new` in any live checkout
-  made -- a branch of a bookmark this clone never had may be another actor's,
-  and the plan then touches nothing in the store), its own pins and branches
-  are released by the plan (branches under the `--prune-bookmarks` rules),
-  and the backend confirms nothing else remains. Anything else is a
-  `keep-store` naming what remains; a store already gone is a `forget-store`.
-  `GcReport.deleted_stores` / `kept_stores` / `forgotten_stores` report it;
-  `undo gc` reports a deleted store as irreversible. A clone's manifest never
-  authorizes a delete: only the marker and the index in your own repository
-  do. `gc --store KIND=LOCATOR` (`plan_gc(stores=[...])`) names a created
-  store to consider when the creator's clone -- and its index -- is gone.
-- `gc` looks inside the stores this clone has *touched*: every store a
-  checkout forks a branch in or pins is recorded in `tether-touched.jsonl`
-  beside the created index, and a plain `gc` releases this dataset's dead
-  refs there once no manifest names the store any more (an abandoned bookmark
-  took the manifest with it). Before, those refs stayed forever and kept the
-  store's creator from ever reclaiming it. An entry is dropped
-  (`forget-touched`) once nothing of the dataset's is left. `memory` accepts
-  the positional `uri` locator like other kinds.
-- Backend contract: `Capability.CREATE` with `create(locator, *, owner)`,
-  `owner(locator)`, `is_ref_empty(locator, *, ignoring=())` (`None` means
-  keep; a working area must hold no uncommitted content), and
-  `delete_store(locator)` (re-checks both, removes only the store's own
-  layout); implemented for `memory`, `icechunk` (repository metadata marker;
-  refuses a non-empty path or prefix; deletes only Icechunk's top-level names,
-  1.x and 2.x layouts), `git` (`init` with one fixed empty root commit shared by
-  every created repository; `git config tether.owner`; a dirty working tree or
-  an amended root is not empty), and `file`
-  (a local directory with a `.tether-owner` marker the directory walk skips).
-  Lance, Delta, and Iceberg need a schema and do not declare it. The
-  conformance suite walks the lifecycle for harnesses that provide
-  `fresh_locator()`.
+- `tether add KEY LOCATOR --kind KIND --create` (`Repo.add(..., create=True)`;
+  `Repo.create(key, kind, locator)` adds and opens) makes an empty store with
+  an owner marker naming the dataset, recorded in an untracked index beside
+  the repository lock; `status` shows `(created)`; `undo add` removes it while
+  empty.
+- `gc --delete-stores` (opt-in) reclaims a created store once no manifest in
+  history or any live checkout names it, every branch in it belongs to a
+  bookmark this clone can account for, and the backend confirms nothing else
+  remains. A manifest never authorizes a delete: only the marker and your own
+  repository's index do.
+- Otherwise the plan says `keep-store` with what remains; a store already gone
+  is `forget-store`. `gc --store KIND=LOCATOR` names a created store whose
+  creator's clone is gone. `undo gc` reports a deleted store as irreversible.
+- `gc` also releases this dataset's dead refs in every store this clone forked
+  or pinned in (`tether-touched.jsonl`) once no manifest names the store.
+- Backend contract: `Capability.CREATE` with `create`, `owner`, `is_ref_empty`
+  and `delete_store`, implemented for `memory`, `icechunk`, `git` and `file`
+  (Lance, Delta and Iceberg need a schema).
 
 ## [0.1.0a10] - 2026-09-13
 
 0.1.0a9 was tagged in history but never published; a10 is the first release
 carrying both sets of changes. Datasets created with a8 need `tether upgrade`
-(v3 and v4 migrations; working tree only, no history rewrite).
+(working tree only, no history rewrite).
 
 ### Added
 
-- **The op log is a journal.** Store-writing commands (`commit`, `pull`,
-  `new`, the lazy fork, `gc`, `promote`, `restore`, `repair`) write their
-  entry -- plan and what `undo` needs -- and sync it *before* the first side
-  effect, then a completion mark with the result. An interrupted run leaves an
-  `INCOMPLETE` entry: `ops` flags it, `undo` skips it (and says why when
-  named), `repair --dry-run` lists it with what `gc` will collect
-  (`Repo.incomplete_ops()`).
-- **One writer per checkout.** Writing commands hold `.tether/lock` (`flock`,
-  re-entrant per `Repo`) so two `tether` processes cannot interleave journal
-  entries and `workspace.toml` writes.
-- **Branch scope.** `ObjectBackend.branch_scope(locator)` names the resource
-  that owns branches and `ref_namespace(locator)` the one whose pins
-  `list_pins` returns (both default to the canonical identity; Neon: the
-  project, Iceberg: the table). `new` forks one branch per scope under a
-  bookmark -- the first member forks, later members `share` it, a member that
-  pins a different state of the same branch is refused -- and `gc` collects
-  the pins every object references per namespace.
-- `Pin.created` (runtime-only): whether `pin()` made the ref or found it
-  already carrying the state. The conformance suite checks both answers.
-- `DiffEntry.why`: which of `state`, `pin`, `locator`, `policy` differ. A
-  locator- or policy-only change is `changed` (CLI: `[policy changed; same
-  state]`; `--json` carries `why`).
-- `tether backends` lists kinds with maturity, tier, and capabilities;
-  `tether --version`. Backends declare `MATURITY` (`stable`: full lifecycle
-  against the real system in CI; `experimental`: tested against a fake of a
-  network service -- neon, lakefs, ducklake, dolt); `add` notes an
-  experimental kind.
-- `ObjectBackend.LOCAL_PATH_KEYS`: locator keys that may hold a local path.
-  The git backend runs the shared conformance suite.
-- `ObjectBackend.state_addressable(locator, state)`: whether a *particular*
-  recorded state can be reopened (the `file` backend says no for a remote
-  object without a version id); `commit` records such a state
-  `recoverable = false` and says why in the plan.
-- `VcsAdapter.history_digest()`: a digest of every visible commit id, across
-  workspaces and bookmarks; `gc` plans bind to it.
-- **A repository-wide lock.** `commit`, `pull`, `gc`, `undo`, and `abandon`
-  hold `tether.lock` in the store every checkout shares
-  (`VcsAdapter.shared_dir()`: git's common dir, jj's repo dir), waiting up to
-  `Repo.REPO_LOCK_TIMEOUT`, so a gc in one workspace cannot race a commit in
-  another between deciding a pin is unreferenced and releasing it.
-- **Progress records.** Every side effect of a journaled operation appends a
-  record (`mark_progress`; `OpEntry.progress`): each pin and the VCS commit of
-  a `commit`, each fork of `new`/`restore`, each unpin and deletion of `gc`,
-  each system a `promote` lands, each repin/refork of `repair`. `repair
-  --dry-run` lists what an incomplete operation got done, how many actions
-  were planned, and the re-run contract (running the command again finishes
-  what is left).
+- **The op log is a journal.** Store-writing commands journal before the first
+  side effect and mark completion after; an interrupted run leaves an
+  `INCOMPLETE` entry that `ops` flags, `undo` skips, and `repair --dry-run`
+  lists with what got done and what `gc` will collect. Running the command
+  again finishes the rest.
+- **Locks.** Writing commands hold `.tether/lock` (one writer per checkout) and
+  re-read the workspace when they take it; `commit`, `pull`, `gc`, `undo` and
+  `abandon` also hold a repository-wide `tether.lock`, so a `gc` in one
+  workspace cannot race a `commit` in another.
+- **Branch scope.** Objects in one native branch space (a Neon project, an
+  Iceberg table) get one branch per bookmark: the first forks, the others
+  `share` it, and `gc` counts pins per namespace. (`ObjectBackend.branch_scope`,
+  `ref_namespace`.)
+- `tether backends` lists kinds with maturity, tier and capabilities;
+  `tether --version`. Backends declare `MATURITY`; `add` notes an experimental
+  kind.
+- `DiffEntry.why` says which of `state`, `pin`, `locator`, `policy` differ; a
+  locator- or policy-only change is `changed`.
+- `commit` records a state the backend cannot reopen (a `file` object in a
+  bucket without versioning) as `recoverable = false` and says why.
+- `Pin.created`, `ObjectBackend.LOCAL_PATH_KEYS`, and
+  `VcsAdapter.history_digest()`, which `gc` plans bind to.
 
 ### Changed
 
-- **Config v4** (`tether upgrade`; working tree only, no history rewrite).
-  Manifest paths append `.toml` to the key's last segment instead of
-  replacing its suffix, so `foo` and `foo.bar` no longer share
-  `objects/foo.toml` (the migration moves misplaced files; a collision that
-  already destroyed a manifest is reported). Keys are validated: no empty
-  segments, `.`/`..`, leading slash, or control characters. Relative local
-  paths in locators are resolved against the dataset root (the migration
-  rewrites them); `add` and `import` resolve a relative path against the
-  caller's directory and store it absolute.
-- **A pin is verified before it is read or forked.** `open --rev`, `new` from
-  a commit, and `promote --rev` check the pin against the manifest's state:
-  a deleted pin falls back to the recorded state where the backend can
-  address it; a moved pin raises `PinDriftError` (a `refuse` in a promote
-  plan). `repair` never overwrites a drifted pin.
-- **Destructive steps re-check the ref they act on.** Plans record the head
-  of every branch they delete or reset; apply reads it again immediately
-  before the step and stops with `StalePlanError` when it moved: `gc`
-  `delete-branch` (gc plans are also bound to the VCS head and manifest
-  hash), `new`'s reuse/reset (plus a re-run of the bookmark-holder guard and
-  a same-workspace check), `restore`'s reset, `promote`'s source, `repair`'s
-  refork (the branch must still be missing). A lazy fork resets an existing
-  branch only onto the head `new` reviewed (`workspace.toml`
-  `pending_resets`), reuses a branch already at the pin or one a scope
-  sibling writes through, and otherwise refuses. `gc` plans are bound to the
-  digest of *all* visible history (a commit made in another workspace can
-  reference a pin the plan would release) and check every branch head before
-  the first action, so a stale plan does nothing at all; `promote --rev`
-  verifies a pin source still names the reviewed state; a fork `new` planned
-  as fresh is re-checked for absence at apply, and `new` refuses outright
-  when the backend cannot list branches (unknown is not absent).
-- **`commit` compensates as a unit.** A failure after the pins -- manifest
-  write, listing, VCS commit -- releases only the pins this commit created
-  (never a reused one), restores the manifests and listings it wrote, and
-  journals the attempt as failed and rolled back. If the VCS commit *landed*
-  before the adapter raised, nothing is rolled back: history names the pins,
-  so the operation completes as a commit that succeeded and the trailing
-  error is surfaced (`failed_after_commit`).
-- **`restore` and `promote` are closed over the branch scope.** Restoring one
-  of several keys that write through one branch is refused (the message names
-  the siblings to include); with all named, the branch is reset once and the
-  siblings `share` it. `promote` fast-forwards a shared branch once instead of
-  once per key.
-- The writer lock also covers `add`, `remove`, `set`, `import`, `abandon`,
-  `forget-workspace`, and `upgrade`; `undo` journals before it acts (a refused
-  undo is recorded as failed). Taking the lock re-reads `workspace.toml` and
-  the manifests, so a long-lived `Repo` never writes the state it loaded at
-  construction over what another process wrote since; `snapshot` writes its
-  cache under the lock.
-- `undo` completes atomically: the undone mark rides in the done record (one
-  append), and a handler refusal that touched nothing ends the entry as a
-  failed attempt rather than leaving it started.
-- `promote KEY...` refuses a subset that leaves unnamed siblings whose base
-  branch the write would move, whatever the source (a working ref, or a pin
-  by `--rev`), as `restore` does.
-- `promote` fast-forwards *and merges* from the state the plan reviewed, not
-  the source ref's current head: what lands is what was shown, whatever the
-  timing. `ObjectBackend.merge` takes `str | Pin | State` like `promote`
-  (git, lakeFS, Dolt, and memory resolve a state to its commit). The inline
-  convenience methods (`commit`, `new`, `promote`, `restore`, `gc`, `import`)
-  plan and apply under one checkout lock, and `new`/`promote`/`restore`/
-  `import` re-verify at apply (`commit` does not need to: a pin names the
-  captured state). The CLI's immediate `tether commit` goes through
-  `Repo.commit` too; only `--dry-run`/`--plan` build a separate plan.
-- `gc` plans take the history digest *before* walking history, so a commit
-  landing during the walk stales the plan instead of slipping between the
-  references and the digest.
-- `restore` checks every head before the first reset and writes the
-  workspace after each one (with the siblings sharing the branch), so a kill
-  between two resets leaves each reset branch described as such.
-- `apply_commit` turns a planned key that is no longer registered into
-  `StalePlanError` (rolling back the pins it made before reaching it) rather
-  than a `KeyError`.
-- `promote --rev`'s scope closure and base-head check work from the kind and
-  locator the plan captured, so an object removed from the working tree since
-  the revision still refuses an unnamed sibling and a base that moved.
-- `snapshot` and `pull` run whole under the checkout lock: which refs to read
-  is decided from the workspace as it is on disk, not from the one a
-  long-lived `Repo` loaded.
-- `new` writes `workspace.toml` -- bookmark set, every fork pending with the
-  reset it agreed to -- right after moving the VCS and before the first store
-  write, so a process killed in the fork fan-out leaves exactly a lazy `new`;
-  a fork that fails in the fan-out stays pending instead of being forgotten.
-- `gc`: a branch that moved *after* the preflight (a race, not a stale plan)
-  is kept and reported while the rest of the plan finishes; a `--force-prune`
-  plan that could not read a head refuses at apply if the head reads now.
-- Pre-v4 manifests read from history resolve relative local paths against
-  the dataset root, the rule the migration applies to the working tree.
-- `promote`'s guarantee is stated as it is: a bookmark is *planned* whole or
-  not at all; once applying, each system's fast-forward stands on its own.
-- `set --pin record` on a pinned object takes effect at the next commit (the
-  pin is dropped; `gc` releases the tag once no commit names it); `--pin
-  native` creates one again. Before, the "unchanged" shortcut kept the pin.
+- **Config v4** (`tether upgrade`; working tree only). Manifest paths append
+  `.toml` to the key's last segment, so `foo` and `foo.bar` no longer share a
+  file; keys are validated. Relative local paths in locators resolve against
+  the dataset root; `add` and `import` store them absolute.
+- **A pin is verified before it is read or forked.** A deleted pin falls back
+  to the recorded state where the backend can address it; a moved pin raises
+  `PinDriftError`; `repair` never overwrites a drifted pin.
+- **Destructive steps re-check the ref they act on** just before acting and
+  stop with `StalePlanError` when it moved. `gc` plans bind to a digest of all
+  visible history and do nothing at all when stale; a branch that moves after
+  the preflight is kept and reported.
+- A lazy fork resets an existing branch only onto the head `new` reviewed,
+  reuses one already at the pin, and otherwise refuses; `new` refuses when the
+  backend cannot list branches.
+- **`commit` compensates as a unit.** A failure after the pins releases only
+  the pins this commit created and restores what it wrote; if the VCS commit
+  landed first, the commit stands and the error is reported.
+- **`restore` and `promote` are closed over the branch scope.** Naming only
+  some of the objects that write through one branch is refused.
+- `promote` fast-forwards and merges from the state the plan reviewed, not the
+  source ref's current head. A bookmark is *planned* whole or not at all; once
+  applying, each system's fast-forward stands on its own.
+- The convenience forms (`tether commit`, `Repo.new()`, ...) plan and apply
+  under one lock and re-verify at apply; `snapshot` and `pull` read the refs
+  the on-disk workspace names.
+- `new` writes `workspace.toml` before its first store write and `restore`
+  after each reset, so a killed run leaves a consistent workspace.
+- `set --pin record` on a pinned object drops the pin at the next commit;
+  `--pin native` creates one again.
 - `file`: `--file versioned` makes only a single *remote* object Addressable;
-  a recorded object state without a version id (unversioned bucket) is
-  refused by `open` and reported by `verify`. The content-hash cache keys on
-  `ctime_ns` too and re-reads entries hashed within the same second on
-  filesystems with whole-second mtimes.
-- Backends: `unpin` and `delete_working_ref` (git, lance, lakefs, icechunk,
-  neon) raise when the ref is still there afterwards instead of reporting
-  success; Lance says why a tagged branch stays. `delta`/`iceberg` read-only
-  `open` of an object registered `at` a version sits there, not at the head;
-  `iceberg` `open(Pin)` raises for a missing tag. `dolt.ancestor_of` returns
-  unknown when the log is truncated. `lakefs` `fork` resets a branch with
-  staged uncommitted objects. `memory.history` walks the head's parents.
-  `neon` follows branch-list pagination, lifts the protection before deleting
-  a pin, and no longer calls a pin drifted for the read-only endpoint tether
-  attaches to serve `open`.
-- `publish.yml` runs lint, ty, and the suite, checks the tag against the
-  package version, and smoke-tests the built wheel before `uv publish`.
+  a recorded state without a version id is refused by `open` and reported by
+  `verify`.
+- Backends: `unpin` and `delete_working_ref` raise when the ref is still there
+  afterwards; `delta`/`iceberg` read-only `open` of an object registered `at`
+  a version sits there; `neon` follows branch-list pagination and lifts
+  protection before deleting a pin.
 
 ### Fixed
 
-- `commit` rolled back pins it had not created: `pin()` is idempotent, so a
-  pin an earlier commit (or a sibling key on the same system) made was
-  released when a later pin in the same commit failed.
-- `open --rev`, `new`, and `promote --rev` trusted a pin's native ref; a tag
+- `commit` rolled back pins it had not created when a later pin in the same
+  commit failed.
+- `open --rev`, `new` and `promote --rev` trusted a pin's native ref; a tag
   moved by hand returned the wrong data under a commit's name.
-- Two keys on one native branch space (a Neon project, one memory system)
-  each forked the shared bookmark branch from their own pin: opening the
-  second reset the first's writes. `gc` grouped references per identity while
-  `list_pins` lists a whole project, so one object's sweep released its
-  neighbours' pins.
-- A saved `gc` plan deleted a branch that had gained writes since planning;
-  a `promote` landed a source that moved after review.
+- Two keys in one Neon project each forked the shared branch from their own
+  pin, so opening the second reset the first's writes; one object's `gc`
+  sweep released its neighbours' pins.
+- A saved `gc` plan deleted a branch that had gained writes since planning; a
+  `promote` landed a source that moved after review.
 - `Repo.diff` reported an object unchanged when only its locator or policy
   differed.
-- Relative paths in locators were resolved against each command's working
-  directory, so the same manifest addressed different files from different
-  directories. The git backend left the CLI's positional `uri` relative.
-- The v4 migration rewrote a relative locator before moving a misplaced
-  manifest, leaving two files for one key; it recorded v4 after reporting a
-  manifest collision (it now stops, like v3 on a failed re-fingerprint); and
-  a collision found half-way left earlier moves in a dirty tree that blocked
-  the rerun (every destination is checked before anything moves).
-- `snapshot` from a stale `Repo` cached one bookmark's states under another's
-  name: it chose which refs to read before the lock refreshed the workspace.
+- Relative locator paths were resolved against each command's working
+  directory.
+- The v4 migration could leave two files for one key or a dirty tree that
+  blocked the rerun; it checks every destination before moving anything.
 - `snapshot` from a `Repo` constructed before another process moved the
-  checkout to a bookmark rewrote `workspace.toml` with the old bookmark and
-  refs.
-- `undo`'s two-append completion could leave a finished undo whose target
-  still counted as undoable.
-- `--file versioned` recorded a state with no version id as recoverable
-  although `open` could not read it back.
-- The wheel smoke test in `publish.yml` installed the wheel without the `cli`
-  extra the entry point needs.
+  checkout cached states under the wrong bookmark.
+- `--file versioned` recorded a state with no version id as recoverable.
 
 ## [0.1.0a9] - 2026-09-11
 
 ### Added
 
-- **Bookmark-shaped branches.** The dataset's jj/git bookmarks and the
-  stores' branches are now one shape. The trunk bookmark (`main`;
-  `[vcs] trunk`) stands for every object's upstream branch (`locator.branch`):
-  working on it writes there. Any other bookmark stands for one branch per
-  Forkable system, named after it -- `tether.ws.<dataset>.<bookmark>` --
-  forked from the pins of the commit it started at. A working copy on no
-  bookmark is read-only. In detail:
-  - `tether new -b NAME [REV]` creates a bookmark and its branches (lazily, as
-    before); `tether new NAME` joins one; `tether new REV` takes the bookmark
-    at that commit or goes read-only. A bookmark another live checkout works
-    on is refused unless `--shared`. `init` creates the trunk bookmark (jj) or
-    adopts HEAD's branch (git) and starts there. `WorkspaceState.bookmark`.
-  - `commit` moves the bookmark onto the new commit -- in the same jj
-    operation, so `jj undo` takes both back -- and refuses when the VCS
-    working copy has left the bookmark, or (jj) when the bookmark is behind
-    the working copy's parent, the one position from which jj can carry it
-    along in that operation; `tether new NAME --keep` puts the working copy
-    back without touching branches. `undo` of a `new -b` deletes the
-    bookmark it made. `abandon` moves a bookmark off a dropped commit to the
-    nearest kept one instead of losing it (jj deletes them).
-  - `tether pull [BOOKMARK]` is the fetch: it reads the heads of the bookmark's
-    branches -- on the trunk every upstream branch and every branch-less
-    object -- pins what moved, and commits it on the bookmark, which moves.
-    Nothing moved: no commit. `PullReport` (`bookmark`, `committed`,
-    `unchanged`, `skipped`, `vcs_commit`, `pinned`). Replaces the held
-    `[pulled]` workspace state, the `pulled` status label, `commit --pull`,
-    and `[commit] pull`.
-  - `promote` also moves the trunk bookmark to the bookmark's commit when
-    every object fast-forwarded and nothing was refused
-    (`PromoteReport.trunk_moved`); after a merge, commit and promote again.
-  - `gc --prune-bookmarks` (was `--prune-workspaces`) judges the branches of
-    bookmarks the VCS no longer has and no live checkout works on, legacy
-    per-workspace branches, and this bookmark's unused ones, with the same
-    verdicts; `--keep-bookmark NAME`. `forget-workspace` removes state files
-    and forgets the checkout only: branches belong to bookmarks.
-  - `status` names the bookmark (`on trunk bookmark main`; `on no bookmark:
-    read-only`) and warns when the VCS deleted, renamed, moved, or left it,
-    with what to do (`Repo.bookmark_drift`, `StatusReport.bookmark`,
-    `.trunk`, `.bookmark_drift`).
-  - `VcsAdapter` gains `bookmarks`, `bookmark_set`, `bookmark_delete`,
-    `current_bookmarks`, `new_bookmark`, `is_ancestor`, and
-    `commit(advance=)`; `ObjectBackend.base_branch`; `working_ref_name(dataset,
-    bookmark)`, `working_ref_bookmark`, `bookmark_slug`.
+- **Bookmark-shaped branches.** The trunk bookmark (`main`; `[vcs] trunk`)
+  stands for every object's upstream branch; any other bookmark is one branch
+  per Forkable system, `tether.ws.<dataset>.<bookmark>`, forked from the pins
+  of the commit it started at; a working copy on no bookmark is read-only.
+- `tether new -b NAME [REV]` creates a bookmark and its branches, `new NAME`
+  joins one, `new REV` takes the bookmark at that commit or goes read-only; a
+  bookmark another live checkout works on is refused unless `--shared`.
+  `init` creates the trunk bookmark (jj) or adopts HEAD's branch (git).
+- `commit` moves the bookmark onto the new commit (one jj operation, so
+  `jj undo` takes both back) and refuses when the working copy has left it;
+  `new NAME --keep` puts the working copy back without touching branches.
+- `tether pull [BOOKMARK]` reads the heads of the bookmark's branches (on the
+  trunk, every upstream branch and branch-less object), pins what moved and
+  commits it (`PullReport`). Replaces `commit --pull`, the `pulled` status and
+  `[commit] pull`.
+- `promote` also moves the trunk bookmark to the bookmark's commit when
+  everything fast-forwarded (`PromoteReport.trunk_moved`); after a merge,
+  commit and promote again.
+- `gc --prune-bookmarks` (was `--prune-workspaces`; `--keep-bookmark NAME`)
+  judges the branches of bookmarks the VCS no longer has and no live checkout
+  works on. `forget-workspace` removes state files and forgets the checkout
+  only.
+- `status` names the bookmark and warns, with what to do, when the VCS
+  deleted, renamed, moved or left it.
 - **`tether set KEY... | --all [--file] [--pin]`** changes a registered
-  object's policy in place (`Repo.set_policy`, `SetReport`): manifest-only,
-  logged, undoable. Until now this took `remove` + `add` (losing the
-  committed state) or an `import` from a registry.
-- A **Caveats and Performance** guide, holding what the README used to: the
-  limits of the model (per-system promotion, no cross-system atomicity, what
-  `undo` can and cannot do, pin-then-commit ordering, lazy forks, storage
-  cost, secrets), the per-backend caveats, and the performance notes. The
-  backends guide gains the content-diff table. The README is a third of its
-  former length: capability table, prior art, install, a short quickstart,
-  layout, non-goals, development.
-- A **Use Cases** guide: seven scenarios -- reproduce an analysis months
-  later; reprocess on a branch then land or discard it; A/B two candidates
-  and keep one; catch drift nightly without a watcher; publish history to a
-  registry; keep the data bill down; recover -- each as the commands you run,
-  what they guarantee, and the guide that explains the mechanics. The README
-  lists them. Later guides are renumbered (`07-cli` ... `11-extending`).
-  The scenarios are one running story, with `jj log` after each step, and
-  the whole page is **executed, not written**: `tests/test_use_cases.py`
-  runs every command against local Icechunk, Lance, file, and git objects
-  (and the ephemeral Postgres the publish tests use; without one the story
-  stops before section 7) and writes the command and output blocks the guide
-  includes (`user_guide/_generated/06/`), with per-run ids replaced by stable
-  stand-ins and the operation log on a fixed clock; the test fails when a
-  fresh run differs, and `TETHER_UPDATE_DOCS=1` rewrites the files. Running
-  it found the fixes below.
+  object's policy in place: manifest-only, logged, undoable.
+- A **Caveats and Performance** guide, and a **Use Cases** guide whose seven
+  scenarios run as tests against local backends; the README is a third of its
+  former length.
 
 ### Changed
 
-- **`promote` lands a bookmark whole or not at all.** It used to fast-forward
-  the systems it could while refusing the others -- the executed guide showed
-  Icechunk's `main` moving while Lance was refused, so readers of `main` saw
-  new labels with old features, and the trunk bookmark could not follow.
-  Now, when any object is refused and no keys were named, the rest are
-  `held` (`PromoteReport.held`, printed with what each would have done) and
-  nothing is written. `tether promote KEY...` lands a subset on purpose; the
-  trunk bookmark never moves for a subset, since the rest has not landed.
-  Exit status is still `1` on refusals.
-- **`[new] auto_fork` is gone.** It re-ran `new` after every commit to give
-  jj's "fresh working copy" rhythm; since `new` reuses a branch that already
-  sits at the pin, it had stopped doing anything. `commit` leaves working
-  branches where they are, and the docs now say so (Concepts: "Where tether
-  is not jj").
-- **The `write` policy is gone.** Whether writes fork a branch or land on
-  the upstream branch was `write = fork | direct` (formerly `track`) per
-  object; it is now which bookmark the working copy is on. `Policy` is `file`
-  and `pin`; `--write`, `set --write`, `[defaults] write`, the `policy_write`
-  registry column, and `WriteMode` are removed. A manifest carrying `write`
-  is read and ignored, and the v3 migration (`tether upgrade`) drops the line
-  from the working tree alongside the content-hash re-fingerprint. Neon
-  databases that must receive writes on `main` are written on the trunk
-  bookmark.
-- **`tether status` is local by default.** It shows the last snapshot of each
-  object's state with its age (`states as fingerprinted 2h ago; --snapshot to
-  refresh`) and contacts nothing, so it is cheap enough to run as often as
-  `jj status`. `--snapshot` fans out and fingerprints first; a workspace with
-  no snapshot yet always does. `[snapshot] auto` now defaults to `false`
-  (`true` restores fingerprinting on every `status`; `--no-snapshot` wins).
-  `verify` always fingerprints regardless of the setting; `commit` fingerprints
-  the bookmark's branches.
-  `StatusReport` gains `fresh` and `snapshot_at`, and the JSON output the same.
-- Local files are fingerprinted by **content hash**, not mtime. A file's state
-  is `{size, sha256}` and a directory's digest is over its files' sha256s, so
-  `touch`, `cp`, a fresh checkout, or an rsync no longer read as drift (an
-  error under the default `immutable` policy) or mint a new state. Hashes are
-  cached by `(size, mtime_ns, inode)` in the untracked
-  `.tether/cache/file-hashes.json` -- the git/DVC pattern -- so the first
-  fingerprint of a tree reads every file and later ones read only what
-  changed. `ObjectBackend.configure_cache(dir)` is the hook the engine calls
-  so a backend can keep such scratch state. Listing tokens for local
-  directories are sha256s (were `size:mtime_ns`). **Breaking**: manifests
-  from earlier alphas hold mtime-based states that would read as drift -- an
-  error under the default `immutable` policy -- so `[tether] version` is now
-  3 and `tether upgrade` (v3 migration) re-fingerprints every local `file`
-  object in the working tree and rewrites its manifest; remote objects and
-  history are untouched.
+- **`promote` lands a bookmark whole or not at all.** When any object is
+  refused and no keys were named, the rest are `held` and nothing is written.
+  `promote KEY...` lands a subset on purpose; the trunk bookmark never moves
+  for a subset. Exit status is still 1 on refusals.
+- **`tether status` is local by default.** It shows each object's last
+  snapshot with its age and contacts nothing; `--snapshot` fingerprints first.
+  `[snapshot] auto` defaults to `false`; `verify` always fingerprints;
+  `commit` fingerprints the bookmark's branches.
+- Local files are fingerprinted by **content hash**, not mtime, so `touch`,
+  `cp`, a fresh checkout or an rsync no longer read as drift; hashes are
+  cached in `.tether/cache/file-hashes.json`. **Breaking**: `[tether] version`
+  is 3 and `tether upgrade` re-fingerprints every local `file` object in the
+  working tree.
+
+### Removed
+
+- `[new] auto_fork`: since `new` reuses a branch already at the pin, it had
+  stopped doing anything.
+- The `write` policy (`write = fork | direct`) and `--write`, `set --write`,
+  `[defaults] write`, the `policy_write` registry column: whether writes fork
+  or land upstream is now which bookmark the working copy is on. A manifest
+  carrying `write` is read and ignored; `tether upgrade` drops the line.
 
 ### Fixed
 
-- `ForgetWorkspaceReport` was listed in `tether.__all__` but never imported,
-  which broke the docs build; a test now checks `__all__` against the module.
-- `tether diff REV` (one revision) compared REV with nothing and reported
-  every object `removed`; it now compares REV with the working tree, as its
-  help always said.
+- `ForgetWorkspaceReport` was listed in `tether.__all__` but never imported.
+- `tether diff REV` compared REV with nothing and reported every object
+  `removed`; it compares REV with the working tree.
 - `tether diff --content` between two Icechunk snapshots on different
-  branches failed with Icechunk's "ancestry doesn't include" error, since it
-  diffs along one line of history. The backend now finds the snapshot the two
-  diverged from and reports what either side changed since it (a node only
-  one side touched keeps that side's change, inverted for the `from` side;
-  one both touched is `modified`), with a note naming the base.
-- Fingerprinting several local `file` objects at once (`commit`, `status
-  --snapshot`, `pull` fan out concurrently) could fail with `No such file or
-  directory: .file-hashes.json.tmp`: the shared content-hash cache was written
-  by two threads through one temp file. The cache is now locked around its
-  table and its save; hashing itself still runs in parallel.
-- A deleted Icechunk pin could never come back: Icechunk keeps a tombstone
-  for every deleted tag and never lets the name be reused, and pin ids are
-  content-addressed, so `repair` crashed with `RefNotFoundError` and any later
-  commit recording that same snapshot for that object failed too. The pin id
-  stays content-addressed; the *ref* moves on: the Icechunk backend walks
-  generations -- `tether.<id>`, `tether.<id>.2`, `.3`, ... -- past tombstones
-  (a name carrying a *different* snapshot is still an error), and `verify`,
-  `open`, `fork`, and `promote` resolve a pin through the newest live
-  generation when the manifest's ref is gone, so manifests and history stay
-  as they are (`verify` says `pinned as tether.<id>.2`). `list_pins` folds
-  generations onto their id and `unpin` clears them all, so `gc` counts one
-  pin. Until a repair, `Repo.open` (at a revision or at the object's
-  position) and `new`'s fork fall back to the recorded state when the pin's
-  native ref is gone and the backend is Addressable.
-- `tether new -b NEW` from a commit on bookmark `OLD` handed `NEW` the store
-  branches of `OLD` wherever they sat exactly at the pin ("already at pin;
-  kept"), so two bookmarks shared a branch and `NEW`'s writes landed on
-  `OLD`'s -- a leftover of the per-workspace naming. `new` now looks only at
-  the branch named after the bookmark it is starting: kept if it exists at
-  the pin, reset (recorded for `undo`) if it exists elsewhere, refused if it
-  holds writes since the last commit -- or if its head cannot be read, since
-  a fork would then reset it blind -- and forked otherwise. Another
-  bookmark's branch is never touched.
+  branches failed; it now diffs each side against the snapshot they diverged
+  from.
+- Fingerprinting several local `file` objects at once could fail on the shared
+  hash cache's temp file.
+- A deleted Icechunk pin could never come back (Icechunk tombstones every
+  deleted tag). The pin id stays; its ref moves on through generations
+  (`tether.<id>.2`, `.3`, ...) that every reader resolves and `gc` counts as
+  one pin. Until a repair, `open` and `new` fall back to the recorded state.
+- `tether new -b NEW` from a commit on bookmark `OLD` handed `NEW` the
+  branches of `OLD` that sat at the pin, so `NEW`'s writes landed on `OLD`'s.
+  `new` now touches only the branch named after its bookmark.
 
 ## [0.1.0a8] - 2026-09-09
 
 ### Added
 
-- **Operation log.** Every command that writes to a store appends an entry to
-  `.tether/ops.jsonl` (per workspace, untracked, append-only -- jj's own
-  `op log` is the model): the plan it applied, what it did, and what it
-  replaced (workspace state and VCS position before a `new`, the head of
-  every working branch a fork resets, the manifests a `commit` / `import` /
-  `add` / `remove` rewrote, the base heads `promote` moved from, the heads of
-  branches `gc` deleted). `tether ops` and `Repo.ops()` read it;
-  `tether.oplog` is the module. `Repo` re-asserts the `.tether/.gitignore`
-  rules on open so jj never snapshots the log.
-- `VcsAdapter.rewrite_history` only reads and transforms the commits that
-  touch the dataset directory (jj: the `files()` revset -- other descendants
-  inherit the rewritten files when jj rebases them; git: the answer is cached
-  per subtree id), so a dataset nested in a large repository pays for its own
-  commits, not the whole history.
-- The op log is strictly append-only: an undo appends a mark line
-  (`{"undone": ID, "by": UNDO_ID}`) instead of rewriting the file, and a torn
-  final line from an interrupted write is skipped on read.
+- **Operation log.** Every store-writing command appends to the untracked,
+  per-workspace, append-only `.tether/ops.jsonl` the plan it applied, what it
+  did, and what it replaced. `tether ops` and `Repo.ops()` read it.
 - **`tether undo [ID]`** (`Repo.undo`) reverses an op-log entry where the
-  store still allows it, and says what it could not: a `commit` is
-  uncommitted (jj `squash --into @`, git `reset --soft`; the manifests become
-  working-tree changes and the pins stay); a `new` or lazy fork has the
-  branches it created deleted, the ones it reset re-pointed to their recorded
-  heads (backends that fork from a state), `workspace.toml` restored, and
-  the VCS working copy returned if it has not moved; a `gc` gets its deleted
-  branches and listings back while its released pins are reported as
-  irreversible; `import` / `add` / `remove` restore the manifests;
-  `promote` is refused with the previous base heads printed. A branch that
-  gained writes since the operation is refused without `--discard`. The undo
-  is logged and its target marked `undone_by`; the CLI exits 2 on a partial
-  undo. `VcsAdapter` gained `position()`, `goto()`, `uncommit()`, `dirty()`.
-- **`tether repair`** (`plan_repair` / `apply_repair` / `repair`) recreates
-  pins whose native ref is missing from the manifest's recorded state (the
-  working tree's manifests, or every commit's with `--all-history`) and
-  working branches this workspace expects but the store lost. Drifted pins
-  are noted, never overwritten; states the store no longer has are reported
-  (exit 2), not raised.
-- **`tether upgrade`** (`plan_upgrade` / `apply_upgrade` / `upgrade`;
-  `tether.migrations`). `tether.toml` now carries `[tether] version = 2`; a
-  dataset at an older version is refused by every command except `upgrade`,
-  which runs the pending migrations in order, writing the version after each
-  so an interrupted upgrade resumes. The v2 migration gives the dataset an
-  id, renames every pin (`tether.<hash>` -> `tether.<id>.<hash16>`) and
-  working branch (`tether.ws.<ws>.<slug>` -> `tether.ws.<id>.<ws>.<slug>-<key6>`)
-  in every store, and rewrites every historical manifest to the new names so
-  `gc` and `verify --all-history` keep agreeing with the stores -- history
-  rewriting changes commit ids (jj keeps change ids; `--ignore-immutable` for
-  pushed commits); every other clone must re-sync. `--dry-run` shows the
-  renames and the number of commits. The upgrade fails closed: the dataset id
-  is persisted before the first rename, and a failed store rename stops the
-  upgrade before history or the manifests are touched, so both sides keep
-  naming the old refs; a re-run continues under the same id and skips the
-  renames already made. `VcsAdapter.rewrite_history()` (jj: `new` + `squash` per
-  change; git: plumbing `commit-tree`, refs updated) and
-  `ObjectBackend.rename_pin` / `rename_working_ref` (defaults built on
-  `pin`/`unpin` and `fork`/`delete_working_ref`; Neon renames branches in
-  place because pins are branches with children) are new.
-- **`status` and `ops` notice the VCS going around tether.** `Repo.vcs_drift()`
-  lists `commit` entries whose commit is no longer part of visible history
-  (`VcsAdapter.commit_alive`: jj follows the change id, so a rewrite is not a
-  loss; git checks reachability) and that tether did not remove or rewrite
-  itself. `status` prints a warning per entry with whether the pins it made
-  are still named by the working tree; `ops` flags them `(vcs commit gone)`.
-  `VcsAdapter.abandon` now also returns the rebased descendants' old -> new
-  commit ids, recorded in the `abandon` op.
-- **`tether forget-workspace [ID]`** (`plan_forget_workspace` /
-  `apply_forget_workspace` / `forget_workspace`): `jj workspace forget` /
-  `git worktree remove` plus tether's half -- that workspace's working
-  branches deleted under the `gc --prune-workspaces` rule (`--force-prune`
-  for data-holding ones), its `workspace.toml` and `ops.jsonl` removed, the
-  VCS checkout forgotten. `VcsAdapter.forget_workspace(root)` is new.
-- **`tether restore KEY... --from REV`** (`plan_restore` / `apply_restore` /
-  `restore`): the per-object `jj restore --from` -- reset one object's working
-  branch to what `REV` pinned, leaving the other branches, the manifests, and
-  the VCS working copy alone. Not stale afterwards (the next `commit` pins
-  the restore); the fork point moves to `REV`'s state so `promote` sees a
-  moved base as a divergence. Refused for a branch with unpinned writes
-  unless `--discard`; undoable.
-- **`tether undo --to OP_ID`** (`Repo.undo_to`): undo every operation newer
-  than `OP_ID`, newest first -- the per-delta counterpart of `jj op restore`.
-  Stops, keeping what it reversed, at the first operation that cannot be
-  undone or refuses; partial undos are recorded and the walk continues.
-- **`tether abandon REV... [--gc]`** (`Repo.abandon`): drop dataset commits
-  from VCS history and show -- or with `--gc` apply -- the `gc` plan for the
-  pins only they referenced. Descendants keep their manifests exactly as they
-  were (a manifest is a whole-state record; the VCS's own rebase would
-  conflict on it). `VcsAdapter.abandon(revs, keep_dir)` is new: jj abandons
-  then rewrites the descendants' manifests back; git rebases with conflicts
-  under the dataset resolved to the original content, then a fix-up pass.
-  Logged; not undoable by tether.
-- **`tether new --discard`.** `new` now fingerprints every working branch it
-  would reset and refuses -- before touching the VCS or any store -- when a
-  head holds writes beyond what this workspace last committed or forked at.
-  `--discard` opts in; the plan's fork action says what it throws away.
+  store still allows it and says what it could not: a `commit` is uncommitted
+  (pins stay); a `new` or lazy fork has its branches deleted or re-pointed and
+  `workspace.toml` restored; `gc`'s released pins are irreversible;
+  `promote` is refused with the previous heads printed. A branch that gained
+  writes since is refused without `--discard`.
+- **`tether undo --to OP_ID`** (`Repo.undo_to`) undoes every operation newer
+  than `OP_ID`, newest first.
+- **`tether repair`** (`Repo.repair`) recreates pins whose native ref is
+  missing (`--all-history` for every commit's) and working branches the store
+  lost, from the recorded states; drifted pins are noted, never overwritten.
+- **`tether upgrade`** (`Repo.upgrade`). `tether.toml` carries `[tether]
+  version`; an older dataset is refused by every command except `upgrade`.
+  The v2 migration gives the dataset an id, renames every pin and working
+  branch in every store, and rewrites history to match: commit ids change and
+  other clones must re-sync. It fails closed, and a re-run continues.
+- **`status` and `ops` notice the VCS going around tether**: a `commit` whose
+  commit left visible history is warned about in `status` and flagged `(vcs
+  commit gone)` in `ops`.
+- **`tether forget-workspace [ID]`** (`Repo.forget_workspace`): `jj workspace
+  forget` / `git worktree remove` plus tether's half.
+- **`tether restore KEY... --from REV`** (`Repo.restore`) resets one object's
+  working branch to what `REV` pinned, leaving everything else alone; refused
+  for unpinned writes unless `--discard`; undoable.
+- **`tether abandon REV... [--gc]`** (`Repo.abandon`) drops dataset commits
+  from history and shows, or with `--gc` applies, the `gc` plan for the pins
+  only they referenced; descendants keep their manifests. Not undoable by
+  tether.
+- **`tether new --discard`.** `new` refuses, before touching anything, when a
+  branch it would reset holds writes beyond what this workspace last
+  committed; `--discard` opts in.
 
 ### Changed
 
-- `new` keeps a working branch that already sits exactly at the pin (the
-  usual `commit` then `new`): the plan says `reuse` instead of `fork` /
-  `defer-fork`, and nothing is reset. On Neon this is what stops every
-  commit-then-new cycle from leaving a sibling branch behind, since a branch
-  with pin children cannot be restored in place.
-- `gc --prune-workspaces` and `forget-workspace` ask the backend
-  (`ObjectBackend.working_ref_blockers`, new) whether a branch can be deleted
-  before planning it; a blocked branch (Neon: pins hang off it) is planned as
-  `keep-branch: cannot be deleted` with the reason, `--force-prune` included,
-  instead of failing when applied. The Neon fake enforces the children rule
-  on delete as the real API does.
 - **Native refs are namespaced by dataset.** `tether.toml` carries an 8-hex
-  `[dataset] id` (generated by `init`, committed, shared by every clone). Pin
-  ids are `<id>.<hash16>` (refs `tether.<id>.<hash16>`) and working branches
-  `tether.ws.<id>.<workspace8>.<slug>-<key6>`. `gc`'s pin sweep and branch
-  prune stay inside the namespace, `--force-prune` included; refs of other
-  datasets sharing the store are counted in the plan's notes and never
-  touched. Before this, `gc` from one dataset deleted every pin another
-  dataset had made in the same store. The same content pinned by two datasets
-  is now two refs. `compute_pin_id` and `working_ref_name` take the dataset
-  id; `pin_dataset()` and `working_ref_dataset()` parse it back. Breaking for
-  earlier alphas: run `tether upgrade` (below), which renames the refs and
-  rewrites history to match.
-- `apply_commit` commits to the VCS when the manifests are dirty in the
-  working tree even if no object's state changed (an undone commit, an
-  `add`, an `import`); before, that `commit` was a silent no-op.
-- The `memory` backend refuses to pin a snapshot that no longer exists, as
-  real stores do.
-- git pins with a `remote` fail when the push fails (and remove the local
-  tag), and `unpin` deletes on the remote first and fails if that fails, so
-  the local and remote tags never diverge silently. Before, both pushes ran
-  with `check=False`.
-- Neon's identity no longer includes `role` (a connection parameter, not part
-  of what is pinned); changing the role no longer changes pin ids.
-- Neon API errors surface as `BackendError` with Neon's message instead of a
-  raw HTTP exception.
-- Iceberg's `metadata_location` is a `VOLATILE_KEY`: it was part of the state
-  until 0.1.0a7 and still appears in old manifests, so it must not affect
-  content identity (the upgrade hashes old states through `content_state`).
+  `[dataset] id`; pin refs are `tether.<id>.<hash16>` and working branches
+  `tether.ws.<id>.<workspace8>.<slug>-<key6>`. `gc` stays inside the
+  namespace, `--force-prune` included; before, it deleted other datasets'
+  pins in a shared store. Breaking for earlier alphas: run `tether upgrade`.
+- `new` keeps a working branch that already sits exactly at the pin (the plan
+  says `reuse`); on Neon this stops each commit-then-new cycle from leaving a
+  sibling branch behind.
+- `gc --prune-workspaces` and `forget-workspace` plan a branch the store
+  refuses to delete (Neon: pins hang off it) as `keep-branch: cannot be
+  deleted` instead of failing at apply.
+- `commit` commits to the VCS when the manifests are dirty even if no state
+  changed (an undone commit, an `add`, an `import`).
+- git pins with a `remote` fail when the push fails, and `unpin` deletes on
+  the remote first, so local and remote tags never diverge silently.
+- Neon's identity no longer includes `role`; Neon API errors surface as
+  `BackendError`. Iceberg's `metadata_location` is volatile, so pre-a7
+  manifests keep their content identity.
 
 ## [0.1.0a7] - 2026-09-08
 
 ### Fixed
 
-- States now separate *content* from *address*. Backends declare
-  `VOLATILE_KEYS` and `tether.backends.base.content_state()` strips them for
-  drift detection, the unchanged check in `commit`, pin ids, listing names,
-  export hashes, and `promote`'s comparisons; `open` / `pin` / `verify` still
-  get the full state. Neon's `lsn` (moves on checkpoints) and git's
-  `change_id` (present only with jj) are volatile; Iceberg's
-  `metadata_location` (rewritten by every table commit on any branch) is no
-  longer part of the state at all. Before this, unrelated Iceberg commits and
-  Neon checkpoints showed as drift and created duplicate pins, and the same
-  git sha pinned differently with and without jj installed.
-- git `dirty` is computed only for the checked-out ref; a dirty worktree no
-  longer marks every other branch of the repository as modified.
-- `fork()` onto an existing branch name now resets it to the source on every
-  backend (Iceberg via a `set-snapshot-ref` update, Neon via branch restore);
-  the conformance suite checks it. Neon `pin()` refuses an existing pin branch
-  that hangs off a different parent or LSN instead of reusing it.
-- Stale-workspace detection is per object. Each working ref records the
-  committed state it was forked from or last committed at
-  (`WorkspaceState.base_states`); an object is stale exactly when its manifest
-  says something else. Registering or removing other objects no longer
-  silently un-stales a workspace, `track` objects are never stale, and
-  `status` / `StaleWorkingCopyError` name the objects. `workspace.base` is
-  gone; export schema_version 3 (`workspace.base_state_json`).
-- Working-ref names end in a 6-hex digest of the key
-  (`tether.ws.<ws8>.<slug>-<key6>`), so keys that slugify alike no longer
-  share a branch. Pin ids are 16 hex chars (were 12). Both change native ref
-  names; existing pins and working branches from earlier alphas are not
-  recognised -- re-commit and `new`.
-- `apply_new` (`tether new --from-plan`) checks the plan against the target
-  before moving the VCS working copy.
+- States separate *content* from *address*: backends declare `VOLATILE_KEYS`
+  (Neon's `lsn`, git's `change_id`), which drift detection, pin ids and
+  `promote` ignore. Unrelated Iceberg commits and Neon checkpoints no longer
+  show as drift or make duplicate pins, and one git sha pins the same with or
+  without jj.
+- git `dirty` is computed only for the checked-out ref.
+- `fork()` onto an existing branch name resets it to the source on every
+  backend; Neon `pin()` refuses an existing pin branch at another parent or
+  LSN.
+- Stale-workspace detection is per object: registering or removing other
+  objects no longer un-stales a workspace, and `status` names the stale
+  objects. Export schema_version 3.
+- Working-ref names end in a 6-hex digest of the key, so keys that slugify
+  alike no longer share a branch; pin ids are 16 hex chars. Pins and branches
+  from earlier alphas are not recognised: re-commit and `new`.
 - Neon `fork()` onto an existing working branch always restores it onto the
-  source. It used to return early when the branch's `parent_id` already
-  matched -- but `parent_id` is where a branch was created, not where its
-  head is, so `new` back onto the same pin never discarded uncommitted
-  writes. When pins hang off the working branch (they are its children and
-  Neon will not restore a branch with children in place) the fork lands on a
-  sibling name instead; the engine records the name `fork` returns. Neon
-  time-travel reads (`open` at a recorded state) now ensure a read-only
-  endpoint like pin reads do.
-- A `new` in which some forks fail now records the branches that were created
-  (working refs, fork points, base states) before raising, and the error says
-  which objects failed and that a second `new` completes the job. Previously
-  the successful branches existed in their systems but not in
-  `workspace.toml`.
-- `tether new REV` in git no longer leaves a detached HEAD: a branch name is
-  switched to, any other revision is checked out onto a `tether/<rev12>` branch
-  so the dataset commits that follow stay reachable by `gc`; `new` with no
-  revision is a documented no-op in git (jj creates a fresh empty change).
-- `verify --all-history` now checks recorded (pin-less) states as well as
-  pins; Observed records are still skipped.
-- The branching guide registered the dataset's own repository as a `git`
-  object, which re-pins on every dataset commit; it now uses a separate repo.
+  source; when pins hang off the branch, the fork lands on a sibling name.
+- A `new` in which some forks fail records the branches it did create, and a
+  second `new` completes the job.
+- `tether new REV` in git no longer leaves a detached HEAD: another revision
+  is checked out onto a `tether/<rev12>` branch so later commits stay
+  reachable by `gc`.
+- `verify --all-history` checks recorded (pin-less) states as well as pins.
 
 ### Changed
 
-- `gc --prune-workspaces` finds every live checkout of the repository (jj
-  workspaces via `jj workspace root --name`, git worktrees) and keeps their
-  working branches automatically; `--keep-workspace` is now only for ids that
-  are live elsewhere. `Repo.live_workspace_ids()` and
-  `VcsAdapter.workspace_roots()` are new.
-- `export`, `publish`, `import` and the lakeFS, Dolt, and DuckLake backends are
-  labelled experimental in the CLI help (`add --kind`), the README (its own
-  section; the compatibility matrix), and the guide.
+- `gc --prune-workspaces` finds every live checkout (jj workspaces, git
+  worktrees) and keeps their branches; `--keep-workspace` is only for ids live
+  elsewhere.
+- `export`, `publish`, `import` and the lakeFS, Dolt and DuckLake backends are
+  labelled experimental in the CLI help, README and guide.
 - `StatusReport.stale_keys` and `Repo.stale_keys()` list the stale objects.
-- `tether import` updates that change an object's locator now drop the
-  workspace's working branch, pending fork, base state, and fork point for it;
-  writes no longer go to the branch in the old system until the next `new`
-  (the branch itself is left for `gc`).
-- `promote`'s merge path records the working ref that `fork()` returns when
-  it resets the fork onto the merge result (Neon may return a sibling name).
-- The conformance suite computes pin ids from the content state, as the
-  engine does; before, a backend with volatile keys would have minted
-  different ids under the suite.
+- `tether import` updates that change an object's locator drop its working
+  branch and fork point, so writes no longer go to the old system's branch.
 
 ## [0.1.0a6] - 2026-09-07
 
 ### Added
 
 - `tether promote [KEY]... [--rev REV] [--strategy auto|ff|merge] [-m MSG]`
-  (`Repo.plan_promote` / `apply_promote` / `promote`, `PromoteReport`): move
-  each system's base branch to what this workspace's fork holds. The base is
-  compared to the **fork point** recorded when the branch was created
-  (`WorkspaceState.fork_points`, also in the export `workspace` table as
-  `fork_point_json`; export schema_version 2): unchanged -> fast-forward
-  (`Capability.PROMOTE`: icechunk `reset_branch`, iceberg `set-snapshot-ref`,
-  git `merge --ff-only`, lakeFS / Dolt merges), moved -> native three-way merge
-  (`Capability.MERGE`: git, lakeFS `merge_into`, `DOLT_MERGE`; conflicts are
-  reported as `MergeConflict` and nothing is written), otherwise `refuse` with
-  the backend's `PROMOTE_HINT` (Icechunk/Iceberg have no merge; Lance cannot
-  move a branch head; Neon cannot promote a child branch). After a merge the
-  working branch is reset onto the merge result so the next `commit` pins it.
-  `--dry-run` / `--plan` / `--from-plan` as for the other planned commands;
-  exit status 1 when anything was refused. New protocol members `promote`,
-  `merge`, `ancestor_of`, `PROMOTE_HINT`.
+  (`Repo.promote`, `PromoteReport`) moves each system's base branch to what
+  this workspace's fork holds. Base unchanged since the fork point:
+  fast-forward (icechunk, iceberg, git, lakeFS, Dolt). Base moved: native
+  three-way merge (git, lakeFS, Dolt; a `MergeConflict` writes nothing).
+  Otherwise refused with the system's recipe. `--dry-run` / `--plan` /
+  `--from-plan` as for other planned commands; exit 1 when anything was
+  refused.
 
 ### Changed
 
-- Working branches are forked lazily by default. `tether new` decides each
-  Forkable object's `tether.ws.<workspace>.<key>` branch (plan action
-  `defer-fork`) and the first writable `open` creates it from the pin;
-  workspaces that never write to an object leave no branch behind. `new
-  --eager` / `[new] fork = "eager"` restores creating every branch during
-  `new`. Objects with `pin = "record"` always fork during `new`: their recorded
-  state has no native ref, so the branch is what keeps it from expiring.
-  `Repo.materialize_fork(key)` creates a deferred branch on demand;
-  `WorkspaceState.pending_forks` records the decisions; `tether new --json`
-  reports them. Existing workspaces are unaffected until their next `new`.
+- Working branches are forked lazily by default: `new` decides each branch
+  (`defer-fork`) and the first writable `open` creates it, so a workspace that
+  never writes to an object leaves no branch behind. `new --eager` /
+  `[new] fork = "eager"` forks during `new`; `pin = "record"` objects always
+  do. `Repo.materialize_fork(key)` creates a deferred branch on demand.
 
 ## [0.1.0a5] - 2026-09-06
 
 ### Added
 
-- Registries and SQL. `tether export PATH` derives relational tables from the
-  manifests in VCS history -- `commits`, `commit_parents`, `refs`, `objects`,
-  `object_states` (distinct system/state pairs), optional `listings` /
-  `listing_entries` and `workspace`, plus `objects_head` / `object_pins`
-  views -- into SQLite (default, `--append` upserts), or Parquet / CSV / JSONL
-  directories with a `schema.json`. `tether publish --to DSN` upserts the same
-  tables into a Postgres schema (`--schema`, default `tether`), skipping
-  commits already present and rewriting `refs` / `tether_meta`; `--dry-run`
-  prints per-table counts; the DSN comes from `--to` or `$TETHER_PUBLISH_DSN`.
-  `tether import SOURCE` reads rows with the canonical object columns (`key`,
-  `kind`, `uri` / `locator_json`, `policy_*`, `at`) from a Postgres DSN, SQLite
-  file, `.csv`, or `.jsonl` (`--table` / `--query`, or `[import] query` in
-  `tether.toml`) and plans `add` / `update` / `remove` (`--sync`) on the
-  manifests with `--dry-run` / `--plan` / `--from-plan` like the other planned
-  commands; a kind change is refused. Python: `Repo.export()` ->
-  `ExportBundle` (`to_sqlite`, `to_dir`, `to_arrow`, `to_postgres`,
-  `row_counts`), `Repo.plan_import` / `apply_import` / `import_objects`,
-  `tether.export.TABLES` as the single schema definition, and
-  `tether.registry.read_source`. One table definition drives SQLite DDL,
-  Postgres DDL (JSONB / TIMESTAMPTZ), and Arrow types.
-- VCS adapters gained `commit_info(revs)` (one batched `git log --stdin`; jj
-  change ids) and `refs()` (bookmarks / branches, tags, head).
-- `postgres` extra (`psycopg`) for `publish` and Postgres `import` sources.
-- Dev: `pytest-postgresql` runs the `publish` / Postgres `import` tests against
-  an ephemeral cluster (skipped when `pg_ctl` is not installed).
-- User-guide page "Registries and SQL".
+- Registries and SQL. `tether export PATH` derives relational tables
+  (`commits`, `commit_parents`, `refs`, `objects`, `object_states`, optional
+  `listings` / `listing_entries` / `workspace`) from history into SQLite
+  (default; `--append` upserts) or Parquet / CSV / JSONL directories.
+- `tether publish --to DSN` upserts the same tables into a Postgres schema
+  (`--schema`, default `tether`), skipping commits already present; the DSN
+  comes from `--to` or `$TETHER_PUBLISH_DSN`. Needs the `postgres` extra.
+- `tether import SOURCE` reads rows with the canonical object columns from
+  Postgres, SQLite, `.csv` or `.jsonl` (`--table` / `--query`) and plans
+  `add` / `update` / `remove` (`--sync`) like the other planned commands.
+- Python: `Repo.export()` -> `ExportBundle`, `Repo.plan_import` /
+  `apply_import` / `import_objects`. User-guide page "Registries and SQL".
 
 ## [0.1.0a4] - 2026-09-05
 
 ### Fixed
 
-- Neon pins now hang off the branch the state was fingerprinted on. The state
-  gained a `branch` field; previously a state read on a forked working branch
-  was pinned as a child of the object's *source* branch at the fork's LSN,
-  which named the wrong data (or failed) once the fork had writes. `pin`,
-  pin-less `fork`, `verify` (which now also checks the pin's parent), and
-  time-travel `open` all use the state's branch. Neon manifests committed by
-  earlier alphas lack the field; re-register and re-commit those objects.
-- The `git` backend accepts the CLI's positional locator as its `path`
-  (`tether add code --kind git ../code`); only `--set path=` worked before.
+- Neon pins hang off the branch the state was fingerprinted on; a state read
+  on a fork was pinned under the *source* branch, naming the wrong data.
+  Manifests from earlier alphas lack the field: re-register and re-commit.
+- The `git` backend accepts the CLI's positional locator as its `path`.
 
 ### Changed
 
-- `gc` never deletes branches on its own again. `0.1.0a3` deleted the working
-  branch of a `tether remove`d object by default and, with
-  `--prune-workspaces`, every stray `tether.ws.*` branch unconditionally. Now
-  a plain `gc` only forgets the removed object's ref (the branch is left for
-  `--prune-workspaces`), and `--prune-workspaces` fingerprints each stray
-  branch and deletes it only when nothing on it would be lost: its head state
-  is natively pinned by some commit, or equals the base branch's head.
-  Branches with unpinned writes, with a pin-less (`--pin record`) state, or on
-  a backend whose branches are the storage itself are reported as
-  `keep-branch` instead.
-- New `--force-prune` (`Repo.gc(force_prune=True)`, `plan_gc(force_prune=)`)
-  deletes kept branches anyway; the plan marks them `FORCED`.
-- New `Capability.BRANCH_IS_STORAGE` (declared by `neon`): deleting a branch
-  reclaims its data immediately, so such branches are never pruned without
-  force.
-- `GcReport` gains `kept_working_refs` and `forgotten_working_refs`;
-  `deleted_working_refs` now lists only native branches actually deleted.
-  `keep-branch` joins `track` as an informational plan action (`Plan.writes`
-  excludes both).
+- `gc` never deletes branches on its own again: a plain `gc` only forgets a
+  removed object's ref, and `--prune-workspaces` deletes a stray branch only
+  when its head is pinned by a commit or equals the base branch's head.
+  Branches with unpinned writes, a `--pin record` state, or on a backend whose
+  branches are the storage (`BRANCH_IS_STORAGE`: Neon) are `keep-branch`.
+- `--force-prune` (`Repo.gc(force_prune=True)`) deletes kept branches anyway;
+  the plan marks them `FORCED`. `GcReport` gains `kept_working_refs` and
+  `forgotten_working_refs`.
 
 ## [0.1.0a3] - 2026-09-05
 
 ### Added
 
-- Plans for every store-writing command. `commit`, `new`, and `gc` are now a
-  read-only plan followed by an apply: `Repo.plan_commit`/`apply_commit`,
-  `plan_new`/`apply_new`, `plan_gc`/`apply_gc`, with `tether.plan.Plan` /
-  `Action` serializing to JSON. CLI: `--dry-run` prints the plan, `--plan FILE`
-  saves it, `--from-plan FILE` applies it; apply re-fingerprints the planned
-  objects and refuses with `StalePlanError` if anything moved. `tether gc`'s
-  default dry run now prints the plan.
-- Pin-less forks for every backend: `--pin record` (`policy.pin = "record"`)
-  removes `PIN` for any object, so `commit` records the state without a native
-  ref and `new` forks straight from it (`ObjectBackend.fork` accepts a `Pin` or
-  a recorded `State`). Implemented for icechunk, lance, iceberg, lakefs, dolt,
-  git, neon (LSN on the base branch), and memory; conformance-tested.
-- Working-branch cleanup: `tether gc --prune-workspaces [--keep-workspace ID]`
-  deletes `tether.ws.*` branches left by workspaces that no longer exist (and
-  this workspace's branches no object uses) via the new
-  `ObjectBackend.list_working_refs`. `gc` now also deletes -- not just forgets
-  -- the working branch of a `tether remove`d object, and `remove` no longer
-  drops the ref so `gc` can find it.
-- User guide page "Reclaiming storage": plans, `--pin record`, dropping history
-  with `jj`/`git`, `gc`, and pruning dead workspaces.
+- Plans: `commit`, `new` and `gc` are a read-only plan followed by an apply
+  (`Repo.plan_*` / `apply_*`; `tether.plan.Plan`). `--dry-run` prints the
+  plan, `--plan FILE` saves it, `--from-plan FILE` applies it and refuses with
+  `StalePlanError` if anything moved; `gc`'s default dry run prints the plan.
+- `--pin record` (`policy.pin = "record"`) makes `commit` record the state
+  without a native ref and `new` fork straight from it, on every backend.
+- `tether gc --prune-workspaces [--keep-workspace ID]` deletes `tether.ws.*`
+  branches left by workspaces that no longer exist.
+- User guide page "Reclaiming storage".
 
 ### Changed
 
-- `Repo.remove` keeps the object's working ref in the workspace state (for
-  `gc`); `Repo.add` clears any stale ref for a re-registered key.
-- `tether new` prints the working refs it forked; `--json` returns them.
+- `Repo.remove` keeps the object's working ref for `gc`; `Repo.add` clears a
+  stale ref for a re-registered key. `tether new` prints the working refs it
+  forked.
 
 ## [0.1.0a2] - 2026-09-05
 
 ### Added
 
-- Detached bases and native history: `tether add --at <id>` registers an
-  object at a specific snapshot / version / commit / tag instead of a branch
-  head (`commit` pins it, `new` forks from it, `open` reads it), `tether log`
-  lists a system's native history newest first with branches, tags, and pins
-  marked (`--kind` browses before registering), and `--pick` chooses the base
-  interactively. Backed by `Capability.HISTORY`, `ObjectBackend.history`, and
-  `HistoryEntry`; implemented for icechunk, lance, iceberg, delta, ducklake,
-  lakefs, dolt, git, and memory (neon and file refuse `at`). The conformance
-  suite checks `history` and `at` for every `HISTORY` backend.
+- `tether add --at <id>` registers an object at a specific snapshot, version,
+  commit or tag instead of a branch head; `--pick` chooses interactively. Neon
+  and `file` refuse `at`.
+- `tether log` lists a system's native history newest first with branches,
+  tags and pins marked (`--kind` browses before registering), for every
+  backend with `Capability.HISTORY`.
 
 ## [0.1.0a1] - 2026-09-05
 
@@ -1252,76 +691,47 @@ without a pre-release marker and has been removed; its code is this release.
 
 ### Added
 
-- Initial project scaffold.
 - Manifest model (`tether.toml`, per-object manifests, workspace state) with
-  canonical hashing and content-addressed pin ids.
-- VCS adapters for `jj` and `git` with stale-working-copy detection.
-- Backend protocol with declared capability tiers, in-memory reference backend,
-  and an importable, capability-parametrized conformance suite.
-- Orchestration engine: fan-out snapshot, status, commit, new, open, verify, gc.
-- Backends: `file`, `icechunk`, `neon`, `git`, `iceberg`.
-- Typer CLI (`tether`).
-- Backends: `delta` (Addressable, retention-bound), `lance` (Forkable: tags on
-  `(branch, version)`, branches), `lakefs` (Forkable: tags, branches, dirty
-  staging detection). Handles: `DeltaHandle`, `LanceHandle`, `LakeFSHandle`.
-- `file` backend supports GCS (`gs://`) and Azure Blob (`az://`, `abfs://`)
-  alongside S3 through obstore; `--file versioned` records GCS generations and
-  Azure version ids like S3 version ids.
-- `VcsAdapter.files_at` / `iter_history_files`: batched manifest reads through
-  one `git cat-file --batch` process (also for jj repos).
-- CLI: `tether add --repository/--prefix` for lakeFS locators.
-- Backends: `ducklake` (Addressable, retention-bound: catalog-wide snapshot ids
-  via DuckDB's `ducklake` extension, time travel through `SNAPSHOT_VERSION`) and
-  `dolt` (Forkable over the MySQL protocol: `dolt_branches`/`dolt_tags` system
-  tables, `DOLT_TAG`/`DOLT_BRANCH` procedures, dirty working-set detection).
-  Handles: `DuckLakeHandle` (owns its attachment; context manager),
-  `DoltHandle` (`db/ref` revision URL). CLI: `--host/--port/--table`.
-- Content diffs: `Capability.DIFF`, `ObjectBackend.diff(locator, a, b, *,
-  listings)` returning an `ObjectDiff` (unit, added/removed/modified counts,
-  capped entries), and `tether diff --content [--limit N]` (`Repo.diff(...,
-  content=True)`), fanned out across changed objects with per-object errors.
-  Implemented natively for `file`, `git`, `icechunk`, `iceberg`, `delta`,
-  `lance`, `lakefs`, `ducklake`, `dolt`, and `memory`; the conformance suite
-  checks `diff` for every `DIFF` backend.
-- Listings: `ObjectBackend.listing(locator, state)` lets a backend attach a
-  detailed description of a state; the engine stores it content-addressed under
-  `.tether/listings/<hash>.jsonl`, commits it with the manifests, reads it back
-  (working tree or VCS) for diffs, and prunes unreferenced ones in `gc`. The
-  `file` backend uses it for directory/prefix listings so Observed directories
-  diff file by file.
-- Documentation site built with [Great Docs](https://posit-dev.github.io/great-docs/)
-  (`great-docs.yml`, `docs` dependency group pinning `great-docs` and
-  `quarto-cli`, `.github/workflows/docs.yml` deploying to GitHub Pages). The
-  API reference is generated from docstrings, the CLI reference from the Typer
-  app (mirrored onto real Click objects by `tether._clickdoc`, since Typer
-  vendors its own Click), and the user guide lives in `user_guide/`: getting
-  started, concepts, pinning (worked example), branching and writing (worked
-  example), CLI guide, configuration, backends, writing a backend.
-- Docstrings: Google-style `Args`/`Returns`/`Raises` on every `Repo` method,
-  attribute docstrings on result types, handles, `Capability`, `Tier`,
-  `VerifyStatus`, and diff types; help text on every CLI option. The package
-  root re-exports the result types, manifest helpers, and the `handles`,
-  `backends`, `testing`, and `vcs` submodules.
-- `tether.Policy` and `tether.Pin` are exported from the package root.
-- `tether.toml`'s `[snapshot] auto` now sets the CLI default for
-  `status`/`commit` snapshotting (`--no-snapshot` still wins) and
-  `[new] auto_fork` makes `commit` re-fork working refs afterwards; both keys
-  were previously parsed but unused.
+  content-addressed pin ids; VCS adapters for `jj` and `git` with
+  stale-working-copy detection.
+- Backend protocol with capability tiers, an in-memory reference backend, and
+  an importable conformance suite.
+- The engine: fan-out snapshot, status, commit, new, open, verify, gc. Typer
+  CLI (`tether`).
+- Backends: `file` (local, S3, GCS and Azure through obstore; `--file
+  versioned` records version ids), `icechunk`, `neon`, `git`, `iceberg`,
+  `delta`, `lance`, `lakefs`, `ducklake` and `dolt`, with typed handles.
+- Content diffs: `tether diff --content [--limit N]` asks each changed
+  object's backend for its native diff.
+- Listings: a per-file description of a directory or prefix state, stored
+  content-addressed under `.tether/listings/`, so directories diff file by
+  file; pruned by `gc`.
+- Documentation site (Great Docs, GitHub Pages): API and CLI reference and a
+  user guide. `[snapshot] auto` and `[new] auto_fork` take effect.
 
 ### Changed
 
-- Versions are PEP 440 pre-releases (`0.1.0aN`) while the project is alpha;
-  `tether.__version__` now comes from the installed distribution metadata
-  instead of a duplicated constant.
-- The distribution is published as `tether-vcs` (PyPI prohibits the bare name
-  `tether`); the importable package and the CLI remain `tether`. Install with
-  `pip install tether-vcs[...]`.
-- The `s3` extra now installs `obstore` instead of `boto3`; `objectstore`,
-  `gcs`, and `azure` extras are aliases for the same dependency.
-- `gc` and `verify --all-history` stream history through a single object
-  reader, parse each distinct manifest once, and verify each distinct
-  `(system, state, pin)` once, concurrently (~280x faster on a 200-commit repo).
-- `verify` and the fork step of `new` fan out concurrently; the fan-out pool
-  grew from 8 to 16 workers.
-- Local directory fingerprints walk with `os.scandir` (~7x cheaper per file
-  than `Path.rglob` + `stat`).
+- Versions are PEP 440 pre-releases (`0.1.0aN`); `tether.__version__` comes
+  from the installed distribution.
+- The distribution is `tether-vcs` (PyPI prohibits the bare name); the
+  package and the CLI remain `tether`.
+- The `s3` extra installs `obstore` instead of `boto3`; `objectstore`, `gcs`
+  and `azure` are aliases.
+- `gc` and `verify --all-history` verify each distinct `(system, state, pin)`
+  once, concurrently (~280x faster on a 200-commit repo); local directory
+  fingerprints are ~7x cheaper per file.
+
+[Unreleased]: https://github.com/elyall/tether/compare/v0.1.0b3...HEAD
+[0.1.0b3]: https://github.com/elyall/tether/compare/v0.1.0b2...v0.1.0b3
+[0.1.0b2]: https://github.com/elyall/tether/compare/v0.1.0b1...v0.1.0b2
+[0.1.0b1]: https://github.com/elyall/tether/compare/v0.1.0a10...v0.1.0b1
+[0.1.0a10]: https://github.com/elyall/tether/compare/v0.1.0a9...v0.1.0a10
+[0.1.0a9]: https://github.com/elyall/tether/compare/v0.1.0a8...v0.1.0a9
+[0.1.0a8]: https://github.com/elyall/tether/compare/v0.1.0a7...v0.1.0a8
+[0.1.0a7]: https://github.com/elyall/tether/compare/v0.1.0a6...v0.1.0a7
+[0.1.0a6]: https://github.com/elyall/tether/compare/v0.1.0a5...v0.1.0a6
+[0.1.0a5]: https://github.com/elyall/tether/compare/v0.1.0a4...v0.1.0a5
+[0.1.0a4]: https://github.com/elyall/tether/compare/v0.1.0a3...v0.1.0a4
+[0.1.0a3]: https://github.com/elyall/tether/compare/v0.1.0a2...v0.1.0a3
+[0.1.0a2]: https://github.com/elyall/tether/compare/v0.1.0a1...v0.1.0a2
+[0.1.0a1]: https://github.com/elyall/tether/releases/tag/v0.1.0a1
