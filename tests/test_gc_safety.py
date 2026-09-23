@@ -390,6 +390,43 @@ def test_pinned_index_seed_claims_only_pins_this_clone_created(
     assert theirs.ref in default_store().system(system).tags
 
 
+def test_gc_reports_every_failure_when_two_stores_share_a_ref_name(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bookmark's branch has one name in every store. gc keyed its failures
+    by verb and ref, so when deleting it failed in two stores, one failure
+    replaced the other and the report named a single store."""
+    from tether.backends.memory import MemoryBackend
+    from tether.errors import BackendError, MultiObjectError
+
+    repo, system = _baseline(vcs_root)
+    other = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(other)
+    repo.add("aux", "memory", {"system": other, "branch": "main"})
+    repo.commit("aux")
+    repo.new(bookmark="feat", eager=True)
+    refs = dict(repo.workspace.working_refs)
+    assert refs["db"] == refs["aux"]  # one name, two stores
+    repo.new("main")
+    repo.vcs.bookmark_delete("feat")
+    repo = Repo.find(vcs_root)
+    plan = repo.plan_gc(prune_bookmarks=True, force_prune=True)
+    deletes = [a for a in plan.actions if a.op == "delete-branch"]
+    assert sorted(a.key for a in deletes) == ["aux", "db"], plan.render()
+
+    def refused(self: MemoryBackend, locator: dict, ref: str) -> None:
+        raise BackendError(f"{locator['system']} is read-only", kind="memory")
+
+    monkeypatch.setattr(MemoryBackend, "delete_working_ref", refused)
+    with pytest.raises(MultiObjectError) as exc:
+        repo.apply_gc(plan)
+    failed = {k: str(v) for k, v in exc.value.errors.items()}
+    assert len(failed) == 2, failed
+    assert {system, other} == {
+        s for s in (system, other) for v in failed.values() if s in v
+    }
+
+
 @pytest.mark.parametrize("name", ["ops.jsonl", "workspace.toml"])
 def test_gc_skips_another_checkouts_state_file_the_vcs_tracks(
     vcs_root: Path, tmp_path: Path, name: str

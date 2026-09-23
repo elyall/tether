@@ -86,7 +86,7 @@ from tether.oplog import (
     remove_touched,
 )
 from tether.plan import Action, Plan
-from tether.repo._reports import GcReport, UndoReport, short_state
+from tether.repo._reports import GcReport, UndoReport, failure_key, short_state
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.repo import Repo
@@ -814,14 +814,14 @@ def apply_store_action(
         # outright, and still ours.
         if backend.owner(locator) != ds:
             report.kept_stores[a.key] = "owner marker changed"
-            errors[f"{a.op} {a.target}"] = StalePlanError(
+            errors[failure_key(errors, a)] = StalePlanError(
                 f"{a.key}: the store at {a.target} no longer carries this "
                 "dataset's owner marker"
             )
             return
         if backend.is_ref_empty(locator) is not True:
             report.kept_stores[a.key] = "not empty at the moment of deletion"
-            errors[f"{a.op} {a.target}"] = StalePlanError(
+            errors[failure_key(errors, a)] = StalePlanError(
                 f"{a.key}: the store at {a.target} is not empty; re-run the plan"
             )
             return

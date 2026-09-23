@@ -219,6 +219,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Threads resolving one AWS profile or role made one STS call each.
 - git: `abandon` left a manifest the abandoned commit had added deleted in
   the worktree, so the next commit deleted it.
+- `gc` listed one failure when a ref of one name (a bookmark's branch) failed
+  in two stores; each failure now names its object.
 
 ### Experimental
 

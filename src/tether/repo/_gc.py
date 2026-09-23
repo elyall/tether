@@ -55,6 +55,7 @@ from tether.repo._reports import (
     DropReport,
     ForgetWorkspaceReport,
     GcReport,
+    failure_key,
     short_state,
 )
 
@@ -677,7 +678,7 @@ class GcOps(RepoCore):
                             report.kept_working_refs.setdefault(a.key, []).append(
                                 a.target
                             )
-                            errors[f"{a.op} {a.target}"] = exc
+                            errors[failure_key(errors, a)] = exc
                             continue
                         backend.delete_working_ref(locator, a.target)
                         report.deleted_working_refs.setdefault(a.key, []).append(
@@ -713,7 +714,7 @@ class GcOps(RepoCore):
                         )
                     raise
                 except Exception as exc:
-                    errors[f"{a.op} {a.target}"] = exc
+                    errors[failure_key(errors, a)] = exc
             if forgot:
                 write_workspace(self.root, self.workspace)
             if op is not None:

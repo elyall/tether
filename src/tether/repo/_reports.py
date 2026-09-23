@@ -10,7 +10,7 @@ from typing import Any
 from tether.backends.base import ObjectDiff, Tier, VerifyReport
 from tether.manifest import Pin, State
 from tether.oplog import OpEntry
-from tether.plan import Plan
+from tether.plan import Action, Plan
 
 
 @dataclass
@@ -365,6 +365,20 @@ def _source_object(source: Mapping[str, Any]) -> str | Pin | State:
     if "pin" in source:
         return Pin.from_dict(dict(source["pin"]))
     return dict(source["state"])
+
+
+def failure_key(errors: Mapping[str, object], action: Action) -> str:
+    """The key under which `action`'s failure joins `errors`: its verb and
+    target, and the object's key -- two stores can hold a ref of one name (a
+    bookmark's branch; a pin two keys share), and each failure must show --
+    numbered should that still collide."""
+    base = f"{action.op} {action.target}"
+    if action.key:
+        base += f" ({action.key})"
+    key, n = base, 2
+    while key in errors:
+        key, n = f"{base} #{n}", n + 1
+    return key
 
 
 def short_state(state: State | None) -> str:
