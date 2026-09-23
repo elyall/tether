@@ -45,6 +45,10 @@ class FakeNeon:
         self.restores: list[tuple[str, dict]] = []
         self.uris: list[dict[str, str]] = []  # connection_uri query params
         self.busy: list[int] = []  # statuses the next requests get first
+        self.endpoint_posts = 0
+        self.list_delay = 0.0  # widens the list-then-create window
+        self.after_list: list = []  # callbacks run once after an endpoint list
+        self.refuse_endpoints: tuple[int, str] | None = None
         self._n = 0
 
     def install(self, router: respx.MockRouter) -> None:
@@ -151,12 +155,31 @@ class FakeNeon:
         return httpx.Response(200, json={"branch": br})
 
     def _list_endpoints(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"endpoints": self.endpoints})
+        import time
+
+        response = httpx.Response(200, json={"endpoints": list(self.endpoints)})
+        if self.list_delay:
+            time.sleep(self.list_delay)
+        while self.after_list:
+            self.after_list.pop(0)()
+        return response
 
     def _create_endpoint(self, request: httpx.Request) -> httpx.Response:
         import json
 
         ep = json.loads(request.content)["endpoint"]
+        self.endpoint_posts += 1
+        if self.refuse_endpoints is not None:
+            status, message = self.refuse_endpoints
+            return httpx.Response(status, json={"message": message})
+        # As the real API: one read-write compute per branch.
+        if ep["type"] == "read_write" and any(
+            e["branch_id"] == ep["branch_id"] and e["type"] == "read_write"
+            for e in self.endpoints
+        ):
+            return httpx.Response(
+                409, json={"message": "read_write endpoint already exists"}
+            )
         self._n += 1
         record = {
             "id": f"ep-{self._n}",
@@ -567,6 +590,61 @@ def test_connections_name_the_endpoint_they_ensured(
         assert isinstance(rw, NeonHandle) and rw.branch == wref
         assert len(fake.endpoints) == 3  # reused, not created again
         assert all(u.get("endpoint_id") for u in fake.uris)
+
+
+def test_concurrent_fingerprints_of_one_branch_create_one_endpoint(
+    backend: NeonBackend,
+) -> None:
+    """The engine fingerprints objects concurrently; two objects on one
+    working branch (two databases of a project) each found no endpoint and
+    each created one, and Neon refuses the second read-write endpoint."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        pin = backend.pin(LOCATOR, backend.fingerprint(LOCATOR, None), "abc123def456")
+        wref = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.db")
+        work = next(b for b in fake.branches.values() if b["name"] == wref)
+        fake.endpoint_posts = 0
+        fake.list_delay = 0.05
+        gate = threading.Barrier(8, timeout=5)
+
+        def fp(n: int) -> dict:
+            gate.wait()
+            return backend.fingerprint({**LOCATOR, "database": f"db{n}"}, wref)
+
+        with ThreadPoolExecutor(8) as ex:
+            states = list(ex.map(fp, range(8)))
+    assert len(states) == 8
+    assert fake.endpoint_posts == 1
+    assert [e["type"] for e in fake.endpoints if e["branch_id"] == work["id"]] == [
+        "read_write"
+    ]
+
+
+def test_an_endpoint_another_process_created_first_serves(
+    backend: NeonBackend,
+) -> None:
+    """Across processes nothing serializes the list and the create: when
+    the create is refused because the endpoint exists now, it is used."""
+    fake = FakeNeon()
+    with respx.mock as router:
+        fake.install(router)
+        pin = backend.pin(LOCATOR, backend.fingerprint(LOCATOR, None), "abc123def456")
+        wref = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.db")
+        work = next(b for b in fake.branches.values() if b["name"] == wref)
+        theirs = {"id": "ep-theirs", "branch_id": work["id"], "type": "read_write"}
+        fake.after_list.append(lambda: fake.endpoints.append(theirs))
+        backend.fingerprint(LOCATOR, wref)
+        assert fake.endpoint_posts == 1  # refused: 409
+        assert fake.uris[-1]["endpoint_id"] == "ep-theirs"
+        # A refusal for any other reason, with no endpoint there, still fails.
+        other = backend.fork(LOCATOR, pin, "tether.ws.abcd1234.other")
+        fake.refuse_endpoints = (422, "compute quota exceeded")
+        with pytest.raises(BackendError, match="quota"):
+            backend.fingerprint(LOCATOR, other)
 
 
 def test_api_retries_locked_and_throttled_responses(

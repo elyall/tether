@@ -21,6 +21,7 @@ the branch tree and can only be garbage-collected leaf-first.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -162,6 +163,8 @@ class NeonBackend(ObjectBackend):
         # each. Cleared at the start of every protocol call (`_fresh`) and
         # ignored after any mutation, so it never outlives one operation.
         self._branch_cache: dict[str, tuple[int, list[dict]]] = {}
+        self._endpoint_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._endpoint_locks_guard = threading.Lock()
 
     def _fresh(self) -> None:
         """Forget cached listings: called on entry to every protocol method,
@@ -605,16 +608,43 @@ class NeonBackend(ObjectBackend):
         "data with pg_dump/psql"
     )
 
-    def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> str:
-        """The id of the branch's `ep_type` endpoint, created if it has none."""
+    def _find_endpoint(
+        self, project_id: str, branch_id: str, ep_type: str
+    ) -> str | None:
         for ep in self._endpoints_for(project_id, branch_id):
             if ep.get("type") == ep_type:
                 return str(ep["id"])
-        created = self._api.post(
-            f"/projects/{project_id}/endpoints",
-            {"endpoint": {"branch_id": branch_id, "type": ep_type}},
-        )
-        return str(created["endpoint"]["id"])
+        return None
+
+    def _ensure_endpoint(self, project_id: str, branch_id: str, ep_type: str) -> str:
+        """The id of the branch's `ep_type` endpoint, created if it has none.
+
+        One thread per branch at a time: the engine fingerprints objects
+        concurrently, and two objects on one working branch both found no
+        endpoint and both created one (Neon allows one read-write endpoint
+        per branch). Another process can still win the race; when the
+        creation is refused and the branch has the endpoint now, that one
+        serves.
+        """
+        with self._endpoint_locks_guard:
+            lock = self._endpoint_locks.setdefault(
+                (project_id, branch_id), threading.Lock()
+            )
+        with lock:
+            found = self._find_endpoint(project_id, branch_id, ep_type)
+            if found is not None:
+                return found
+            try:
+                created = self._api.post(
+                    f"/projects/{project_id}/endpoints",
+                    {"endpoint": {"branch_id": branch_id, "type": ep_type}},
+                )
+            except BackendError:
+                found = self._find_endpoint(project_id, branch_id, ep_type)
+                if found is None:
+                    raise
+                return found
+            return str(created["endpoint"]["id"])
 
     def open(
         self,
