@@ -210,11 +210,12 @@ plan: gc (5 write(s))
 ```
 
 Two tags in Icechunk, two branches in Neon, one content listing. Nothing named
-by the three surviving commits appears -- and nothing that belongs to another
-dataset: every ref carries the dataset's id (`0a1b2c3d` here) and `gc` only
-looks inside its own namespace. Had another dataset pinned the same Icechunk
-repo, the plan would say `zarr/imaging: 2 pin(s) of other datasets left alone`
-and stop there. Apply it:
+by the three surviving commits appears -- nor by another checkout's working
+tree or an operation that has not finished -- and nothing that belongs to
+another dataset: every ref carries the dataset's id (`0a1b2c3d` here) and `gc`
+only looks inside its own namespace. Had another dataset pinned the same
+Icechunk repo, the plan would say `zarr/imaging: 2 pin(s) of other datasets
+left alone` and stop there. Apply it:
 
 ```bash
 tether gc --no-dry-run
@@ -251,6 +252,29 @@ system decides when. Icechunk needs `repo.expire_snapshots(...)` then
 `cleanup_old_versions`; Neon frees the branch's history on its own schedule.
 Those are the system's operations, not tether's.
 
+### Pins this clone did not create
+
+`gc` only knows the history this clone has. A teammate's clone commits into
+the same stores, and until you fetch, its pins are in your store and in none
+of your commits. So an unreferenced pin is released only when **this clone
+created it** -- `commit` and `repair` record the pins they make in
+`tether-pinned.jsonl`, beside the repository lock, seeded from the op logs the
+first time `gc` runs. Any other unreferenced pin gets a `keep-pin` verdict:
+
+```
+            keep-pin  db/metrics    [neon] tether.0a1b2c3d.5e6f7a8b9c0d1e2f  no manifest in history references it; not created by this clone -- another clone's commits may name it (fetch them, or --release-foreign)
+```
+
+`keep-pin` writes nothing (a plan holding only such lines is empty). Fetching
+the other clone's bookmarks turns its pins into references; `gc
+--release-foreign` releases them regardless -- for a clone you know is gone,
+or a pin made by hand -- and the plan marks each one `not created by this
+clone` so the choice is visible before it happens.
+
+`gc` also refuses outright while jj reports a conflicted bookmark or commit
+(`jj bookmark list`, `jj resolve`): a conflicted bookmark has several targets
+and counts as reaching nothing, and a conflicted manifest is several answers.
+
 ### Branches of bookmarks that are gone
 
 Every bookmark gets a `tether.ws.<dataset>.<bookmark>` branch in each Forkable
@@ -262,7 +286,8 @@ about is never why data disappears.
 `gc --prune-bookmarks` is the sweep. It finds the `tether.ws.*` branches in
 each system, keeps those of every bookmark the VCS still has or a live
 checkout still works on (plus any `--keep-bookmark NAME`, for a bookmark that
-only exists on another machine), and judges the rest by their head. Branches
+only exists on another machine) and every branch a live checkout has as its
+working ref or pending fork, and judges the rest by their head. Branches
 from before bookmarks existed -- one per workspace and object -- are judged
 the same way:
 
@@ -427,10 +452,12 @@ throw the store away.
 - Drop commits with `tether abandon`, `tether drop`, or the VCS's own
   `squash` / `abandon` / `rebase -i`; tether reads the VCS's idea of history,
   so what you cannot see it does not protect.
-- `gc` releases orphaned pins and listings and never deletes a branch on its
-  own; `--prune-bookmarks` deletes gone bookmarks' branches only when a tag
-  already holds their head (or nothing was written); `--force-prune` deletes
-  them regardless. Reclaiming the bytes is the system's own expiry step.
+- `gc` releases orphaned pins this clone created (others are `keep-pin` until
+  fetched or `--release-foreign`) and orphaned listings, and never deletes a
+  branch on its own; `--prune-bookmarks` deletes gone bookmarks' branches only
+  when a tag already holds their head (or nothing was written);
+  `--force-prune` deletes them regardless. Reclaiming the bytes is the
+  system's own expiry step.
 - A store `add --create` made is deleted by `gc --delete-stores` once nothing
   references it and only tether's own refs remain; the owner marker in the
   store and the untracked index in your repository decide, never a manifest.

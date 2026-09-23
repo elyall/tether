@@ -55,9 +55,10 @@ thousand of them per id.
 Pins are created before the VCS commit. If anything after them fails -- a
 manifest write, the VCS commit -- `commit` releases the pins it created and
 puts the manifests back; if the process dies outright, the journal entry it
-wrote first stays `INCOMPLETE` in `tether ops` and the pins leak until `gc`
-(which scans VCS history plus the current workspace). Re-run `tether verify`
-after merging manifests across branches.
+wrote first stays `INCOMPLETE` in `tether ops`, and `gc` -- run from any
+checkout of the repository -- keeps the pins that entry names. Re-running the
+commit finishes what it started; `forget-workspace` retires the log with the
+checkout. Re-run `tether verify` after merging manifests across branches.
 
 ### Forks are lazy
 

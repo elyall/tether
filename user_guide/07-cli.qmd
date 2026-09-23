@@ -29,7 +29,7 @@ tether promote [KEY]... [-r REV] [--strategy auto|ff|merge] [-m MESSAGE] [--dry-
 tether verify [-r REV] [--all-history] [--deep]
 tether diff [REV_A] [REV_B] [--content] [--limit N]
 tether log KEY [--ref REF] [-n N]            # or: tether log LOCATOR --kind KIND [--branch B] [--set k=v]
-tether gc [--dry-run | --no-dry-run] [--prune-bookmarks [--keep-bookmark NAME]... [--force-prune]] [--delete-stores] [--store KIND=LOCATOR]... [--plan FILE | --from-plan FILE]
+tether gc [--dry-run | --no-dry-run] [--release-foreign] [--prune-bookmarks [--keep-bookmark NAME]... [--force-prune]] [--delete-stores] [--store KIND=LOCATOR]... [--plan FILE | --from-plan FILE]
 tether abandon REV... [--gc]
 tether drop BOOKMARK [--to BOOKMARK] [--delete-stores] [--force-prune] [--dry-run | --no-dry-run | --plan FILE | --from-plan FILE]
 tether forget-workspace [WORKSPACE_ID] [--dry-run | --plan FILE | --from-plan FILE]
@@ -70,12 +70,25 @@ read-only working copy. In git that commit is checked out onto a
 are parking, not bookmarks -- tether never deletes them, so `git branch -d`
 the ones you are done with.
 
-## Environment
+## Versions and environment
+
+tether needs **jj 0.43 or newer** (checked once per command; an older jj is
+refused with the version it found) and **git 2.38 or newer** (the hardening
+flags tether passes, `safe.bareRepository` among them, exist from there).
+
+What of your own jj and git configuration reaches tether's calls: your
+identity, your `.gitignore` and jj ignore rules, your hooks (a pre-commit hook
+that refuses stops the dataset commit, and nothing is left staged), and jj's
+`immutable_heads()`. What does not: colour, the pager, `snapshot.auto-track`
+and `snapshot.max-new-file-size` (tether tracks its own files by name, and
+only those), and `log.showSignature` / `core.quotePath`. Revset aliases that
+shadow builtins (`all()`) do not change what tether walks: it uses operator
+forms (`::`).
 
 | Variable | Effect |
 | --- | --- |
 | `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
-| `PATH`, `JJ_CONFIG`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
+| `PATH`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
 | Backend credentials | Never stored in manifests; each backend reads them from `.tether/secrets.toml` or the environment (`NEON_API_KEY`, AWS/GCP/Azure defaults, lakeFS `LAKECTL_*`, ...; Dolt only from a per-server secrets entry). See [Backends](09-backends.qmd). |
 | `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, ... | Ignored: tether clears the variables that point git at another repository or add config to it (the ones `git rev-parse --local-env-vars` lists), so running inside a git hook still commits to the repository the dataset is in. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are honoured. |
 
@@ -109,7 +122,7 @@ Action verbs, by command:
 | `new` | `fork`, `defer-fork`, `reuse`, `share`, `trunk` |
 | `restore` | `fork`, `refuse` |
 | `promote` | `fast-forward`, `merge`, `hold`, `refuse` |
-| `gc` | `unpin`, `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`; with `--delete-stores`: `delete-store`, `keep-store`, `forget-store`, `forget-touched` |
+| `gc` | `unpin`, `keep-pin`, `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`; with `--delete-stores`: `delete-store`, `keep-store`, `forget-store`, `forget-touched` |
 | `drop` | `leave-bookmark`, `abandon-commit`, `delete-bookmark`, then gc's verbs |
 | `forget-workspace` | `delete-file`, `forget-vcs-workspace` |
 | `import` | `add`, `update`, `remove` |
@@ -117,9 +130,9 @@ Action verbs, by command:
 | `repair` | `repin`, `refork` |
 | `upgrade` | `rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`, `refingerprint`, `rename-manifest`, `rewrite-locator` |
 
-`trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, `keep-branch`, and
-`keep-store` are informational -- they write nothing, and a plan holding only
-those is empty.
+`trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, `keep-branch`,
+`keep-pin`, and `keep-store` are informational -- they write nothing, and a
+plan holding only those is empty.
 
 `share` is how objects that live in one native branch space -- two databases
 of a Neon project, two keys on one Icechunk store -- get *one* branch per
@@ -386,10 +399,23 @@ bookmark away, use `drop`.
 
 ## `gc`
 
-Default: release pins no manifest in VCS history (or the working tree)
-references, forget the working refs of objects removed with `tether remove`
-(the native branch is left alone), and delete unreferenced
-`.tether/listings/` files. No branch is ever deleted by a plain `gc`.
+Default: release pins no manifest references -- in VCS history (every side
+of a conflicted jj commit included), in this working tree, or in any other
+live checkout's -- and that no operation still running or interrupted made;
+forget the working refs of objects removed with `tether remove` (the native
+branch is left alone); and delete unreferenced `.tether/listings/` files. No
+branch is ever deleted by a plain `gc`.
+
+Only pins **this clone created** are released. The store is shared by every
+clone of the dataset and pins are content-addressed, so an unreferenced pin
+may be another clone's, made by commits you have not fetched; such a pin is
+kept and listed as `keep-pin` (`not created by this clone`). Fetch, or pass
+`--release-foreign` to release them too. Which pins are this clone's is
+recorded in `tether-pinned.jsonl` beside the repository lock (`.jj/repo/` or
+`.git/`), seeded from the op logs the first time it is needed.
+
+`gc` (and `drop`) refuse while jj reports a conflicted bookmark or commit:
+resolve it (`jj bookmark set`, `jj resolve`) first.
 
 `--prune-bookmarks` also sweeps `tether.ws.*` branches: those of bookmarks
 that are gone (every bookmark the VCS has, or a live checkout works on, is
