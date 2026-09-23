@@ -134,13 +134,16 @@ def test_gc_removes_orphan_pin(vcs_root: Path) -> None:
     backend.pin(locator, {"snapshot_id": sid}, "ffffffff.0000000000badbad")
     assert {orphan, "ffffffff.0000000000badbad"} <= backend.list_pins(locator)
 
-    dry = repo.gc(dry_run=True)
-    assert dry.unpinned.get("memory", []) == [orphan]
+    # Made by hand, so no commit of this clone created it: kept by default.
+    plain = repo.gc(dry_run=True)
+    assert plain.kept_pins == {"memory": [orphan]} and not plain.unpinned
+    dry = repo.gc(dry_run=True, release_foreign=True)
+    assert dry.unpinned.get("memory", []) == [orphan] and not dry.kept_pins
     assert dry.plan is not None
     assert any("1 pin(s) of other datasets left alone" in n for n in dry.plan.notes)
     assert orphan in backend.list_pins(locator)  # dry-run kept it
 
-    repo.gc(dry_run=False)
+    repo.gc(dry_run=False, release_foreign=True)
     assert orphan not in backend.list_pins(locator)
     assert "ffffffff.0000000000badbad" in backend.list_pins(locator)  # not ours
 
@@ -512,7 +515,7 @@ def test_stale_gc_plan_does_nothing_at_all(vcs_root: Path) -> None:
             "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
         ),
     )
-    plan = repo.plan_gc(prune_bookmarks=True)
+    plan = repo.plan_gc(prune_bookmarks=True, release_foreign=True)
     ops = [a.op for a in plan.actions if a.op in ("unpin", "delete-branch")]
     assert ops == ["unpin", "delete-branch"], ops
 
@@ -549,7 +552,7 @@ def test_gc_keeps_a_branch_that_moved_after_the_preflight(
             "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
         ),
     )
-    plan = repo.plan_gc(prune_bookmarks=True)
+    plan = repo.plan_gc(prune_bookmarks=True, release_foreign=True)
     assert [a.op for a in plan.actions if a.op in ("unpin", "delete-branch")] == [
         "unpin",
         "delete-branch",
@@ -676,7 +679,8 @@ def test_gc_plan_sees_a_commit_that_lands_during_its_history_walk(
     repo = Repo.init(vcs_root)
     system = _mem_object(repo)
     store = default_store()
-    repo.commit("baseline")
+    baseline = repo.commit("baseline").vcs_commit
+    assert baseline is not None
     backend = repo.backend_for("memory")
     m = repo.objects["db"]
     orphan_state = {"snapshot_id": store.write(system, "main", {"v": 9})}
@@ -701,13 +705,16 @@ def test_gc_plan_sees_a_commit_that_lands_during_its_history_walk(
     def walk_with_a_commit_landing() -> Iterator[tuple[str, dict[str, ObjectManifest]]]:
         entries = list(real_walk())  # what the walk sees...
         # ...and, while it is still going, the other checkout commits a
-        # manifest naming the orphan.
+        # manifest naming the orphan (on a branch, so git keeps it reachable)
+        # and moves on, so only history names it.
+        other.vcs.new_bookmark("theirs", None)
         _someone_else_commits(other, "db", orphan_state)
         other.vcs.commit(other._vcs_paths(), "theirs names the orphan")
+        other.vcs.new(baseline)
         yield from entries
 
     monkeypatch.setattr(repo, "_iter_history_objects", walk_with_a_commit_landing)
-    plan = repo.plan_gc()
+    plan = repo.plan_gc(release_foreign=True)
     monkeypatch.undo()
     assert [a.target for a in plan.actions if a.op == "unpin"] == [orphan.ref]
     with pytest.raises(StalePlanError, match="another workspace"):
@@ -812,7 +819,7 @@ def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
             "memory", backend.identity(m.locator), orphan_state, repo.config.dataset_id
         ),
     )
-    plan = repo.plan_gc()
+    plan = repo.plan_gc(release_foreign=True)
     assert [a.target for a in plan.actions if a.op == "unpin"] == [orphan.ref]
 
     # Meanwhile another checkout commits a manifest naming that state.
@@ -832,7 +839,8 @@ def test_saved_gc_plan_sees_commits_made_in_other_workspaces(
         repo.apply_gc(plan)
     assert orphan.ref in store.system(system).tags
     # A fresh plan sees the reference and keeps the pin.
-    assert not [a for a in repo.plan_gc().actions if a.op == "unpin"]
+    fresh = repo.plan_gc(release_foreign=True)
+    assert not [a for a in fresh.actions if a.op in ("unpin", "keep-pin")]
 
 
 def test_commit_and_gc_serialize_across_checkouts_of_one_repository(
@@ -2386,7 +2394,7 @@ def test_undo_gc_recreates_neither_branches_nor_pins(vcs_root: Path) -> None:
     stray = f"tether.ws.{repo.config.dataset_id}.deadbeef.db-000000"
     store.system(system).branches[stray] = sid  # equals base head: deletable
 
-    repo.gc(dry_run=False, prune_bookmarks=True)
+    repo.gc(dry_run=False, prune_bookmarks=True, release_foreign=True)
     assert (
         orphan not in backend.list_pins(locator)
         and stray not in store.system(system).branches

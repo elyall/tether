@@ -69,10 +69,13 @@ from tether.oplog import (
     OpEntry,
     TouchedStore,
     append_op,
+    append_pinned,
     append_touched,
     mark_done,
     mark_progress,
+    pinned_path,
     read_ops,
+    read_pinned,
 )
 from tether.plan import Plan, Precondition
 from tether.repo._reports import (
@@ -690,6 +693,64 @@ class RepoCore:
                 continue
             with contextlib.suppress(Exception):
                 yield (root / rel), read_workspace(root / rel)
+
+    def _known_pins(self) -> set[str]:
+        """Pin ids this clone created, from `tether-pinned.jsonl` beside the
+        repository lock (see `tether.oplog.PINNED_FILENAME`). The index is
+        seeded on first use from every live checkout's op log -- what each
+        `commit` and `repair` recorded, and the `pin` progress of ones that
+        never finished -- so a clone from before the index knows its pins."""
+        self._seed_pinned()
+        return read_pinned(self.vcs.shared_dir(), self.config.dataset_id)
+
+    def _seed_pinned(self) -> None:
+        shared = self.vcs.shared_dir()
+        if pinned_path(shared).is_file():
+            return
+        found: list[tuple[str, str, str]] = []
+        for root, _ws in self._iter_live_workspaces():
+            for op in read_ops(root):
+                kinds = {
+                    str(a.get("key", "")): str(a.get("kind", ""))
+                    for a in (op.plan or {}).get("actions") or []
+                    if a.get("op") in ("pin", "repin")
+                }
+                recorded = (
+                    op.result.get("pinned")
+                    if op.command in ("commit", "pull")
+                    else op.result.get("repinned")
+                    if op.command == "repair"
+                    else None
+                ) or {}
+                for key, pid in recorded.items():
+                    if pid:
+                        found.append((str(pid), kinds.get(str(key), ""), str(key)))
+                for record in op.progress:
+                    if record.get("action") in ("pin", "repin"):
+                        pid = pin_id_of_ref(
+                            str(record.get("ref") or record.get("target") or "")
+                        )
+                        key = str(record.get("key", ""))
+                        if pid:
+                            found.append((pid, kinds.get(key, ""), key))
+        append_pinned(shared, self.config.dataset_id, found)
+
+    def _note_pinned(self, key: str, kind: str, pin_id: str) -> None:
+        """Record a pin this clone just created (see `_known_pins`). Best
+        effort, like `_note_touched`: a miss makes a later `gc` keep the pin
+        as one it cannot account for, never lose data, so nothing here may
+        fail the commit or repair that called it."""
+        try:
+            self._seed_pinned()
+            append_pinned(
+                self.vcs.shared_dir(), self.config.dataset_id, [(pin_id, kind, key)]
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"could not record {key}'s pin in the pinned index: {exc}; a later "
+                "`gc` will keep it as not created by this clone",
+                stacklevel=2,
+            )
 
     def _live_checkout_manifests(self) -> Iterator[ObjectManifest]:
         """The working-tree manifests of every *other* live checkout of this

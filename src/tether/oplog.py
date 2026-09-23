@@ -23,6 +23,7 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -450,6 +451,63 @@ def read_touched(shared_dir: Path, dataset_id: str | None = None) -> list[Touche
 def remove_touched(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) -> None:
     """Forget a store (nothing of this dataset's is left in it)."""
     remove_index_entry(touched_path(shared_dir), dataset_id, identity)
+
+
+PINNED_FILENAME = "tether-pinned.jsonl"
+"""Repository-wide index of the pins this clone *created*, beside
+`tether-touched.jsonl`: one record per pin id, appended by `commit` and
+`repair` when the backend reports the ref as new. Pins are content-addressed
+and a store is shared by every clone of the dataset, so a pin no manifest in
+*this* history names may still be another clone's, made by commits not
+fetched yet. `gc` releases only the pins it finds here; the rest it keeps and
+lists (`keep-pin`) unless told otherwise (`--release-foreign`). Seeded once
+from every live checkout's op log, so pins made before the index existed are
+accounted for.
+"""
+
+
+def pinned_path(shared_dir: Path) -> Path:
+    return shared_dir / PINNED_FILENAME
+
+
+def read_pinned(shared_dir: Path, dataset_id: str) -> set[str]:
+    """The pin ids on record for `dataset_id`."""
+    return {
+        str(d["pin_id"])
+        for d in read_jsonl(pinned_path(shared_dir))
+        if d.get("dataset_id") == dataset_id and d.get("pin_id")
+    }
+
+
+def append_pinned(
+    shared_dir: Path, dataset_id: str, pins: Iterable[tuple[str, str, str]]
+) -> None:
+    """Record `(pin id, kind, key)` triples this clone just created; a set, so
+    an id already on record is not written again. Creates the index when it
+    is missing, even for no pins: its presence says it has been seeded."""
+    path = pinned_path(shared_dir)
+    with _APPEND_LOCK:
+        known = {
+            d.get("pin_id")
+            for d in read_jsonl(path)
+            if d.get("dataset_id") == dataset_id
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        for pin_id, kind, key in pins:
+            if pin_id in known:
+                continue
+            known.add(pin_id)
+            append_index_entry(
+                path,
+                {
+                    "dataset_id": dataset_id,
+                    "pin_id": pin_id,
+                    "kind": kind,
+                    "key": key,
+                    "at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
+            )
 
 
 def _append_line(root: Path, obj: dict[str, Any]) -> None:

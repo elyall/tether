@@ -517,12 +517,14 @@ class UndoOps(RepoCore):
                 try:
                     if a.op == "repin":
                         backend = self.backend_for(a.kind)
-                        backend.pin(
+                        pin = backend.pin(
                             dict(a.params["locator"]),
                             dict(a.params["state"]),
                             str(a.params["pin_id"]),
                         )
                         self._note_touched(a.key, a.kind, dict(a.params["locator"]))
+                        if pin.created:
+                            self._note_pinned(a.key, a.kind, pin.id)
                         report.repinned[a.key] = str(a.params["pin_id"])
                         self._progress(op, "repin", key=a.key, target=a.target)
                     elif a.op == "refork":

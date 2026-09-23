@@ -179,6 +179,9 @@ class GcReport:
 
     unpinned: dict[str, list[str]] = field(default_factory=dict)
     """Backend kind -> pin ids released (or that would be, in a dry run)."""
+    kept_pins: dict[str, list[str]] = field(default_factory=dict)
+    """Backend kind -> unreferenced pin ids this clone did not create and so
+    left alone (`keep-pin`; `gc --release-foreign` releases them)."""
     deleted_working_refs: dict[str, list[str]] = field(default_factory=dict)
     """Object key -> native working branches deleted (`--prune-bookmarks`)."""
     kept_working_refs: dict[str, list[str]] = field(default_factory=dict)

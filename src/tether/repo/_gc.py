@@ -102,6 +102,7 @@ class GcOps(RepoCore):
         force_prune: bool = False,
         delete_stores: bool = False,
         stores: Sequence[tuple[str, dict]] = (),
+        release_foreign: bool = False,
         scope: GcScope | None = None,
     ) -> Plan:
         """Compute what `gc` would release without writing anywhere.
@@ -111,6 +112,12 @@ class GcOps(RepoCore):
         `forget-working-ref` for this workspace's refs whose object was
         removed (the native branch is left alone), and `delete-listing` for
         `.tether/listings/` files no manifest names.
+
+        An unreferenced pin is planned for `unpin` only when this clone
+        created it (`tether-pinned.jsonl`, see `tether.oplog`). Any other is
+        kept and listed as `keep-pin`: pins are content-addressed and the
+        store is shared, so it may be another clone's, made by commits this
+        history has not fetched. `release_foreign` releases those too.
 
         With `prune_bookmarks`, every `tether.ws.*` branch in each system is
         considered: branches of bookmarks that no longer exist in the VCS and
@@ -220,6 +227,7 @@ class GcOps(RepoCore):
                 ),
                 "delete_stores": delete_stores or bool(stores),
                 "stores": [[k, dict(loc)] for k, loc in stores],
+                "release_foreign": release_foreign,
                 "manifest_hash": self.current_manifest_hash(),
                 "vcs_head": vcs_head,
                 # Every visible commit, not just this checkout's: a bookmark
@@ -252,6 +260,7 @@ class GcOps(RepoCore):
         )
 
         # Unpin native refs not referenced by any manifest.
+        known = self._known_pins()
         checked_systems: set[str] = set()
         for m in history_manifests:
             backend = self.backend_for(m.kind)
@@ -278,13 +287,28 @@ class GcOps(RepoCore):
                     "kept (see `tether ops`)"
                 )
             for pid in sorted(mine - keep - running):
+                if pid not in known and not release_foreign:
+                    plan.actions.append(
+                        Action(
+                            "keep-pin",
+                            m.key,
+                            m.kind,
+                            target=ref_for_pin(pid),
+                            detail="no manifest in history references it; not "
+                            "created by this clone -- another clone's commits may "
+                            "name it (fetch them, or --release-foreign)",
+                            params={"locator": m.locator, "pin_id": pid},
+                        )
+                    )
+                    continue
                 plan.actions.append(
                     Action(
                         "unpin",
                         m.key,
                         m.kind,
                         target=ref_for_pin(pid),
-                        detail="no manifest in history references it",
+                        detail="no manifest in history references it"
+                        + ("" if pid in known else "; not created by this clone"),
                         params={"locator": m.locator, "pin_id": pid},
                     )
                 )
@@ -624,6 +648,10 @@ class GcOps(RepoCore):
                         self._progress(op, "delete-branch", key=a.key, target=a.target)
                     elif a.op == "keep-branch":
                         report.kept_working_refs.setdefault(a.key, []).append(a.target)
+                    elif a.op == "keep-pin":
+                        report.kept_pins.setdefault(a.kind, []).append(
+                            str(a.params["pin_id"])
+                        )
                     elif a.op == "delete-listing":
                         (listings_dir(self.root) / a.target).unlink(missing_ok=True)
                         report.deleted_listings.append(a.target)
@@ -671,6 +699,7 @@ class GcOps(RepoCore):
         force_prune: bool = False,
         delete_stores: bool = False,
         stores: Sequence[tuple[str, dict]] = (),
+        release_foreign: bool = False,
     ) -> GcReport:
         """Release native pins that no manifest in VCS history references.
 
@@ -693,6 +722,8 @@ class GcOps(RepoCore):
                 nothing references any more (see `plan_gc`); off by default.
             stores: Created stores to consider by `(kind, locator)` even when
                 this clone's index does not have them (implies `delete_stores`).
+            release_foreign: Also release unreferenced pins this clone did not
+                create (kept and listed as `keep-pin` by default; see `plan_gc`).
         """
         # Plan and apply under one lock: planning sees the state the lock
         # refreshed, and nothing in this checkout moves in between.
@@ -703,12 +734,17 @@ class GcOps(RepoCore):
                 force_prune=force_prune,
                 delete_stores=delete_stores,
                 stores=stores,
+                release_foreign=release_foreign,
             )
             if dry_run:
                 report = GcReport(dry_run=True, plan=plan)
                 for a in plan.actions:
                     if a.op == "unpin":
                         report.unpinned.setdefault(a.kind, []).append(
+                            str(a.params["pin_id"])
+                        )
+                    elif a.op == "keep-pin":
+                        report.kept_pins.setdefault(a.kind, []).append(
                             str(a.params["pin_id"])
                         )
                     elif a.op == "forget-working-ref":

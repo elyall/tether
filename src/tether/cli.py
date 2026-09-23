@@ -1567,6 +1567,13 @@ def gc(
         "(the owner marker in the store must name this dataset); implies "
         "--delete-stores.",
     ),
+    release_foreign: bool = typer.Option(
+        False,
+        "--release-foreign",
+        help="Also release unreferenced pins this clone did not create. By default "
+        "they are kept and listed (`keep-pin`): another clone's commits, not "
+        "fetched yet, may name them.",
+    ),
     plan_out: Path | None = typer.Option(
         None, "--plan", help="Write the plan to FILE (implies --dry-run)."
     ),
@@ -1577,6 +1584,8 @@ def gc(
 ) -> None:
     """Release native pins that no manifest in VCS history references.
 
+    Only pins this clone created are released; any other unreferenced pin is
+    kept and listed as `keep-pin` (`--release-foreign` releases those too).
     Also forgets this workspace's refs for removed objects and deletes
     unreferenced listings. `--prune-bookmarks` evaluates stray `tether.ws.*`
     branches -- those of bookmarks that no longer exist (bookmarks the VCS has
@@ -1586,7 +1595,8 @@ def gc(
     too. `--delete-stores` also reclaims stores this dataset created
     (`add --create`) that nothing references any more, once only tether's own
     refs remain in them (`delete-store`). Dry-run by default: pass
-    `--no-dry-run` (or `--from-plan`) to release.
+    `--no-dry-run` (or `--from-plan`) to release. Refused while jj reports a
+    conflicted bookmark or commit.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     if force_prune and not prune_bookmarks:
@@ -1614,6 +1624,7 @@ def gc(
                 force_prune=force_prune,
                 delete_stores=delete_stores,
                 stores=claimed,
+                release_foreign=release_foreign,
             )
             if dry_run is not False or plan_out is not None:
                 _save_plan(plan, plan_out)
@@ -1627,6 +1638,7 @@ def gc(
             {
                 "dry_run": report.dry_run,
                 "unpinned": report.unpinned,
+                "kept_pins": report.kept_pins,
                 "deleted_working_refs": report.deleted_working_refs,
                 "kept_working_refs": report.kept_working_refs,
                 "forgotten_working_refs": report.forgotten_working_refs,
@@ -1647,6 +1659,16 @@ def _print_gc_report(report: GcReport) -> None:
     for kind, ids in report.unpinned.items():
         for pid in ids:
             typer.echo(f"  {kind}: {pid}")
+    foreign = sum(len(v) for v in report.kept_pins.values())
+    if foreign:
+        typer.secho(
+            f"kept {foreign} unreferenced pin(s) this clone did not create "
+            "(--release-foreign releases)",
+            fg=typer.colors.YELLOW,
+        )
+        for kind, ids in report.kept_pins.items():
+            for pid in ids:
+                typer.echo(f"  {kind}: {pid}")
     branches = sum(len(v) for v in report.deleted_working_refs.values())
     if branches:
         typer.echo(f"deleted {branches} working branch(es)")

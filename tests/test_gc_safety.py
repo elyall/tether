@@ -159,6 +159,106 @@ def test_prune_keeps_a_branch_a_shared_checkout_works_on(
         assert store.read(system, ref) == {"base": 1, "b": "next write"}
 
 
+def _clone(vcs_root: Path, other_root: Path, kind: str) -> None:
+    if kind == "jj":
+        subprocess.run(
+            ["jj", "git", "clone", "--colocate", str(vcs_root), str(other_root)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["jj", "bookmark", "track", "main@origin"],
+            cwd=other_root,
+            check=True,
+            capture_output=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "clone", "-q", str(vcs_root), str(other_root)],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_gc_keeps_pins_this_clone_did_not_create(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """r14: clone B commits on its own bookmark and has not pushed. Its pin is
+    in the shared store and in no commit A has, so A's plain gc released it
+    with 'no manifest in history references it'. Now A keeps it as one it
+    did not create; `--release-foreign` is the opt-in."""
+    from tether.oplog import pinned_path, read_pinned
+
+    a, system = _baseline(vcs_root)
+    own = a.objects["db"].pin
+    assert own is not None
+    assert read_pinned(a.vcs.shared_dir(), a.config.dataset_id) == {own.id}
+    _clone(vcs_root, tmp_path / "clone-b", a.vcs.kind)
+    b = Repo.find(tmp_path / "clone-b")
+    assert b.config.dataset_id == a.config.dataset_id
+    b.new(bookmark="bwork")
+    _write(b, {"x": "B"})
+    theirs = b.commit("B's work, not pushed").pinned["db"]
+    assert theirs is not None
+    # B's index is its own; A's does not learn of B's pin.
+    assert theirs.id in read_pinned(b.vcs.shared_dir(), b.config.dataset_id)
+    assert theirs.id not in read_pinned(a.vcs.shared_dir(), a.config.dataset_id)
+
+    a = Repo.find(vcs_root)
+    plan = a.plan_gc()
+    (kept,) = [x for x in plan.actions if x.op == "keep-pin"]
+    assert kept.target == theirs.ref and "not created by this clone" in kept.detail
+    assert not [x for x in plan.actions if x.op == "unpin"]
+    assert plan.is_empty  # informational: nothing to apply
+    report = a.gc(dry_run=False)
+    assert report.kept_pins == {"memory": [theirs.id]} and not report.unpinned
+    store = default_store().system(system)
+    assert theirs.ref in store.tags
+
+    released = a.plan_gc(release_foreign=True)
+    (unpin,) = [x for x in released.actions if x.op == "unpin"]
+    assert unpin.target == theirs.ref and "not created by this clone" in unpin.detail
+    assert released.context["release_foreign"] is True
+    a.apply_gc(released)
+    assert theirs.ref not in store.tags
+    assert pinned_path(a.vcs.shared_dir()).is_file()
+
+
+def test_pinned_index_is_seeded_from_the_op_logs(vcs_root: Path) -> None:
+    """A clone from before the index: its own pins are what its `commit`
+    entries recorded, so the first gc knows them and releases the
+    unreferenced ones, and keeps a pin no op log explains."""
+    from tether.manifest import compute_pin_id
+    from tether.oplog import pinned_path, read_pinned
+
+    repo, system = _baseline(vcs_root)
+    repo.new(bookmark="probe")
+    _write(repo, {"x": "probe"})
+    result = repo.commit("probe write")
+    assert result.vcs_commit is not None and result.pinned["db"] is not None
+    mine = result.pinned["db"]
+    pinned_path(repo.vcs.shared_dir()).unlink()  # as a 0.1.0b4 clone has none
+    # A pin nothing in this clone made: dropped into the store by hand.
+    backend = repo.backend_for("memory")
+    m = repo.objects["db"]
+    stray_state = {"snapshot_id": default_store().write(system, "main", {"v": 9})}
+    stray = backend.pin(
+        m.locator,
+        stray_state,
+        compute_pin_id(
+            "memory", backend.identity(m.locator), stray_state, repo.config.dataset_id
+        ),
+    )
+    repo.abandon([result.vcs_commit])  # `mine` is unreferenced now, like `stray`
+
+    repo = Repo.find(vcs_root)
+    plan = repo.plan_gc()
+    assert read_pinned(repo.vcs.shared_dir(), repo.config.dataset_id) >= {mine.id}
+    assert stray.id not in read_pinned(repo.vcs.shared_dir(), repo.config.dataset_id)
+    verdicts = {a.target: a.op for a in plan.actions if a.op in ("unpin", "keep-pin")}
+    assert verdicts == {mine.ref: "unpin", stray.ref: "keep-pin"}
+
+
 def test_gc_and_drop_refuse_while_jj_reports_a_conflicted_commit(
     vcs_root: Path,
 ) -> None:

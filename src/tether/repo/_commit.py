@@ -296,6 +296,7 @@ class CommitOps(RepoCore):
                         # the commit (or the sibling key) that made it.
                         if pin.created:
                             created_pins.append((a.key, pin))
+                            self._note_pinned(a.key, m.kind, pin.id)
                             self._progress(op, "pin", key=a.key, ref=pin.ref)
                         outcomes[a.key] = (state, pin, True)
                         result.pinned[a.key] = pin

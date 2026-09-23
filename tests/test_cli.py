@@ -580,7 +580,14 @@ def test_cli_undo(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     stray = f"tether.ws.{ds}.deadbeef.db-000000"
     store.system(system).branches[stray] = store.system(system).branches["main"]
-    r = runner.invoke(app, ["gc", "--no-dry-run", "--prune-bookmarks"])
+    # The pin was made by hand, not by a commit of this clone: plain gc keeps
+    # it (`keep-pin`); `--release-foreign` is the opt-in.
+    r = runner.invoke(app, ["gc", "--prune-bookmarks"])
+    assert r.exit_code == 0, r.output
+    assert "keep-pin" in r.output and "not created by this clone" in r.output
+    r = runner.invoke(
+        app, ["gc", "--no-dry-run", "--prune-bookmarks", "--release-foreign"]
+    )
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["undo"])
     assert r.exit_code == 2, r.output

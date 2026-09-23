@@ -96,9 +96,9 @@ class Action:
 
     op: str
     """`pin`, `record`, `fork`, `defer-fork`, `reuse`, `trunk`, `refuse`, `unpin`,
-    `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`,
-    `fast-forward`, `merge`, `add`, `update`, `remove`, `upsert`, `repin`,
-    `refork`, or `vcs-commit`."""
+    `keep-pin`, `delete-branch`, `keep-branch`, `forget-working-ref`,
+    `delete-listing`, `fast-forward`, `merge`, `add`, `update`, `remove`,
+    `upsert`, `repin`, `refork`, or `vcs-commit`."""
     key: str = ""
     """Object key the action concerns (empty for repository-level steps)."""
     kind: str = ""
@@ -155,6 +155,7 @@ class Plan:
         {
             "trunk",
             "keep-branch",
+            "keep-pin",
             "keep-store",
             "defer-fork",
             "refuse",

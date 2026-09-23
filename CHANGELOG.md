@@ -23,8 +23,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Object keys may not contain `\` or a drive letter, and are checked when a
   manifest is read: on Windows such a key wrote outside `.tether/objects/`.
 
+### Added
+
+- `gc --release-foreign` (`Repo.gc(release_foreign=)`): also release
+  unreferenced pins this clone did not create.
+
 ### Changed
 
+- `gc` and `drop` release only pins this clone created, recorded in
+  `tether-pinned.jsonl` beside the repository lock (seeded from the op logs on
+  first use). Any other unreferenced pin is kept and listed as `keep-pin` --
+  it may be another clone's, made by commits not fetched yet -- until it is
+  fetched or `--release-foreign` is passed. `keep-pin` is informational, like
+  `keep-branch`; `GcReport.kept_pins` and `gc --json` `kept_pins` list them.
 - jj 0.43 is the minimum version; tether checks once and refuses an older one.
 - Every jj call gets `--color=never --no-pager` and overrides for `ui.color`,
   `ui.paginate`, `snapshot.auto-track` and `snapshot.max-new-file-size`;

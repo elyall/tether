@@ -292,8 +292,8 @@ class _StoreContext:
     """Slugs of every bookmark this clone has had (live ones and every `new`
     any live checkout logged)."""
     known_pins: set[str]
-    """Pin ids some `commit` or `repair` of a live checkout of this clone
-    recorded: the pins this clone can account for."""
+    """Pin ids this clone created (`tether-pinned.jsonl`, the index `gc`
+    itself releases by): the pins this clone can account for."""
 
 
 @dataclass
@@ -339,26 +339,17 @@ def _store_context(
                 ident(m.kind, dict(repo.backend_for(m.kind).identity(m.locator)))
             )
     keep_slugs = {bookmark_slug(b) for b in keep_bookmarks}
-    # What this clone can account for, from every live checkout's op log:
-    # the bookmarks any `new` made, and the pins any `commit` or `repair`
-    # recorded. Refs of this dataset that no log explains may be another
+    # What this clone can account for: the bookmarks any `new` in a live
+    # checkout's op log made, and the pins the clone's index says it
+    # created. Refs of this dataset that neither explains may be another
     # actor's -- one who fetched the bookmark and works in the store with
     # commits this clone does not have.
     known_slugs = set(keep_slugs)
-    known_pins: set[str] = set()
     for root, _ws in repo._iter_live_workspaces():
         for op in read_ops(root):
             if op.command == "new" and op.result.get("bookmark"):
                 known_slugs.add(bookmark_slug(str(op.result["bookmark"])))
-            elif op.command == "commit":
-                known_pins.update(
-                    str(p) for p in (op.result.get("pinned") or {}).values() if p
-                )
-            elif op.command == "repair":
-                known_pins.update(
-                    str(p) for p in (op.result.get("repinned") or {}).values() if p
-                )
-    return _StoreContext(in_use, keep_slugs, known_slugs, known_pins)
+    return _StoreContext(in_use, keep_slugs, known_slugs, repo._known_pins())
 
 
 def _plan_store_refs(
