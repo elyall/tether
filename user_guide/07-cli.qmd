@@ -415,7 +415,7 @@ on the two releases cannot take turns.
 The alpha upgrade path lives in `tether.upgrade` and ships with the 0.1.0
 betas only. The first non-pre-release drops it: a dataset at an alpha version
 then fails at open with a message naming the last beta. To bring an alpha
-dataset forward after that, `pip install "tether-vcs==0.1.0b3"` (or the
+dataset forward after that, `pip install "tether-vcs==0.1.0b4"` (or the
 newest beta), run `tether upgrade` there, and reinstall the release. Datasets
 already at the current version are unaffected.
 :::

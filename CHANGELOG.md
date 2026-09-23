@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0b4] - 2026-09-23
+
 ### Security
 
 - `git`: a manifest's `path` must be absolute and outside the checkout; git
@@ -801,7 +803,8 @@ without a pre-release marker and has been removed; its code is this release.
   once, concurrently (~280x faster on a 200-commit repo); local directory
   fingerprints are ~7x cheaper per file.
 
-[Unreleased]: https://github.com/elyall/tether/compare/v0.1.0b3...HEAD
+[Unreleased]: https://github.com/elyall/tether/compare/v0.1.0b4...HEAD
+[0.1.0b4]: https://github.com/elyall/tether/compare/v0.1.0b3...v0.1.0b4
 [0.1.0b3]: https://github.com/elyall/tether/compare/v0.1.0b2...v0.1.0b3
 [0.1.0b2]: https://github.com/elyall/tether/compare/v0.1.0b1...v0.1.0b2
 [0.1.0b1]: https://github.com/elyall/tether/compare/v0.1.0a10...v0.1.0b1
