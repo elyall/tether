@@ -83,9 +83,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   settings, whatever the user's config says; colour forced on, `all()`
   aliased or auto-tracking off had corrupted commit ids, made empty commits,
   or shrunk the history `gc` walks.
-- `file`, `icechunk`, `lance`, `delta`: `/p` and `file:///p` are one store to
-  pin ids, listings and `gc`. No migration: pin ids of objects registered as
-  `file://` change.
+- `file`, `icechunk`, `lance`, `delta`: every spelling of a local path --
+  `/p`, `/p/`, `file:///p`, a path through a symlinked parent such as macOS's
+  `/tmp` -- is one store to pin ids, listings and `gc`. No migration: pin ids
+  of objects registered under another spelling change.
 
 - `neon`: pins are unprotected unless `protected_pins = true`; Free has no
   protected branches, and paid plans allow a few.
@@ -166,6 +167,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `icechunk`: a `profile` or `role_arn` entry hands Icechunk a refresh
   callback, so a handle held past the role's expiry keeps writing; only new
   opens used to get fresh keys.
+- `gc` never releases a pin some manifest names, whichever spelling of the
+  store that manifest uses; one store named two ways lost pins `HEAD`
+  referenced. `gc --delete-stores` also matches an indexed store by the
+  identity its locator has now, so a created store a manifest still names is
+  no longer deleted.
 
 ### Experimental
 

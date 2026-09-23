@@ -165,12 +165,15 @@ class GcOps(RepoCore):
         excluded = set(scope.excluded_commits)
         gone = set(scope.gone_bookmarks)
         dropped: list[ObjectManifest] = list(scope.dropped_manifests)
-        referenced: dict[str, set[str]] = {}
+        # Pin ids any manifest names, whatever store it names them in: pins
+        # are listed per namespace, but one store spelled two ways (a b3
+        # manifest, a hand edit, a retargeted symlink) is listed under each,
+        # and each spelling's pins are the other's references too.
+        referenced: set[str] = set()
 
         def key_for(backend: ObjectBackend, locator: dict) -> str:
             # Pins are listed per *namespace* (a Neon project, an Iceberg
-            # table), which may hold several objects; the references that
-            # keep a pin alive must be collected over the whole namespace.
+            # table), which may hold several objects.
             return f"{backend.kind}|{backend.ref_namespace(locator)}"
 
         # The digest is taken *before* the walk. A commit that lands after it
@@ -192,17 +195,14 @@ class GcOps(RepoCore):
                 if m.pin is None:
                     continue
                 backend = self.backend_for(m.kind)
-                referenced.setdefault(key_for(backend, m.locator), set()).add(m.pin.id)
+                referenced.add(m.pin.id)
                 sig = f"{m.kind}:{m.pin.id}:{key_for(backend, m.locator)}"
                 if sig not in seen:
                     seen.add(sig)
                     history_manifests.append(m)
         # Working trees: this checkout's and every other live one's.
         working = [*self.objects.values(), *self._live_checkout_manifests()]
-        for m in working:
-            if m.pin is not None:
-                backend = self.backend_for(m.kind)
-                referenced.setdefault(key_for(backend, m.locator), set()).add(m.pin.id)
+        referenced.update(m.pin.id for m in working if m.pin is not None)
         inflight = self._inflight_pins()
 
         plan = Plan(
@@ -270,6 +270,7 @@ class GcOps(RepoCore):
         # Unpin native refs not referenced by any manifest.
         known = self._known_pins()
         checked_systems: set[str] = set()
+        planned: set[tuple[str, str]] = set()
         for m in history_manifests:
             backend = self.backend_for(m.kind)
             if Capability.PIN not in backend.capabilities:
@@ -287,14 +288,16 @@ class GcOps(RepoCore):
                 plan.notes.append(
                     f"{m.key}: {foreign} pin(s) of other datasets left alone"
                 )
-            keep = referenced.get(sys_key, set())
-            running = mine & inflight - keep
+            running = mine & inflight - referenced
             if running:
                 plan.notes.append(
                     f"{m.key}: {len(running)} pin(s) of unfinished operation(s) "
                     "kept (see `tether ops`)"
                 )
-            for pid in sorted(mine - keep - running):
+            for pid in sorted(mine - referenced - running):
+                if (m.kind, pid) in planned:
+                    continue  # the same store under another namespace
+                planned.add((m.kind, pid))
                 if pid not in known and not release_foreign:
                     plan.actions.append(
                         Action(

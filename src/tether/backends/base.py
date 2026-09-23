@@ -13,6 +13,7 @@ stateless coordinators over user-supplied resources.
 from __future__ import annotations
 
 import functools
+import os
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
@@ -1053,12 +1054,17 @@ def check_committed_config(
 
 
 def local_path(uri: str) -> str | None:
-    """The filesystem path a locator string names, or `None` for a remote URL.
+    """The filesystem path a locator string names, in one spelling per
+    directory, or `None` for a remote URL.
 
-    A bare path comes back as written: `#` and `?` are path characters there,
-    not URL syntax, so it is never run through a URL parser (which cut
-    `/data/run#1` to `/data/run`). `file:///p` and `file://localhost/p` are
-    `/p`. Anything with another scheme -- `s3://`, `ducklake:` -- is not local.
+    `file:///p` and `file://localhost/p` are `/p`. An absolute path is
+    resolved -- symlinks followed, `.`, `..`, doubled and trailing slashes
+    gone -- so `/p`, `/p/` and `/link/p` through a symlinked parent (macOS's
+    `/tmp` is `/private/tmp`) are one path; a relative one (only a
+    hand-written manifest has it) is normalized lexically. A bare path is
+    never run through a URL parser: `#` and `?` are path characters there
+    (a parser cut `/data/run#1` to `/data/run`). Anything with another scheme
+    -- `s3://`, `ducklake:` -- is not local.
     """
     from urllib.parse import urlparse
 
@@ -1069,16 +1075,20 @@ def local_path(uri: str) -> str | None:
             if host not in ("", "localhost") or not sep:
                 return None
             rest = f"/{path}"
-        return rest or None
-    if urlparse(uri).scheme and not Path(uri).is_absolute():
+        if not rest:
+            return None
+        uri = rest
+    elif urlparse(uri).scheme and not Path(uri).is_absolute():
         return None
-    return uri
+    if not os.path.isabs(uri):
+        return os.path.normpath(uri) if uri else uri
+    return os.path.realpath(uri)
 
 
 def canonical_uri(uri: str) -> str:
     """One spelling per store for identities and ref namespaces: a local path
-    in path form (`file:///p` and `/p` are the same directory, and must be
-    the same object to pin ids and to `gc`), any other URL as written."""
+    as :func:`local_path` resolves it (every spelling of one directory must
+    be one object to pin ids, listings and `gc`), any other URL as written."""
     path = local_path(uri)
     return uri if path is None else path
 

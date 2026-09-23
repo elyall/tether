@@ -295,6 +295,10 @@ class _StoreContext:
     known_pins: set[str]
     """Pin ids this clone created (`tether-pinned.jsonl`, the index `gc`
     itself releases by): the pins this clone can account for."""
+    referenced_pins: set[str] = field(default_factory=set)
+    """Pin ids some manifest names (or an unfinished operation made), in
+    whichever store: never released, even in a store `in_use` misses under
+    another spelling of it."""
 
 
 @dataclass
@@ -311,6 +315,20 @@ class _StoreRefs:
     stranger_pins: list[str] = field(default_factory=list)
     foreign_pins: int = 0
     foreign_refs: int = 0
+
+
+def _in_use(
+    repo: Repo, ctx: _StoreContext, kind: str, identity: dict, locator: dict
+) -> bool:
+    """Whether a manifest names an indexed store: by the identity recorded
+    when it was indexed, or by the one its locator has now. Identities have
+    been normalized since stores were indexed (`file://` folded into paths,
+    then symlinks and trailing slashes), and an index is never committed."""
+    tags = {f"{kind}|{canonical_bytes(identity).decode()}"}
+    with contextlib.suppress(TetherError):
+        now = dict(repo.backend_for(kind).identity(locator))
+        tags.add(f"{kind}|{canonical_bytes(now).decode()}")
+    return bool(tags & ctx.in_use)
 
 
 def _where(locator: dict) -> str:
@@ -330,6 +348,7 @@ def _store_context(
         return f"{kind}|{canonical_bytes(identity).decode()}"
 
     in_use: set[str] = set()
+    referenced = {m.pin.id for m in manifests if m.pin is not None}
     for m in manifests:
         in_use.add(ident(m.kind, dict(repo.backend_for(m.kind).identity(m.locator))))
     for root, _ws in repo._iter_live_workspaces():
@@ -339,6 +358,9 @@ def _store_context(
             in_use.add(
                 ident(m.kind, dict(repo.backend_for(m.kind).identity(m.locator)))
             )
+            if m.pin is not None:
+                referenced.add(m.pin.id)
+    referenced |= repo._inflight_pins()
     keep_slugs = {bookmark_slug(b) for b in keep_bookmarks}
     # What this clone can account for: the bookmarks any `new` in a live
     # checkout's op log made, and the pins the clone's index says it
@@ -350,7 +372,9 @@ def _store_context(
         for op in read_ops(root):
             if op.command == "new" and op.result.get("bookmark"):
                 known_slugs.add(bookmark_slug(str(op.result["bookmark"])))
-    return _StoreContext(in_use, keep_slugs, known_slugs, repo._known_pins())
+    return _StoreContext(
+        in_use, keep_slugs, known_slugs, repo._known_pins(), referenced
+    )
 
 
 def _plan_store_refs(
@@ -401,8 +425,11 @@ def _plan_store_refs(
                 out.ours.append(ref)
     if Capability.PIN in eff:
         out.pins = set(backend.list_pins(locator))
-        mine = sorted(p for p in out.pins if pin_dataset(p) == ds)
-        out.foreign_pins = len(out.pins) - len(mine)
+        ours = sorted(p for p in out.pins if pin_dataset(p) == ds)
+        out.foreign_pins = len(out.pins) - len(ours)
+        # A pin a manifest names stays, and so does the store holding it
+        # (`is_ref_empty` sees it): the store is in use under another spelling.
+        mine = [p for p in ours if p not in ctx.referenced_pins]
         out.our_pins = [p for p in mine if p in ctx.known_pins]
         out.stranger_pins = [p for p in mine if p not in ctx.known_pins]
     if (out.strangers or out.stranger_pins) and not force:
@@ -456,7 +483,7 @@ def _plan_store_refs(
                 content = repo._content_of(kind, head)
                 if base_head is None:
                     base_head = repo._content(kind, backend.fingerprint(locator, None))
-                if compute_pin_id(kind, identity, content, ds) in out.our_pins:
+                if compute_pin_id(kind, identity, content, ds) in out.pins:
                     safe = "head is pinned"
                 elif content == base_head:
                     safe = "head equals the base branch"
@@ -506,7 +533,7 @@ def _plan_touched_stores(
     """
     for e in touched_stores(repo):
         tag = f"{e.kind}|{canonical_bytes(e.identity).decode()}"
-        if tag in ctx.in_use or tag in skip:
+        if tag in skip or _in_use(repo, ctx, e.kind, e.identity, e.locator):
             continue
         locator = dict(e.locator)
         where = _where(locator)
@@ -601,7 +628,7 @@ def _plan_created_stores(
     deletions: list[tuple[CreatedStore, list[str]]] = []
     still_used = 0
     for e, indexed in entries:
-        if f"{e.kind}|{canonical_bytes(e.identity).decode()}" in ctx.in_use:
+        if _in_use(repo, ctx, e.kind, e.identity, e.locator):
             still_used += 1
             continue
         backend = repo.backend_for(e.kind)
