@@ -144,12 +144,20 @@ class UndoOps(RepoCore):
                         f"{op_id} was already undone by {target.undone_by}"
                     )
             if target.parent is not None:
+                parent = next((e for e in entries if e.id == target.parent), None)
+                if parent is not None and parent.incomplete:
+                    raise TetherError(
+                        f"{target.id} ({target.command}) is a step of "
+                        f"{self._interrupted_drop(parent)}"
+                    )
                 raise TetherError(
                     f"{target.id} ({target.command}) is a step of {target.parent} "
                     "(a drop), which cannot be undone; the VCS's own undo brings "
                     "its commits and bookmark back, then `tether repair` its branches "
                     "and pins"
                 )
+            if target.incomplete and target.command == "drop":
+                raise TetherError(f"cannot undo {self._interrupted_drop(target)}")
             if target.incomplete:
                 raise TetherError(
                     f"{target.id} ({target.command}) never finished, so what it did "
@@ -224,6 +232,31 @@ class UndoOps(RepoCore):
     def _reload(self) -> None:
         self.objects = read_objects(self.root)
         self.workspace = read_workspace(self.root)
+
+    def _interrupted_drop(self, entry: OpEntry) -> str:
+        """What a `drop` that never finished got done, and how to finish it:
+        a drop is completed, never undone by tether. Its progress says how
+        far it came; whether the bookmark is still there says which command
+        takes it the rest of the way."""
+        bookmark = str(((entry.plan or {}).get("context") or {}).get("bookmark"))
+        done = {str(r.get("action")) for r in entry.progress}
+        if "delete-bookmark" in done:
+            came = "after abandoning the bookmark's commits and deleting it"
+        elif "leave-bookmark" in done:
+            came = "after leaving the bookmark, before abandoning its commits"
+        else:
+            came = "before abandoning the bookmark's commits"
+        finish = (
+            f"`tether drop {bookmark}` again finishes it"
+            if bookmark in self.vcs.bookmarks()
+            else f"{bookmark} is gone, so `tether gc --prune-bookmarks` finishes "
+            "its store half (a branch it keeps held what only the dropped commits "
+            "pinned; `--force-prune` deletes it)"
+        )
+        return (
+            f"{entry.id} (drop {bookmark}), which was interrupted {came}: {finish}. "
+            "A drop is finished, not undone -- the VCS's own undo is the way back"
+        )
 
     def _states_around(
         self, entry: OpEntry
@@ -700,6 +733,9 @@ class UndoOps(RepoCore):
             detail="history changed since the repair plan was made; re-run the plan",
         )
         for e in self.incomplete_ops():
+            if e.command == "drop":
+                plan.notes.append(f"operation {self._interrupted_drop(e)}")
+                continue
             did = ", ".join(
                 f"{r.get('action')} {r.get('key') or r.get('target') or ''}".strip()
                 for r in e.progress

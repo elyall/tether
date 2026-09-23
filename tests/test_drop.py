@@ -8,13 +8,20 @@ import json
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer import testing as typer_testing
 
 from tether.backends.memory import MemoryBackend, default_store
 from tether.cli import app
-from tether.errors import BackendError, ConfigError, MultiObjectError, StalePlanError
+from tether.errors import (
+    BackendError,
+    ConfigError,
+    MultiObjectError,
+    StalePlanError,
+    TetherError,
+)
 from tether.handles import MemoryHandle
 from tether.plan import Plan
 from tether.repo import Repo
@@ -402,6 +409,76 @@ def test_a_drop_whose_store_half_fails_closes_its_journal_entry(
     assert "store unavailable" in str(entry.result["failed"])
     report = repo.gc(dry_run=False)
     assert report.unpinned == {"memory": [pin]}
+
+
+@pytest.mark.parametrize("crash", ["leaving", "abandoning", "sweeping"])
+def test_an_interrupted_drop_says_how_to_finish_it(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, crash: str
+) -> None:
+    """A drop killed mid-way (no exception to close its entry) stays
+    `started`, and `undo` answered with "the VCS's own undo brings its
+    commits back" (about a drop whose commits may all still be there) or "what
+    it did is not known" -- while running the drop again finishes it. Now
+    undo and repair say how far it came and what finishes it: the drop again
+    while its bookmark exists, `gc --prune-bookmarks` once it is gone."""
+    repo, system = _baseline(vcs_root)
+    commit, fork, pin = _probe(repo)
+
+    def killed(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    real_plan_gc = Repo.plan_gc
+    calls: list[None] = []
+
+    def killed_live(self: Repo, **kwargs: Any):
+        calls.append(None)
+        if len(calls) > 1:  # the first is the plan's preview
+            raise KeyboardInterrupt
+        return real_plan_gc(self, **kwargs)
+
+    with monkeypatch.context() as m:
+        if crash == "leaving":
+            m.setattr(Repo, "new", killed)
+        elif crash == "abandoning":
+            m.setattr(repo.vcs, "drop_bookmark", killed)
+        else:
+            m.setattr(Repo, "plan_gc", killed_live)
+        with pytest.raises(KeyboardInterrupt):
+            repo.drop("probe")
+    repo = Repo.find(vcs_root)
+    (entry,) = [e for e in repo.ops() if e.command == "drop"]
+    assert entry.incomplete
+    gone = crash == "sweeping"
+    finish = (
+        "probe is gone, so `tether gc --prune-bookmarks` finishes its store half"
+        if gone
+        else "`tether drop probe` again finishes it"
+    )
+    came = {
+        "leaving": "before abandoning the bookmark's commits",
+        "abandoning": "after leaving the bookmark, before abandoning its commits",
+        "sweeping": "after abandoning the bookmark's commits and deleting it",
+    }[crash]
+    for op_id in (None, entry.id):
+        with pytest.raises(TetherError) as exc:
+            repo.undo(op_id)
+        text = str(exc.value)
+        assert f"(drop probe), which was interrupted {came}: {finish}" in text
+        assert "not known" not in text and "brings its commits" not in text
+    assert any(finish in n for n in repo.plan_repair().notes)
+
+    # The advice works.
+    if gone:
+        report = repo.gc(dry_run=False, prune_bookmarks=True)
+        assert report.unpinned == {"memory": [pin]}
+        assert report.kept_working_refs == {"db": [fork]}
+        repo.gc(dry_run=False, prune_bookmarks=True, force_prune=True)
+    else:
+        repo.drop("probe")
+    assert "probe" not in repo.vcs.bookmarks()
+    assert commit not in repo.vcs.history_revs()
+    assert fork not in default_store().system(system).branches
+    assert f"tether.{pin}" not in default_store().system(system).tags
 
 
 def test_drop_plan_is_stale_when_this_checkout_moves_onto_the_bookmark(
