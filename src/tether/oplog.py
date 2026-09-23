@@ -471,13 +471,15 @@ def remove_touched(shared_dir: Path, dataset_id: str, identity: dict[str, Any]) 
 PINNED_FILENAME = "tether-pinned.jsonl"
 """Repository-wide index of the pins this clone *created*, beside
 `tether-touched.jsonl`: one record per pin id, appended by `commit` and
-`repair` when the backend reports the ref as new. Pins are content-addressed
-and a store is shared by every clone of the dataset, so a pin no manifest in
-*this* history names may still be another clone's, made by commits not
-fetched yet. `gc` releases only the pins it finds here; the rest it keeps and
-lists (`keep-pin`) unless told otherwise (`--release-foreign`). Seeded once
-from every live checkout's op log, so pins made before the index existed are
-accounted for.
+`repair` when the backend reports the ref as new, and removed when this clone
+releases the pin (so a later re-creation under the same id by another clone
+is that clone's). Pins are content-addressed and a store is shared by every
+clone of the dataset, so a pin no manifest in *this* history names may still
+be another clone's, made by commits not fetched yet. `gc` releases only the
+pins it finds here; the rest it keeps and lists (`keep-pin`) unless told
+otherwise (`--release-foreign`). Seeded once from every live checkout's op
+log, so pins made before the index existed are accounted for. It lives in
+the clone's VCS store, so a fresh clone starts without it.
 """
 
 
@@ -523,6 +525,25 @@ def append_pinned(
                     "at": datetime.now(UTC).isoformat(timespec="seconds"),
                 },
             )
+
+
+def remove_pinned(shared_dir: Path, dataset_id: str, pin_ids: Iterable[str]) -> None:
+    """Forget pins this clone released."""
+    drop = set(pin_ids)
+    path = pinned_path(shared_dir)
+    if not drop or not path.is_file():
+        return
+    with _APPEND_LOCK:
+        keep = [
+            d
+            for d in read_jsonl(path)
+            if not (d.get("dataset_id") == dataset_id and d.get("pin_id") in drop)
+        ]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            "".join(json.dumps(d, default=str) + "\n" for d in keep), encoding="utf-8"
+        )
+        tmp.replace(path)
 
 
 def _append_line(root: Path, obj: dict[str, Any]) -> None:

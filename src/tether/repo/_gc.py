@@ -650,6 +650,7 @@ class GcOps(RepoCore):
                         )
                         report.unpinned.setdefault(a.kind, []).append(pid)
                         self._progress(op, "unpin", target=a.target)
+                        self._forget_pinned(pid)
                     elif a.op == "forget-working-ref":
                         self.workspace.working_refs.pop(a.key, None)
                         forgot = True

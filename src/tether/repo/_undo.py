@@ -856,7 +856,13 @@ class UndoOps(RepoCore):
                         if pin.created:
                             self._note_pinned(a.key, a.kind, pin.id)
                         report.repinned[a.key] = str(a.params["pin_id"])
-                        self._progress(op, "repin", key=a.key, target=a.target)
+                        self._progress(
+                            op,
+                            "repin",
+                            key=a.key,
+                            target=a.target,
+                            created=pin.created,
+                        )
                     elif a.op == "refork":
                         m = self.objects[a.key]
                         ref = self._fork_from_manifest(m, a.target, expected=ABSENT)

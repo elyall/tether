@@ -331,6 +331,114 @@ def test_gc_and_verify_skip_history_of_a_backend_tether_no_longer_has(
     assert dead.ref not in default_store().system(system).tags
 
 
+def test_pinned_index_seed_claims_only_pins_this_clone_created(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """The seed read each commit's `pinned` result, which also names pins
+    that already existed -- another clone's, taken over by a `pull` -- so
+    those became this clone's to release. Only a progress record the
+    backend's `created` flag vouches for counts: a commit's `pin`, a
+    repair's `repin` with `created`; not a pre-flag `repin`, nor what a
+    rolled-back commit made."""
+    import json
+
+    from tether.oplog import ops_path, pinned_path, read_pinned
+
+    a, system = _baseline(vcs_root)
+    _clone(vcs_root, tmp_path / "clone-b", a.vcs.kind)
+    b = Repo.find(tmp_path / "clone-b")
+    _write(a, {"x": "upstream"})
+    theirs = a.commit("A writes on the trunk").pinned["db"]
+    assert theirs is not None
+    b.new("main")
+    pulled = b.pull()
+    assert pulled.pinned["db"] == theirs  # the same content-addressed pin
+    b.new(bookmark="bwork")
+    _write(b, {"x": "B"})
+    mine = b.commit("B's own").pinned["db"]
+    assert mine is not None
+    # A repair that re-created a pin B's commit had made (the ref was lost).
+    backend = b.backend_for("memory")
+    backend.unpin(b.objects["db"].locator, mine)
+    assert b.repair().repinned == {"db": mine.id}
+    # What an older tether journaled: a `repin` with no `created` flag, and a
+    # commit that rolled back.
+    stray = f"{'f' * 12}"
+    with ops_path(b.root).open("a", encoding="utf-8") as fh:
+        for line in (
+            {"id": "0" * 12, "at": "2026-01-01T00:00:00+00:00", "command": "repair"},
+            {
+                "progress": "0" * 12,
+                "action": "repin",
+                "key": "db",
+                "target": f"tether.{stray}",
+            },
+            {"id": "1" * 12, "at": "2026-01-01T00:00:01+00:00", "command": "commit"},
+            {
+                "progress": "1" * 12,
+                "action": "pin",
+                "key": "db",
+                "ref": "tether.eeeeeeeeeeee",
+            },
+            {"done": "1" * 12, "result": {"failed": "x", "rolled_back": True}},
+        ):
+            fh.write(json.dumps(line) + "\n")
+    pinned_path(b.vcs.shared_dir()).unlink()  # as a clone from before the index
+    b = Repo.find(tmp_path / "clone-b")
+    assert b._known_pins() == {mine.id}
+    assert theirs.id not in read_pinned(b.vcs.shared_dir(), b.config.dataset_id)
+    assert theirs.ref in default_store().system(system).tags
+
+
+@pytest.mark.parametrize("how", ["gc", "rollback", "gc-then-reseed"])
+def test_a_released_pin_recreated_by_another_clone_is_not_released_again(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """Pins are content-addressed: after this clone releases one, another
+    clone committing the same state creates it again under the same id.
+    The index kept the released id, so the next gc here released the other
+    clone's pin as its own. It forgets what it releases -- through gc, or a
+    commit's rollback -- and a re-seed replays gc's releases too."""
+    from tether.oplog import pinned_path
+
+    repo, system = _baseline(vcs_root)
+    repo.new(bookmark="probe")
+    _write(repo, {"x": "probe"})
+    if how == "rollback":
+
+        def refused(*args: object, **kwargs: object) -> str:
+            raise VcsError("hook refused the commit")
+
+        monkeypatch.setattr(repo.vcs, "commit", refused)
+        plan = repo.plan_commit("probe write")
+        (pin_action,) = [x for x in plan.actions if x.op == "pin"]
+        with pytest.raises(VcsError, match="hook refused"):
+            repo.apply_commit(plan)
+        monkeypatch.undo()
+        pid = str(pin_action.params["pin_id"])
+        state = dict(pin_action.params["state"])
+    else:
+        result = repo.commit("probe write")
+        pin = result.pinned["db"]
+        assert pin is not None and result.vcs_commit is not None
+        pid, state = pin.id, dict(repo.objects["db"].state or {})
+        repo.abandon([result.vcs_commit])
+        report = repo.gc(dry_run=False)
+        assert report.unpinned == {"memory": [pid]}
+    store = default_store().system(system)
+    assert f"tether.{pid}" not in store.tags
+    assert pid not in repo._known_pins()
+    if how == "gc-then-reseed":
+        pinned_path(repo.vcs.shared_dir()).unlink()
+        assert pid not in Repo.find(vcs_root)._known_pins()
+    # Another clone commits the same state: the same pin, made anew.
+    backend = repo.backend_for("memory")
+    assert backend.pin(repo.objects["db"].locator, state, pid).created
+    plan = Repo.find(vcs_root).plan_gc()
+    verdicts = {a.params["pin_id"]: a.op for a in plan.actions if "pin_id" in a.params}
+    assert verdicts == {pid: "keep-pin"}, plan.render()
+
+
 def test_gc_and_drop_refuse_while_jj_reports_a_conflicted_commit(
     vcs_root: Path,
 ) -> None:

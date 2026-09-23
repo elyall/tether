@@ -80,6 +80,7 @@ from tether.oplog import (
     read_ops,
     read_pinned,
     read_touched,
+    remove_pinned,
 )
 from tether.plan import Plan, Precondition
 from tether.repo._reports import (
@@ -931,45 +932,75 @@ class RepoCore:
                 yield (root / rel), read_workspace(root / rel)
 
     def _known_pins(self) -> set[str]:
-        """Pin ids this clone created, from `tether-pinned.jsonl` beside the
-        repository lock (see `tether.oplog.PINNED_FILENAME`). The index is
-        seeded on first use from every live checkout's op log -- what each
-        `commit` and `repair` recorded, and the `pin` progress of ones that
-        never finished -- so a clone from before the index knows its pins."""
+        """Pin ids this clone created and has not released, from
+        `tether-pinned.jsonl` beside the repository lock (see
+        `tether.oplog.PINNED_FILENAME`). The index is seeded on first use
+        from every live checkout's op log, so a clone from before the index
+        knows its pins."""
         self._seed_pinned()
         return read_pinned(self.vcs.shared_dir(), self.config.dataset_id)
 
     def _seed_pinned(self) -> None:
+        """Replay every live checkout's op log, oldest entry first: a pin
+        this clone created is added, and one its `gc` released is taken off.
+
+        Created means a progress record the backend's `created` flag
+        vouches for: `commit` and `pull` journal a `pin` only for a ref that
+        was new, `repair` marks each `repin` with the flag. A commit's
+        `pinned` result is not evidence -- it also names pins another clone
+        had already made -- and neither is a `repin` journaled before the
+        flag existed (0.1.0b3 and older), which is left out: `gc` then keeps
+        that pin as one it cannot account for. A commit that rolled back
+        released what it created.
+        """
         shared = self.vcs.shared_dir()
         if pinned_path(shared).is_file():
             return
-        found: list[tuple[str, str, str]] = []
-        for root, _ws in self._iter_live_workspaces():
-            for op in read_ops(root):
-                kinds = {
-                    str(a.get("key", "")): str(a.get("kind", ""))
-                    for a in (op.plan or {}).get("actions") or []
-                    if a.get("op") in ("pin", "repin")
-                }
-                recorded = (
-                    op.result.get("pinned")
-                    if op.command in ("commit", "pull")
-                    else op.result.get("repinned")
-                    if op.command == "repair"
-                    else None
-                ) or {}
-                for key, pid in recorded.items():
-                    if pid:
-                        found.append((str(pid), kinds.get(str(key), ""), str(key)))
-                for record in op.progress:
-                    if record.get("action") in ("pin", "repin"):
-                        pid = pin_id_of_ref(
-                            str(record.get("ref") or record.get("target") or "")
-                        )
-                        key = str(record.get("key", ""))
-                        if pid:
-                            found.append((pid, kinds.get(key, ""), key))
-        append_pinned(shared, self.config.dataset_id, found)
+        ops = [
+            op for root, _ws in self._iter_live_workspaces() for op in read_ops(root)
+        ]
+        ours: dict[str, tuple[str, str]] = {}
+        for op in sorted(ops, key=lambda op: op.at):
+            if op.result.get("rolled_back"):
+                continue
+            kinds = {
+                str(a.get("key", "")): str(a.get("kind", ""))
+                for a in (op.plan or {}).get("actions") or []
+                if a.get("op") in ("pin", "repin")
+            }
+            for record in op.progress:
+                action = record.get("action")
+                pid = pin_id_of_ref(
+                    str(record.get("ref") or record.get("target") or "")
+                )
+                if not pid:
+                    continue
+                if action == "pin" or (action == "repin" and record.get("created")):
+                    key = str(record.get("key", ""))
+                    ours[pid] = (kinds.get(key, ""), key)
+                elif action == "unpin":
+                    ours.pop(pid, None)
+        append_pinned(
+            shared,
+            self.config.dataset_id,
+            [(pid, kind, key) for pid, (kind, key) in ours.items()],
+        )
+
+    def _forget_pinned(self, pin_id: str) -> None:
+        """Take a pin this clone just released off the index (see
+        `_known_pins`): if another clone creates it again under the same
+        content-addressed id, it is that clone's. Best effort, like
+        `_note_pinned`: a miss can only make a later `gc` release a pin it
+        would otherwise keep as foreign -- so say so."""
+        try:
+            self._seed_pinned()
+            remove_pinned(self.vcs.shared_dir(), self.config.dataset_id, [pin_id])
+        except Exception as exc:
+            warnings.warn(
+                f"could not take pin {pin_id} off the pinned index: {exc}; if "
+                "another clone creates it again, a later `gc` here may release it",
+                stacklevel=2,
+            )
 
     def _note_pinned(self, key: str, kind: str, pin_id: str) -> None:
         """Record a pin this clone just created (see `_known_pins`). Best

@@ -503,3 +503,4 @@ class CommitOps(RepoCore):
             # Best-effort compensation; a failed unpin is reconciled by gc.
             with contextlib.suppress(Exception):
                 self.backend_for(m.kind).unpin(m.locator, pin)
+                self._forget_pinned(pin.id)
