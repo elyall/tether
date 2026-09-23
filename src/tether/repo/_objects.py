@@ -596,8 +596,8 @@ class ObjectOps(RepoCore):
             read_only: Force read-only or writable. Defaults to writable for
                 Forkable objects (at their working ref) and read-only otherwise.
                 A writable open creates the working branch first when `new`
-                deferred it (lazy forking) -- the one store write outside
-                `commit`, `new`, and `gc`.
+                deferred it (lazy forking): a store write with no plan of its
+                own (`new --eager --dry-run` previews it).
 
         Returns:
             A backend-specific `tether.handles.Handle`.

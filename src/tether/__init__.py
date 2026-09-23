@@ -19,8 +19,8 @@ Example:
     >>> from tether import Repo
     >>> repo = Repo.find(".")
     >>> repo.commit("baseline")          # pin every object, commit the manifests
-    >>> repo.new()                       # fork writable branches off the pins
-    >>> handle = repo.open("zarr/imaging")
+    >>> repo.new(bookmark="relabel")     # a bookmark: a branch per system, off the pins
+    >>> handle = repo.open("zarr/imaging")  # writable; this open forks the branch
 """
 
 from __future__ import annotations

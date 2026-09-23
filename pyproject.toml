@@ -7,9 +7,9 @@ build-backend = "uv_build"
 # prohibits the bare name `tether`).
 name = "tether-vcs"
 # PEP 440 pre-release: installers only select it when no final release exists
-# or when asked (`pip install --pre` / an explicit `==0.1.0a1`).
+# or when asked (`pip install --pre` / an explicit `==<version>`).
 version = "0.1.0b3"
-description = "jj-style version control for heterogeneous datasets (files/object stores, Icechunk, Neon, Iceberg, Delta, Lance, DuckLake, Dolt, git)"
+description = "Version control (fingerprints, pins, and forks) for heterogeneous datasets: files and object stores, Icechunk, Lance, Delta, git, and -- experimental -- Neon, Iceberg, DuckLake, Dolt"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

@@ -1,8 +1,10 @@
 """Plans: what a store-writing command *would* do, as data.
 
-Every command that writes to an external system (`commit` pins, `new` forks,
-`gc` unpins / deletes branches) is split into a read-only *plan* step and an
-*apply* step. A `Plan` lists the concrete `Action`s with the inputs they were
+The planned commands (`commit` pins, `new` forks, `gc` unpins / deletes
+branches, and `restore`, `promote`, `drop`, `forget-workspace`, `import`,
+`repair`, `upgrade`) are split into a read-only *plan* step and an *apply*
+step; `pull`, `undo`, `abandon --gc` and `add --create` write without one.
+A `Plan` lists the concrete `Action`s with the inputs they were
 computed from, serializes to JSON (`tether commit --dry-run --json`), and can be
 applied later (`tether commit --from-plan plan.json`); apply re-checks that the
 world still matches the plan before touching anything.

@@ -1516,14 +1516,15 @@ def upgrade(
 ) -> None:
     """Bring a dataset made by an older tether up to this version.
 
-    Runs every pending migration in order (see `tether.upgrade`), writing
-    the new `[tether] version` after each. When a migration changes how native
-    refs are named it renames them in every store and rewrites every historical
-    manifest to match, so `gc` keeps seeing the same pins from both sides.
-    Rewriting history changes commit ids: every other clone must re-sync
-    afterwards. Run `--dry-run` first. A failed store rename stops the upgrade
-    before anything else changes (renames already made are skipped on the next
-    run); exit code 3 marks a partially applied step.
+    One migration (see `tether.upgrade`) whose parts run on what the dataset
+    shows, not on the version it recorded; the new `[tether] version` is
+    written once at the end. Where native refs predate the dataset namespace it
+    renames them in every store and rewrites every historical manifest to
+    match, so `gc` keeps seeing the same pins from both sides. Rewriting
+    history changes commit ids: every other clone must re-sync afterwards. Run
+    `--dry-run` first. A failed store rename stops the upgrade before anything
+    else changes (renames already made are skipped on the next run); exit code
+    3 marks a partially applied step.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo(allow_outdated=True)
