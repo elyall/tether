@@ -235,11 +235,13 @@ tether promote --dry-run
 ```
 
 ```
-plan: promote (3 write(s))
-        fast-forward  code          [git] main  main sha=41c0d9e2b7f3… -> sha=f01a9d3c2b7e… (base unchanged since fork)
-        fast-forward  features      [lance] main  ...
-        fast-forward  zarr/imaging  [icechunk] main  main snapshot_id=K3F9M2A1B7C8… -> snapshot_id=DEB4861EB388… (base unchanged since fork)
+plan: promote (0 write(s))
+                hold  code          [git] main  would fast-forward: main sha=41c0d9e2b7f3… -> sha=f01a9d3c2b7e… (base unchanged since fork); held because db/metrics, features refused, and a bookmark is planned whole or not at all
               refuse  db/metrics    [neon] main  the neon backend cannot move a branch; Neon cannot promote a child branch into its parent; work on the trunk bookmark ...
+              refuse  features      [lance] main  the lance backend cannot move a branch; Lance cannot move a branch head; write the result onto the base branch ...
+                hold  zarr/imaging  [icechunk] main  would fast-forward: main snapshot_id=K3F9M2A1B7C8… -> snapshot_id=DEB4861EB388… (base unchanged since fork); held because db/metrics, features refused, and a bookmark is planned whole or not at all
+                      raw/plate1: not forkable; nothing to promote
+                      nothing moved: db/metrics, features refused; land the rest on purpose with `tether promote KEY...`, or write those systems' base branches by hand on the trunk (see the refusals) and promote again
 ```
 
 For each Forkable object tether compares the upstream branch to the **fork
@@ -253,16 +255,17 @@ point** -- the state recorded when the branch was created -- and decides:
 | anything | neither | **refuse** (Neon, Lance) |
 
 **A bookmark is planned whole or not at all.** When one system is refused,
-`promote` reports the others as `held` and writes nothing: a `main` with the
+`promote` reports the others as `hold` and writes nothing: a `main` with the
 new state in one system and the old in another is the half-done state you
 branched to avoid. To land a subset on purpose, name the keys
-(`tether promote zarr/imaging`); the trunk bookmark never moves for a subset.
-The plan above therefore lands nothing until you decide what to do about
-`db/metrics`. Neon cannot promote a child branch into its parent: for a
-database that must receive writes on `main`, work on the trunk bookmark
-([below](#working-on-the-trunk)), where the working ref *is* `main` and pins
-provide reproducibility. Lance cannot move a branch head yet; write the result
-onto the base branch from the trunk. [Worked Examples](06-use-cases.qmd#reprocess-on-a-branch-then-land-it-or-throw-it-away)
+(`tether promote zarr/imaging code`); the trunk bookmark never moves for a
+subset. The plan above therefore lands nothing until you decide what to do
+about `db/metrics` and `features`. Neon cannot promote a child branch into
+its parent: for a database that must receive writes on `main`, work on the
+trunk bookmark ([below](#working-on-the-trunk)), where the working ref *is*
+`main` and pins provide reproducibility. Lance cannot move a branch head yet;
+write the result onto the base branch from the trunk.
+[Worked Examples](06-use-cases.qmd#reprocess-on-a-branch-then-land-it-or-throw-it-away)
 shows a refused promote and the two-step landing that follows.
 
 When everything **fast-forwarded**, the trunk bookmark moves to your commit:
@@ -443,19 +446,12 @@ included, and wants `--discard` for writes you never committed.
 ## Undo
 
 Every command that touched a store is in this workspace's operation log
-(`tether ops`), and `tether undo` reverses the *newest* entry where the store
-still allows it: a commit is *uncommitted* (manifests become working-tree
-edits again; the pins stay, still referenced); a fork or `new` deletes the
-branches it created and puts `workspace.toml` and the working copy back. When
-the newest entry cannot be undone -- a `drop`, or the `new` and `gc` it ran,
-an interrupted operation -- `undo` refuses rather than reach past it; `tether
-undo ID` names an older entry, and then puts back only the `workspace.toml`
-fields that entry changed, never what later ones did. What it cannot reverse
--- a `gc`'s deleted refs, a `promote`, a branch holding a state a commit since
-recorded -- it says so, with the tool that puts it right (`repair`, `restore`,
-a manual reset). `jj undo` and `git reset` stay what they were: they move the
-manifests, never the stores. The full table is in the
-[CLI Guide](07-cli.qmd#ops-undo-repair).
+(`tether ops`). `tether undo` reverses the newest entry where the store still
+allows it: a commit is uncommitted (the pins stay), a `new` or fork deletes
+the branches it created. `jj undo` and `git reset` stay what they were: they
+move the manifests, never the stores. What `undo` can and cannot reverse, and
+what it refuses, is one table in the
+[CLI Guide](07-cli.qmd#undo).
 
 ## Workspaces and bookmarks
 
@@ -475,5 +471,5 @@ return or continue under the new name, `tether new -b NAME` to recreate one,
 ## Next
 
 [Reclaiming Storage](05-reclaiming-storage.qmd): what pins and forks cost,
-how to preview every store write, and how to release what history no longer
-names.
+how to preview store writes as plans, and how to release what history no
+longer names.

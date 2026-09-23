@@ -23,22 +23,15 @@ Landing the dataset commit in jj never merges data by itself.
 
 A commit records each object's state within a capture window;
 point-consistency requires quiesced writers. The Neon quiescence check helps
--- `tether commit` refuses while writers are active unless `--force` -- but
-nothing coordinates two systems.
+(see [Neon](#neon)), but nothing coordinates two systems.
 
 ### What `undo` can and cannot do
 
 `jj undo` / `git reset` move the manifests, never the stores. `tether undo`
-covers tether's side from its
-[operation log](07-cli.qmd#the-operation-log): a commit is uncommitted (pins
-kept); the branches a `new`, `fork`, or `restore` *created* are deleted, and a
-branch one of them *reset* is reported with its old head for you to `restore`
-(undo never guesses where a branch should go); a `gc`'s forgotten working refs
-and listings come back but its deleted branches and released pins do not
-(`tether repair` recreates them from the manifests once a manifest references
-them again, while the snapshot still exists); a `promote` is refused with the
-previous heads printed. A branch that gained writes is never deleted without
-`--discard` -- by `undo` or by `new`.
+deletes what tether's newest operation created and reports what it reset,
+from its [operation log](07-cli.qmd#the-operation-log). It cannot bring back
+what `gc` released or reverse a `promote`; `repair` and `restore` cover
+those. The table, per command, is in the [CLI Guide](07-cli.qmd#undo).
 
 ### Icechunk never reuses a deleted tag name
 
@@ -92,9 +85,12 @@ in view.
 Every pin holds bytes in its system until the commit that names it is dropped
 and `gc` releases it. `--pin record` skips the native ref on any backend and
 forks from the recorded state instead, at the price of retention-bound
-recoverability. Every store-writing command takes `--dry-run` (and
-`--plan FILE` / `--from-plan FILE`) so writes can be reviewed before they
-happen. See [Reclaiming Storage](05-reclaiming-storage.qmd).
+recoverability. The planned commands (`commit`, `new`, `restore`, `promote`,
+`gc`, `drop`, `forget-workspace`, `import`, `repair`, `upgrade`) take
+`--dry-run` (and `--plan FILE` / `--from-plan FILE`) so their writes can be
+reviewed first; `pull`, `undo`, `abandon --gc`, `add --create` and the lazy
+fork in `open` have no preview. See
+[Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans).
 
 ### A clone is untrusted input
 
@@ -116,18 +112,32 @@ from the environment.
 
 ### Neon
 
+Experimental: tested against a fake of the Neon API, not a live project. This
+section is the one home for Neon's caveats; the Backends page points here.
+
 **Lineage.** Pins are child branches, so a working branch cannot be deleted
-while its pins exist (`gc --prune-bookmarks` plans it as kept and names the
-pins), `gc` only drops leaf pins, and `new` onto a *different* pin forks a
-sibling rather than resetting a branch with children (`commit` then `new`
-reuses the branch, since it already sits at the pin). Neon cannot merge or
-promote a child into `main`; run production writes on the trunk bookmark,
-where the working ref is `main` itself. `protected` needs a paid plan.
+while its pins exist (`gc --prune-bookmarks` plans it as
+`keep-branch: cannot be deleted` and names the pins, even under
+`--force-prune`), `gc` only drops leaf pins, and `new` onto a *different* pin
+forks a sibling (`<name>.2`, `.3`, ...) rather than resetting a branch with
+children (`commit` then `new` reuses the branch, since it already sits at the
+pin). Neon cannot merge or promote a child into `main`; run production writes
+on the trunk bookmark, where the working ref is `main` itself.
 
 **A branch per commit.** Every pin is a branch, so each commit that changes a
 Neon object adds one to the project. Neon plans cap branches per project (10
 on the free plan) or bill the ones past the allowance per branch-month; `gc`
 releases pins no commit references, and `--pin record` takes none at all.
+Pins are unprotected unless `protected_pins = true` in `secrets.toml`, which
+needs a paid plan (Free has no protected branches; paid plans allow a few, and
+every pinning commit would use one). Branches *are* the storage
+(`BRANCH_IS_STORAGE`): `gc --prune-bookmarks` never deletes a Neon working
+branch holding unpinned data without `--force-prune`, and never by its state
+alone.
+
+**Control plane.** Answers of 423 (another operation on the project is
+running), 429 and 503 are retried with backoff for about a minute. `commit`
+refuses while `pg_stat_activity` shows active writers unless `--force`.
 
 **Fingerprint cost.** The LSN moves without user writes, so it is a volatile
 (address-only) key: only `commit_xid`, the newest committed transaction id,
@@ -141,10 +151,9 @@ creates the read-write endpoint; a plain `status` does not fingerprint
 *lineage* -- the object's source branch when the branch read descends from it
 -- so that a fork with no writes compares equal to the pin it was cut from.
 The price: two sibling branches of the same lineage whose newest commits share
-a transaction id compare equal too. Neon exposes no content hash
-and no history query to tell them apart, which is why the backend is
-`BRANCH_IS_STORAGE`: `gc` never judges a Neon branch by its state alone, and
-`promote` is not offered.
+a transaction id compare equal too. Neon exposes no content hash and no
+history query to tell them apart, which is why `gc` never judges a Neon
+branch by its state alone and `promote` is not offered.
 
 ### Files on unversioned storage
 
@@ -196,8 +205,9 @@ SQLite, and MySQL catalogs have no such limit. Snapshots are catalog-wide;
 
 Uncommitted changes on a branch are not in any commit; a dirty branch is
 reported and refused at `commit`. Credentials come from the server's
-`[uris."mysql://host:port"]` entry in `.tether/secrets.toml`, never the
-manifest, and a server without one gets none. Dirty
+`[uris."mysql://host:port"]` entry in `.tether/secrets.toml` -- never the
+manifest, an `[objects.*]` entry or the environment by convention -- and a
+server without one gets none. Dirty
 detection needs a Dolt with the `dirty` column on `dolt_branches`; older
 servers report clean.
 

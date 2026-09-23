@@ -23,8 +23,11 @@ reports. Credentials are never stored in manifests.
 | [`memory`](#memory-in-process-reference-backend) | -- | stable | Forkable | `CHEAP_FINGERPRINT`, `ATOMIC_REF`, `DIFF`, `HISTORY`, `PROMOTE`, `MERGE`, `CREATE` (tests only) |
 
 *Maturity* is what the backend declares (`MATURITY`; `tether backends` prints
-it): **stable** runs its full lifecycle against the real system in CI --
-embedded stores and libraries; **experimental** is tested against a fake of a
+it). **Stable** means the full lifecycle -- register, commit, fork, write,
+commit, promote, gc -- runs in CI against the real system: embedded stores
+and libraries, on local storage. The object-store paths of `file` and
+`icechunk` (S3, GCS, Azure) have not run against a cloud service yet;
+`ROADMAP.md` tracks that. **Experimental** is tested against a fake of a
 network service and has not been run against the service itself by the
 maintainers. `add` says so when you register an experimental kind. The tiers
 and flags are defined in
@@ -51,10 +54,10 @@ and flags are defined in
   `metadata`, after `ducklake:`, `ducklake:duckdb:`, or `ducklake:sqlite:`) is resolved
   against the directory `add` or `import` ran in and stored absolute. URLs
   and absolute paths are stored as given.
-- Objects that live in one native branch space -- two databases of a Neon
+- Objects that live in one *branch scope* -- two databases of a Neon
   project, two keys on one Icechunk store -- share a branch per bookmark:
   `new` forks it once and every member writes through it, and `gc` collects
-  the pins every object references per branch space before deciding what is
+  the pins every object references per scope before deciding what is
   unreferenced.
 - `at` in a locator is an object's initial position (`tether add --at` /
   `--pick`): the first commit pins that native state instead of the `branch`
@@ -167,7 +170,7 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Config | none committed. `.tether/secrets.toml` may set `profile`, `role_arn`, literal keys, `endpoint_url`, `region` per URI prefix or object, so two repositories in two accounts pin in one `commit` (see [Configuration](08-configuration.qmd#advanced-two-stores-two-identities)); otherwise S3 credentials come from the environment (`from_env`). |
 | Identity | `{uri}` |
 | State | `snapshot_id` of the branch head |
-| Pin | `create_tag("tether.<id>", snapshot_id)`; tags are immutable and exempt from expiry |
+| Pin | `create_tag("tether.<id>", snapshot_id)`; tags are immutable, and the default `expire_snapshots` keeps a tagged snapshot. `expire_snapshots(delete_expired_tags=True)` deletes the tag and the snapshot with it; `verify` then reports the pin `missing` |
 | Fork | `create_branch(name, snapshot_id)` off the tag (`reset_branch` if it exists) |
 | Handle | `IcechunkHandle(repository, session, branch, tag, snapshot_id)`; `session` is writable for a branch, read-only for a tag/snapshot |
 | Diff | `nodes`: `Repository.diff(from, to)` -- new/deleted groups and arrays, updated metadata, updated chunk counts per array, moves |
@@ -182,13 +185,13 @@ Plain artifacts: a local file or directory, or an object / prefix in S3
 | Locator | `project_id`, `database`, `role` (all required: Neon builds no connection URI without a database and a role, so `add` refuses a locator missing one), `branch` (default `main`) |
 | Config | `api_key_env` (default `NEON_API_KEY`), `api_url` (default Neon API v2), `protected_pins` (default `false`; `true` creates each pin as a protected branch, which Neon refuses to delete -- Free has none and paid plans allow a few, and every commit that pins makes one) -- `.tether/secrets.toml` only; a committed value is refused |
 | Identity | `{project_id, branch}` -- a Neon branch at an LSN is a snapshot of the whole project, so `database` and `role` are how you connect, not what you pin: neither changes pin ids, and two objects on two databases of one project share one pin per commit and (via `branch_scope`) one working branch per bookmark |
-| State | `lsn`, `commit_xid`, `branch` (probed over SQL on the working or source branch). `lsn` is volatile -- it advances on checkpoints -- so only `commit_xid` and `branch` count as content; `branch` names the timeline the LSN belongs to. `commit_xid` is the newest *committed* transaction id: a compute restart moves the next id past ids no transaction used, which does not count as a write. With no commit among the last 65536 ids it reads `<N` (the next id), so a later commit still shows as a change |
-| Pin | a protected child branch `tether.<id>` of the state's `branch` at `parent_lsn` (so a fork's pin hangs off the fork, not `main`); `RETENTION_BOUND` by the project's history retention |
+| State | `lsn`, `commit_xid`, `branch`, `timeline` (probed over SQL on the working or source branch). Content is `commit_xid` and `branch`, the *lineage*: the object's source branch when the branch read descends from it, so an untouched fork compares equal to its pin. `lsn` (it advances on checkpoints) and `timeline` (the branch the LSN was actually read on) are volatile address keys. `commit_xid` is the newest *committed* transaction id: a compute restart moves the next id past ids no transaction used, which does not count as a write. With no commit among the last 65536 ids it reads `<N` (the next id), so a later commit still shows as a change |
+| Pin | a child branch `tether.<id>` of the state's timeline at its LSN (so a fork's pin hangs off the fork, not `main`), protected only with `protected_pins = true`; `RETENTION_BOUND` by the project's history retention |
 | Fork | a child branch of the pin. Re-forking an existing working branch restores it onto the source (Neon branch restore, always -- a branch's `parent_id` says where it was created, not where its head is). Once a pin has been taken on the working branch that pin is its child and Neon will not restore it in place, so the fork lands on a sibling (`<name>.2`, `.3`, ...) and the old branch stays as the pins' parent; the engine records the returned name. A branch tether reads or writes gets a `read_write` endpoint on first use (a fingerprint, the quiescence check, `open`); pins and time-travel reads (`open` at a recorded state) get a `read_only` one. Every connection URI names the endpoint it is for |
 | Quiescence | `commit` refuses while `pg_stat_activity` shows active writers (`--force` skips) |
 | Handle | `NeonHandle(url, branch)` -- a Postgres connection URL |
 | Diff | not supported (no native primitive) |
-| Notes | pins are branches, so a working branch cannot be deleted while its pins exist -- `gc --prune-bookmarks` plans such a branch as `keep-branch: cannot be deleted` (with the pins named) even under `--force-prune`; `gc` only drops leaf pins. `commit` then `new` reuses the working branch (it sits at the pin); `new` onto another pin forks a sibling name instead of resetting a branch with children. State content is `{commit_xid, lineage}` (`lsn` and `timeline` are volatile address keys): two siblings of one lineage whose newest commits share a transaction id compare equal, since Neon has no content hash. **Cost:** every pin is a branch, so each commit that changes a Neon object adds a branch to the project, and Neon plans cap branches per project (10 on the free plan) or bill the ones past the allowance per branch-month; `gc` releases the pins no commit references. Control-plane answers 423 (another operation on the project is running), 429, and 503 are retried with backoff for about a minute. Branches *are* the storage (`BRANCH_IS_STORAGE`): `gc --prune-bookmarks` never deletes a Neon working branch that holds unpinned data without `--force-prune`, and never by its state alone. Neon cannot merge a child back into `main` -- work on the trunk bookmark (writes land on `main` directly) for production. `protected` requires a paid plan. Fingerprinting may wake a suspended compute; a plain `status` does not fingerprint (`--snapshot`, `commit`, and `verify` do). |
+| Notes | pins are branches, and branches are the storage: what that means for `gc`, `new`, `promote`, cost, and fingerprinting is in one place, [Caveats: Neon](12-caveats-and-performance.qmd#neon). |
 
 ## `git`: git and jj repositories
 
@@ -206,7 +209,7 @@ jj repositories work through their `.git`.
 | Handle | `GitHandle(path, sha, worktree)` |
 | Diff | `files`: `git diff --name-status -M` with `--numstat` line counts (`+a -d`) |
 | Create | `git init -b <ref>` plus one empty root commit with a fixed tree, author, and dates, so every store tether creates has the same root sha (`GitBackend.EMPTY_ROOT_SHA`) and the base branch exists to pin and fork from; the owner marker is `git config tether.owner`. Ref-empty: no branch or tag beyond the base, the base *at* that root sha (an amended root is not), and a clean working tree (`git status --porcelain --ignored`: an untracked, staged, or ignored file is data `delete_store` would take with the directory). `delete_store` re-checks both and removes the repository directory only then. |
-| Notes | remote-only (url) repositories are not supported yet. Every git call runs with `core.fsmonitor`, hooks, and `ext::` transports off and `safe.bareRepository=explicit`, so a repository's config runs nothing. |
+| Notes | remote-only (url) repositories are not supported yet. Every git call runs with `core.fsmonitor`, hooks, and `ext::` transports off and `safe.bareRepository=explicit`, so a repository's config runs nothing. `promote` and `merge` move a branch: with the default `ref = HEAD` that is the checked-out branch, and a detached `HEAD` -- a colocated jj checkout always has one -- is refused; set `ref` to the branch name to promote there. |
 
 ## `iceberg`: Apache Iceberg tables
 
@@ -216,7 +219,7 @@ against a catalog service.
 | | |
 | --- | --- |
 | Locator | `identifier` (`ns.table`; `table` accepted), `branch` (default `main`), `catalog_name` (default `default`), `catalog` (dict of pyiceberg catalog properties, or set once in config) |
-| Config | `catalog = {...}` pyiceberg properties. Committed: `type`, `warehouse` and other non-secret properties; `uri`, `token`, `credential` only in `.tether/secrets.toml` (`[backends.iceberg] catalog` or per identifier), in the file or the locator alike |
+| Config | `catalog = {...}` pyiceberg properties. Committed (`tether.toml` or the locator): exactly `type`, `warehouse` and `name`; every other property -- `uri`, `token`, `credential`, ... -- only in `.tether/secrets.toml` (`[backends.iceberg] catalog` or per identifier) |
 | Identity | `{identifier, branch, catalog_name}` |
 | State | `snapshot_id` (nothing else: `metadata_location` changes on every table commit on any branch). A new table with no snapshot yet has `snapshot_id = -1`, Iceberg's "no current snapshot" |
 | Pin | `--pin native` (default): tag `tether.<id>`; `--pin record`: no native ref, the snapshot id alone (drops `PIN`; recoverable only within snapshot retention -- for S3 Tables and other catalogs where user refs disable maintenance). The empty state needs no tag: its pin verifies as held and opens at `snapshot_id = -1`, which pyiceberg's scans refuse rather than read today's data |
@@ -229,7 +232,7 @@ against a catalog service.
 | | |
 | --- | --- |
 | Locator | `uri` (positional), `region` (sets `AWS_REGION`) |
-| Config | `storage_options = {...}` passed to `DeltaTable`; committed for non-secret options, `.tether/secrets.toml` for endpoints and credentials (per URI prefix or object) |
+| Config | `storage_options = {...}` passed to `DeltaTable`. Committed: only `region`, `allow_http`, `virtual_hosted_style_request`, `conditional_put`; endpoints and credentials in `.tether/secrets.toml` (per URI prefix or object) |
 | Identity | `{uri}` |
 | State | `version`, `table_id` (metadata id -- a recreated table verifies as drifted) |
 | Pin / fork | none: Delta has no tags or branches. Versions stay readable until `VACUUM` (7-day default) / log retention (30 days). |
@@ -241,7 +244,7 @@ against a catalog service.
 | | |
 | --- | --- |
 | Locator | `uri` (positional), `branch` (default `main`) |
-| Config | `storage_options = {...}` passed to `lance.dataset`; committed for non-secret options, `.tether/secrets.toml` for endpoints and credentials (per URI prefix or object) |
+| Config | `storage_options = {...}` passed to `lance.dataset`. Committed: only `region`, `allow_http`, `virtual_hosted_style_request`, `conditional_put`; endpoints and credentials in `.tether/secrets.toml` (per URI prefix or object) |
 | Identity | `{uri}` |
 | State | `branch`, `version`, and on any branch but `main` its `branch_id` (Lance version numbers are branch-scoped and restart when a branch is deleted and re-created, so the id tells two lives of one name apart; `--at N` means version `N` of the locator's `branch` -- it is a *base* coordinate and is never consulted once a working branch exists; use a tag to name a version on another branch) |
 | Pin | `tags.create("tether.<id>", (branch, version))`; tagged versions are exempt from `cleanup_old_versions()` |
@@ -274,7 +277,7 @@ MySQL catalog with an object-store `data_path`.
 | | |
 | --- | --- |
 | Locator | `host` (default `127.0.0.1`), `port` (default 3306), `database` (required), `branch` (default `main`), `user`; or `url = mysql://user@host:port/database` |
-| Credentials | the server's `[uris."mysql://host:port"]` entry in `.tether/secrets.toml` (a `mysql://host:port/database` entry beats it): `user` and `password`, or `user_env` and `password_env` naming environment variables. A manifest chooses the host, so a server with no entry gets no password (and user `root` unless the locator names one) |
+| Credentials | the server's `[uris."mysql://host:port"]` entry in `.tether/secrets.toml` (a `mysql://host:port/database` entry beats it): `user` and `password`, or `user_env` and `password_env` naming environment variables. Only those entries: an `[objects."<key>"]` entry, the `[backends.dolt]` section and the environment by convention are ignored. A manifest chooses the host, so a server with no entry gets no password (and user `root` unless the locator names one) |
 | Identity | `{host, port, database}` |
 | State | `commit` (branch head hash), plus `dirty = true` when `dolt_branches.dirty` reports uncommitted working-set changes (refused at pin time) |
 | Pin | `CALL DOLT_TAG('tether.<id>', commit)` |
@@ -282,7 +285,7 @@ MySQL catalog with an object-store `data_path`.
 | Promote / merge | `DOLT_MERGE` (`--ff-only` to promote) inside an explicit transaction: under autocommit Dolt rolls a conflicting merge back with an error, so only a transaction can report which tables conflict or violate a constraint. Those come back as `MergeConflict`, and the merge is aborted and rolled back |
 | Handle | `DoltHandle(url, database, ref, commit)`: a revision-database URL `mysql://user@host:port/db/<branch|tag|hash>` (tags and hashes are read-only in Dolt); `database_ref` is `db/ref` for `USE` |
 | Diff | `tables`: `dolt_diff_summary` (added/dropped/modified/renamed tables, schema changes) with `dolt_diff_stat` row counts |
-| Notes | talks to `dolt sql-server` / Hosted Dolt via PyMySQL; the SQL surface sits behind the `DoltClient` protocol (`tether.backends.dolt`) so other transports can be substituted. |
+| Notes | talks to `dolt sql-server` / Hosted Dolt via PyMySQL; the SQL surface sits behind the `DoltClient` protocol (`tether.experimental.backends.dolt`) so other transports can be substituted. |
 
 ## `memory`: in-process reference backend
 

@@ -62,7 +62,7 @@ the system must support:
   directory's digest over its files' sha256s. Comparing states is how drift
   is detected without watching anything.
 - **Pin**: a durable, GC-proof native reference to a state -- an Icechunk tag,
-  a protected Neon child branch, a git tag, a Lance tag, a Dolt tag -- named
+  a Neon child branch, a git tag, a Lance tag, a Dolt tag -- named
   `tether.<dataset-id>.<hash>`. The hash is content-addressed from
   `(kind, locator identity, state)`, so re-committing an unchanged object is a
   no-op, and the dataset id in front keeps `gc` inside this dataset's
@@ -102,38 +102,72 @@ native address -- an Icechunk session on the right branch or tag, a Postgres
 URL, a `DeltaTable` at a version, a Dolt revision database -- and
 steps aside. You read and write with the system's own library.
 
-## Every store write is a plan
+## Store writes are plans
 
-`commit`, `new`, `gc`, `promote`, `restore`, `drop`, `import`, `repair`, and
-`upgrade` each compute a read-only *plan*, then *apply* it. `--dry-run` prints
-the plan, `--plan FILE` saves it, `--from-plan FILE` applies it later, and
-apply refuses (`StalePlanError`) if the world no longer matches what the plan
-saw. [Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans)
+Ten commands -- `commit`, `new`, `restore`, `promote`, `gc`, `drop`,
+`forget-workspace`, `import`, `repair`, and `upgrade` -- each compute a
+read-only *plan*, then *apply* it. `--dry-run` prints the plan, `--plan FILE`
+saves it, `--from-plan FILE` applies it later, and apply refuses
+(`StalePlanError`) if the world no longer matches what the plan saw. The other
+store writes have no preview: `pull`, `undo`, `abandon --gc`, `add --create`,
+and the lazy fork the first writable `open` performs.
+[Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans)
 walks through it; the [CLI Guide](07-cli.qmd#plans) lists every plan verb.
 
-## jj vocabulary, where it maps
+## jj or tether?
 
-| jj | tether |
-| --- | --- |
-| working copy | the VCS working dir; the committed thing is the manifests |
-| bookmark | a **bookmark** stands for one branch per system: the trunk (`main`) for every object's upstream branch, any other for `tether.ws.<dataset>.<bookmark>` forked from the pins where it started |
-| snapshot on every command | **snapshot**: concurrent fan-out fingerprint -- of every object on `verify`, `status --snapshot`, `tether snapshot`; of this bookmark's branches on `commit`. A plain `status` shows the last one with its age |
-| `jj commit` | **commit**: pin the bookmark's branch heads + write state into manifests + `jj/git commit` + move the bookmark there |
-| `jj new -b`, `jj new <bookmark>` | **new**: create or join a bookmark; per Forkable object its branch is forked on the first write (`--eager`: now), or kept if it already sits at the pin |
-| stale working copy | the committed state each branch was forked from is recorded; a manifest that now says otherwise makes the *workspace* stale -- see [Stale working copies](04-branching-and-writing.qmd#stale-working-copies) |
-| `jj diff` | **diff**: object-level manifest diff; `--content` asks each backend for its native diff |
-| `jj log` | **log**: an object's *native* history (snapshots / versions / commits); ids feed `add --at` |
-| `jj git fetch` + rebase | **pull**: read the heads of the bookmark's branches -- on the trunk, every upstream branch and every branch-less object -- and commit what moved onto the bookmark |
-| detached head | an object registered `--at` a state: its *initial* position; the first commit pins it, `new -b` forks from it, a trunk `pull` moves it onto the branch |
-| a revision with no bookmark | a read-only working copy: `open --rev`, `status`, `verify` work; writes need `new -b NAME` |
-| -- | **verify** (pins still resolve) and **gc** (drop unreferenced pins, gone bookmarks' branches) |
-| `jj bookmark set main -r feature` | **promote**: move each system's upstream branch to the bookmark's branch -- fast-forward if unchanged since the fork point, native merge where one exists, refuse otherwise -- then move the trunk bookmark to the commit |
-| `jj abandon` | **abandon**: the VCS drops the commits (later manifests kept as they were) and the `gc` plan for what that freed is shown or applied; **drop** does it for a whole bookmark, stores included |
-| `jj restore --from REV FILE` | **restore**: reset one object's branch to what `REV` pinned; the manifests and the other branches stay |
-| `jj workspace forget` | **forget-workspace**: the VCS forgets the checkout and its tether state files go; branches belong to bookmarks and stay |
-| `jj squash` | the VCS's own; what history no longer names, `gc` releases |
-| `jj op log` / `jj undo` | **ops** / **undo**: tether's own log of what each command did to the stores, and the reversal of an entry where the store still allows it; **repair** rebuilds what a manifest promises |
-| -- | **export** / **publish** (history as SQL tables) and **import** (the object set from a registry query) |
+Both work on the same repository, so the question comes up constantly. The
+rule: **an operation gets a tether command when it has two halves -- one in
+the VCS, one in the stores -- that must happen together.** If it only touches
+files and history, use jj or git directly. tether notices what it needs to: a
+moved working copy makes objects stale, and a vanished dataset commit shows in
+`status` and `ops`.
+
+The nouns map one to one. jj's *working copy* is the VCS working directory;
+the committed thing is the manifests. A jj *bookmark* stands for one branch
+per system: the trunk (`main`) for every object's upstream branch, any other
+for `tether.ws.<dataset>.<bookmark>`, forked from the pins where it started.
+jj's *snapshot on every command* is tether's **snapshot** on demand: a
+concurrent fingerprint of every object on `verify`, `status --snapshot` and
+`tether snapshot`, and of this bookmark's branches on `commit`; a plain
+`status` shows the last one with its age. A *stale working copy* is a bookmark
+whose committed state changed after its branches were forked (see
+[Stale working copies](04-branching-and-writing.qmd#stale-working-copies)). A
+*detached head* is an object registered `--at` a state: the first commit pins
+it, `new -b` forks from it, and a trunk `pull` moves it onto the branch. A
+*revision with no bookmark* is a read-only working copy: `open --rev`,
+`status` and `verify` work; writes need `new -b NAME`.
+
+The verbs, with the jj command each one borrows from:
+
+| You want to | Use | Because |
+| --- | --- | --- |
+| record the dataset's state | `tether commit` (jj: `jj commit`) | pins the bookmark's branches in their stores, writes their states into the manifests, commits them, and moves the bookmark |
+| start a line of work | `tether new -b NAME [REV]` (jj: `jj new -b`) | creates the bookmark *and* a branch per system named after it, forked on the first write (`--eager`: now) or kept if it already sits at the pin |
+| switch to a bookmark | `tether new NAME` (jj: `jj new <bookmark>`) | moves the working copy *and* adopts that bookmark's branches |
+| look at another revision without writing | `jj new REV` / `jj edit` / `git switch` | nothing to fork; `status` says the working copy left the bookmark until you `tether new` |
+| compare two positions | `tether diff [A] [B]` (jj: `jj diff`) | an object-level manifest diff; `--content` asks each backend for its native diff |
+| browse an object's own history | `tether log KEY` (jj: `jj log`) | the system's snapshots, versions or commits; the ids feed `add --at` |
+| take what upstream has now | `tether pull` on `main` (jj: `jj git fetch` + rebase) | reads every upstream branch and every branch-less object, and commits what moved onto the bookmark |
+| land a bookmark on `main` | `tether promote` (jj: `jj bookmark set main -r feature`) | moves each system's upstream branch -- fast-forward if unchanged since the fork point, native merge where one exists, refuse otherwise -- then the trunk bookmark |
+| throw a bookmark away | `tether drop NAME` | drops its commits and the bookmark, then releases its pins and branches |
+| reset one object to an older commit's state | `tether restore KEY --from REV` (jj: `jj restore --from REV FILE`) | the branch lives in a store; the manifests and the other branches stay |
+| drop dataset commits | `tether abandon REV` (jj: `jj abandon`) | the VCS drops them, descendants keep their manifests as snapshots, and the pins that just freed up are planned for `gc` |
+| edit history otherwise: describe, squash, rebase, split | jj / git | manifests are files; nothing in a store changes. Run `tether gc` afterwards if commits disappeared |
+| merge two dataset branches | jj / git merge | conflicts are per manifest file; then `tether verify` and `tether new` |
+| rename or delete a bookmark | `jj bookmark rename/delete` | `status` then says so: `tether new NAME` continues under the new name (branches fork anew); `gc --prune-bookmarks` releases the old ones |
+| push, fetch, review | jj / git | sharing is the VCS's ([Sharing and CI](13-sharing-and-ci.qmd)) |
+| open a second checkout | `jj workspace add` / `git worktree add` | the first tether command there starts its own tether workspace; it works on a bookmark of its own, or `--shared` |
+| finish with a checkout | `tether forget-workspace` (jj: `jj workspace forget`) | the VCS forgets it and its tether state files go; the bookmark's branches stay |
+| check pins; release what history no longer names | `tether verify`, then `tether gc` (after the VCS surgery above) | nothing in jj: pins and branches live in the stores, and `gc` releases what no commit names |
+| undo tether's last operation | `tether undo` (jj: `jj undo`; an `ID` from `tether ops` for an older one; run again for several) | the VCS cannot see what tether did to the stores |
+| undo any other VCS operation | `jj undo` / the reflog | tether did nothing there; `status` warns if a dataset commit went with it |
+| a store lost a pin or branch a manifest names | `tether repair` | manifests are the source of truth |
+| publish history as SQL; import the object set from a registry | `tether export` / `publish` / `import` (experimental) | nothing in jj; a derived view of the manifests |
+
+Two habits keep the halves aligned: `tether status` after any VCS operation
+that moved the working copy or changed manifests, and `tether new` before
+writing again.
 
 ### Where tether is not jj
 
@@ -152,41 +186,6 @@ walks through it; the [CLI Guide](07-cli.qmd#plans) lists every plan verb.
 - **The stores are remotes.** Pins are what commits reference; bookmark
   branches are local branches; `pull` is fetch; `promote` is the push to
   `main`.
-
-## jj or tether?
-
-Both work on the same repository, so the question comes up constantly. The
-rule: **an operation gets a tether command when it has two halves -- one in
-the VCS, one in the stores -- that must happen together.** If it only touches
-files and history, use jj or git directly; tether will notice what it needs
-to (a moved working copy makes objects stale, a vanished dataset commit shows
-in `status` and `ops`).
-
-| You want to | Use | Because |
-| --- | --- | --- |
-| record the dataset's state | `tether commit` | pins the bookmark's branches in their stores, commits the manifests, moves the bookmark |
-| start a line of work | `tether new -b NAME [REV]` | creates the bookmark *and* a branch per system named after it |
-| switch to a bookmark | `tether new NAME` | moves the working copy *and* adopts that bookmark's branches |
-| land a bookmark on `main` | `tether promote` | moves each system's upstream branch, then the trunk bookmark |
-| throw a bookmark away | `tether drop NAME` | drops its commits and the bookmark, then releases its pins and branches |
-| take what upstream has now | `tether pull` (on `main`) | reads every upstream branch and commits what moved |
-| look at another revision without writing | `jj new REV` / `jj edit` / `git switch` | nothing to fork; `status` says the working copy left the bookmark until you `tether new` |
-| reset one object to an older commit's state | `tether restore KEY --from REV` | the branch lives in a store |
-| drop dataset commits | `tether abandon REV` | the VCS drops them, descendants keep their manifests as snapshots, and the pins that just freed up are planned for `gc` |
-| edit history otherwise: describe, squash, rebase, split | jj / git | manifests are files; nothing in a store changes. Run `tether gc` afterwards if commits disappeared |
-| merge two dataset branches | jj / git merge | conflicts are per manifest file; then `tether verify` and `tether new` |
-| rename or delete a bookmark | `jj bookmark rename/delete` | `status` then says so: `tether new NAME` continues under the new name (branches fork anew); `gc --prune-bookmarks` releases the old ones |
-| push, fetch, review | jj / git | sharing is the VCS's |
-| open a second checkout | `jj workspace add` / `git worktree add` | the first tether command there starts its own tether workspace; it works on a bookmark of its own, or `--shared` |
-| finish with a checkout | `tether forget-workspace` | the VCS forgets it and its tether state files go; the bookmark's branches stay |
-| undo tether's last operation | `tether undo` (an `ID` from `tether ops` for an older one; run again for several) | the VCS cannot see what tether did to the stores |
-| undo any other VCS operation | `jj undo` / the reflog | tether did nothing there; `status` warns if a dataset commit went with it |
-| a store lost a pin or branch a manifest names | `tether repair` | manifests are the source of truth |
-| reclaim storage | `tether gc` (after the VCS surgery above) | what history no longer names, the stores can release |
-
-Two habits keep the halves aligned: `tether status` after any VCS operation
-that moved the working copy or changed manifests, and `tether new` before
-writing again.
 
 ## What tether does not do
 

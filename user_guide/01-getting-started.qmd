@@ -74,9 +74,12 @@ dataset 61d0206e8d81; on trunk bookmark main
 `init` and `add` wrote small TOML manifests under `.tether/` and put the
 working copy on `main`, the dataset's *trunk*. `status` was the first command
 to touch the data: it fingerprinted both objects (an Icechunk snapshot id, a
-digest over the files). The bracket names each object's *tier* -- what
-tether can do with it. Icechunk is *forkable*: it can be pinned and branched.
-A directory is *observed*: tether can tell you it changed, nothing more.
+digest over the files). The header's `61d0206e8d81` is a hash of the
+manifests as they are right now; it changes with every edit (the dataset's
+permanent id is the 8-hex `[dataset] id` in `tether.toml`). The bracket names
+each object's *tier* -- what tether can do with it. Icechunk is *forkable*: it
+can be pinned and branched. A directory is *observed*: tether can tell you it
+changed, nothing more.
 
 ```bash
 tether commit -m "Baseline: plate1 imaging and raw files"
@@ -171,8 +174,8 @@ zeros.
 ## Land it
 
 `promote` makes each system's upstream branch point at what the bookmark
-pinned, then moves the `main` bookmark to the commit. Every command that
-writes to a store takes `--dry-run`, so look first:
+pinned, then moves the `main` bookmark to the commit. Like every planned
+command, it takes `--dry-run`, so look first:
 
 ```bash
 tether promote --dry-run
@@ -203,7 +206,13 @@ main -> 7eb84262ce1b
 
 Icechunk's `main` was fast-forwarded (nothing else had moved it since the
 fork), `main` the bookmark now names the relabel commit, and `verify` confirms
-every pin any commit ever made still resolves -- the check to put in CI.
+every pin any commit ever made still resolves. The third commit id is jj's
+empty working-copy commit on top of the one you just made; it carries the
+same manifests, so it verifies the same pin. In CI, run
+`verify --all-history --deep`: `--deep` opens each recorded state, which is
+the only way to check a Delta, DuckLake or `--pin record` object (without it
+they report `unknown`, and `verify` exits 1). The
+[Sharing and CI](13-sharing-and-ci.qmd#a-ci-recipe) page has the recipe.
 
 ## What was written
 
@@ -217,7 +226,8 @@ through) and `.tether/ops.jsonl` (what tether did to the stores, for `undo`)
 
 ## Next
 
-Remote systems register the same way; only the locator changes:
+Remote systems register the same way; only the locator changes (`neon` is
+experimental: it has run against a fake of the service, not a live project):
 
 ```bash
 tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk
@@ -234,3 +244,5 @@ tether add code         --kind git ../analysis-code
   real output.
 - [Concepts](02-concepts.qmd): the model in one page, and where it maps onto
   jj.
+- [Sharing and CI](13-sharing-and-ci.qmd): hand the dataset to a teammate,
+  and run `verify` in CI.

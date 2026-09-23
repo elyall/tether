@@ -20,11 +20,12 @@ Think of it as **DVC for branchable systems**: like DVC it commits small
 manifests to your repository, but where DVC only fingerprints files, tether
 also pins and forks live systems.
 
-> Status: pre-release (`0.1.0` betas). See the
-> [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md) and
-> [ROADMAP.md](https://github.com/elyall/tether/blob/main/ROADMAP.md) for
-> what is tested against real services and what is still experimental.
-> Vibe coded with Claude Fable 5.1. **USE AT YOUR OWN RISK.**
+> Status: pre-release (`0.1.0` betas).
+> [ROADMAP.md](https://github.com/elyall/tether/blob/main/ROADMAP.md) says
+> what has run against real services, what is still experimental, and what
+> blocks 0.1.0; the
+> [changelog](https://github.com/elyall/tether/blob/main/CHANGELOG.md) says
+> what changed. Vibe coded with Claude Fable 5.1. **USE AT YOUR OWN RISK.**
 
 ## Install
 
@@ -35,7 +36,9 @@ pip install "tether-vcs[all]"                 # everything
 ```
 
 The distribution is `tether-vcs`; the package you import and the command you
-run are both `tether`. Python 3.11 or newer; `git` and/or `jj` on `PATH`.
+run are both `tether`. Python 3.11 or newer; `git` and/or `jj` on `PATH`
+(minimum versions in the
+[CLI guide](https://evanlyall.com/tether/user-guide/cli.html#versions-and-environment)).
 Extras: `objectstore` (S3/GCS/Azure for `file`), `icechunk`, `neon`,
 `iceberg`, `delta`, `lance`, `ducklake`, `dolt`, `postgres`, `all`.
 
@@ -83,8 +86,10 @@ h = repo.open("zarr/imaging")  # writable IcechunkHandle on this bookmark's bran
 ro = repo.open("zarr/imaging", rev="main")  # read-only at main's pin
 ```
 
-Every command that writes to a store takes `--dry-run` (and `--plan FILE` /
-`--from-plan FILE`) so the writes can be reviewed first. The
+The commands that plan before they write -- `commit`, `new`, `restore`,
+`promote`, `gc`, `drop`, `forget-workspace`, `import`, `repair`, `upgrade` --
+take `--dry-run` (and `--plan FILE` / `--from-plan FILE`) so the store writes
+can be reviewed first. The
 [Getting Started guide](https://evanlyall.com/tether/user-guide/getting-started.html)
 runs this walkthrough with full output; the
 [user guide](https://evanlyall.com/tether/user-guide/) takes it from there.
@@ -95,16 +100,16 @@ runs this walkthrough with full output; the
   History, branching, workspaces, and sharing are the VCS's.
 - **Commits hold pins.** Each dataset commit records, per object, an exact
   state and -- where the system allows -- a *pin*: a native, GC-proof ref (an
-  Icechunk tag, a protected Neon branch, a git tag) that holds that state.
+  Icechunk tag, a Neon branch, a git tag) that holds that state.
   `tether open KEY --rev C` reads it back.
 - **Bookmarks hold branches.** The trunk bookmark (`main`) stands for every
   object's upstream branch; working on it writes there. Any other bookmark
   stands for one branch per system, `tether.ws.<dataset>.<bookmark>`, forked
   from the pins where it started and created on the first write.
-- **`commit`, `promote`, `pull`** are the three verbs: pin the bookmark's
-  branch heads and move the bookmark; fast-forward (or merge) each system's
-  upstream branch to the bookmark's and move `main`; read what upstream has
-  now and commit it.
+- **Three verbs.** `commit` pins the bookmark's branch heads and moves the
+  bookmark. `promote` moves each system's upstream branch to those heads,
+  then moves the `main` bookmark. `pull` reads what upstream has now and
+  commits it.
 - **tether is never in the data path.** `open` returns the system's native
   handle -- an Icechunk session, a Postgres URL, a `DeltaTable` -- and steps
   aside.
@@ -119,7 +124,7 @@ Every backend is fingerprinted; the rest depends on what the system offers.
 | Backend | Recover | Pin | Fork | Promote | Merge | Diff | History |
 | --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | local files and directories; object-store prefixes (S3, GCS, Azure) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| single object-store objects with versioning enabled | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| single object-store objects with versioning enabled | 🟡 | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
 | git / [jj](https://jj-vcs.dev) repositories | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Icechunk](https://icechunk.io) repositories | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | [Lance](https://lance.org) datasets | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
@@ -137,8 +142,12 @@ at commit time. **Fork**: a writable branch off a pin for `tether new`.
 to the fork. **Diff**: `tether diff --content` describes what changed inside
 the object. **History**: `tether log` lists the object's own snapshots.
 *Experimental* backends have run against a fake of the service, not the
-service itself. The full matrix -- state fields, flags, per-backend caveats --
-is in the [backends guide](https://evanlyall.com/tether/user-guide/backends.html).
+service itself. Stable ones run their full lifecycle in CI; for `file` and
+Icechunk that means local storage, and their S3, GCS and Azure paths have not
+run against a cloud service yet (see the
+[roadmap](https://github.com/elyall/tether/blob/main/ROADMAP.md)). The full
+matrix -- state fields, flags, per-backend caveats -- is in the
+[backends guide](https://evanlyall.com/tether/user-guide/backends.html).
 
 ## jj or tether?
 
@@ -170,6 +179,8 @@ has the table.
 [worked examples](https://evanlyall.com/tether/user-guide/use-cases.html),
 [CLI guide](https://evanlyall.com/tether/user-guide/cli.html),
 [backends](https://evanlyall.com/tether/user-guide/backends.html),
+[sharing and CI](https://evanlyall.com/tether/user-guide/sharing-and-ci.html),
+[troubleshooting](https://evanlyall.com/tether/user-guide/troubleshooting.html),
 and the generated API and CLI reference.
 
 ## Why this exists

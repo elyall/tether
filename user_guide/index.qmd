@@ -37,13 +37,15 @@ exactly the state that commit recorded.
 | Understand the model and how it maps onto jj | [Concepts](02-concepts.qmd) |
 | Record state and reproduce reads later | [Pinning](03-pinning.qmd) |
 | Change data on a branch, then land or discard it | [Branching and Writing](04-branching-and-writing.qmd) |
-| Keep the storage bill down; preview every store write | [Reclaiming Storage](05-reclaiming-storage.qmd) |
+| Keep the storage bill down; preview store writes as plans | [Reclaiming Storage](05-reclaiming-storage.qmd) |
 | See the whole loop run, with real output | [Worked Examples](06-use-cases.qmd) |
 | Look up a command's behaviour, exit codes, JSON | [CLI Guide](07-cli.qmd) |
 | Configure a dataset; keep credentials out of it | [Configuration](08-configuration.qmd) |
 | Check what a backend can and cannot do | [Backends](09-backends.qmd), [Caveats and Performance](12-caveats-and-performance.qmd) |
 | Publish history as SQL, or import objects from a registry | [Registries and SQL](10-registries-and-sql.qmd) |
 | Add a system tether does not know yet | [Writing a Backend](11-extending.qmd) |
+| Hand a dataset to a teammate, or run it in CI | [Sharing and CI](13-sharing-and-ci.qmd) |
+| Read an error and find the way out; remove tether from a repository | [Troubleshooting](14-troubleshooting.qmd) |
 
 The generated **Reference** (top navigation) has every CLI flag and every
 Python symbol.
@@ -57,7 +59,7 @@ Eight words carry the whole guide.
 | **object** | One thing tether tracks, under a key such as `zarr/imaging`: an Icechunk repository, a directory or object-store prefix, a Neon database, a git repository, ... |
 | **dataset** | The git/jj repository holding one manifest per object. A **dataset commit** is a VCS commit of those manifests: a position for every object at once. |
 | **state** | An object's fingerprint right now -- a snapshot id, an LSN, a content digest. Comparing states is how drift is found. |
-| **pin** | A durable native ref (`tether.<dataset>.<hash>`: an Icechunk tag, a protected Neon branch, a git tag) that tether creates at commit time so a recorded state cannot be expired or garbage-collected. |
+| **pin** | A durable native ref (`tether.<dataset>.<hash>`: an Icechunk tag, a Neon branch, a git tag) that tether creates at commit time so a recorded state cannot be expired or garbage-collected. |
 | **bookmark** | A jj bookmark or git branch of the dataset. It stands for one branch per system. |
 | **trunk** | The `main` bookmark. It stands for each object's **upstream branch** -- the branch the object had before tether -- so working on the trunk writes there. |
 | **working ref** | The store branch this checkout writes through: the upstream branch on the trunk, `tether.ws.<dataset>.<bookmark>` on any other bookmark. |

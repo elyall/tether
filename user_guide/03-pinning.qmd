@@ -7,8 +7,9 @@ guide-section: "Core Workflows"
 be read back later -- and, where the system supports it, holding that state
 with a native reference that survives retention and cleanup. This page
 assumes [Getting Started](01-getting-started.qmd) and moves to the objects a
-lab actually has: an Icechunk repository on S3, a Neon Postgres database, and
-a directory of raw plate images on a shared filesystem.
+lab actually has: an Icechunk repository on S3, a Neon Postgres database (an
+experimental backend), and a directory of raw plate images on a shared
+filesystem.
 
 ## Register the objects
 
@@ -51,8 +52,8 @@ committed 8d5719841a09
 
 | Object | State recorded | Pin created |
 | --- | --- | --- |
-| `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.0a1b2c3d.6674305d5e1fe5f6` (immutable, excluded from expiry) |
-| `db/metrics` | `lsn`, `commit_xid` of `main` | protected Neon child branch `tether.0a1b2c3d.a91f0e2b77c3e5f6` at that LSN |
+| `zarr/imaging` | `snapshot_id` of `main` | Icechunk tag `tether.0a1b2c3d.6674305d5e1fe5f6` (immutable; the default `expire_snapshots` keeps tagged snapshots) |
+| `db/metrics` | `lsn`, `commit_xid` of `main` | Neon child branch `tether.0a1b2c3d.a91f0e2b77c3e5f6` at that LSN (protected only with `protected_pins = true`) |
 | `raw/plate1` | `count`, `size`, `digest` | none; the per-file listing is stored under `.tether/listings/` |
 
 Then the manifests (and the listing) were committed to your repository as
@@ -117,7 +118,7 @@ tether diff 8d571984 cfc66fa7 --content
 ```
 
 ```
-    changed  db/metrics  [+0 -0 ~0 tables]
+    changed  db/metrics
     changed  zarr/imaging  [+0 -0 ~3 nodes]
                modified  /labels  12 chunks
                modified  /masks  12 chunks
@@ -227,8 +228,10 @@ A report is `ok`, `drifted` (the ref exists but points elsewhere), `missing`
 (the ref or snapshot is gone), or `unknown` (cannot tell without `--deep`).
 `--all-history` streams every manifest at every commit through one object
 reader and verifies each distinct pin once, so it stays fast on long
-histories. Exit status is non-zero if anything is not `ok`, which makes it a
-natural CI check.
+histories. Exit status is 1 if anything is not `ok`, `unknown` included, so
+the CI form is `verify --all-history --deep`: a Delta, DuckLake or
+`--pin record` state can only be checked by opening it (see
+[Sharing and CI](13-sharing-and-ci.qmd#a-ci-recipe)).
 
 A pin is never taken on trust. Before `open --rev`, `new` from a commit, or
 `promote --rev` reads or forks from one, the engine checks it against the
@@ -248,10 +251,10 @@ tether gc                 # dry run: print the plan
 tether gc --no-dry-run    # release orphaned pins, prune unreferenced listings
 ```
 
-Run `verify --all-history` first; `gc` trusts history, and a pin that is
-referenced but broken is a `verify` finding, not a `gc` one. Dropping history
-on purpose, previewing every store write, and cleaning up working branches
-are covered in [Reclaiming Storage](05-reclaiming-storage.qmd).
+Run `verify --all-history --deep` first; `gc` trusts history, and a pin that
+is referenced but broken is a `verify` finding, not a `gc` one. Dropping
+history on purpose, previewing store writes as plans, and cleaning up working
+branches are covered in [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 ## Next
 

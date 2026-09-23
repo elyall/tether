@@ -8,8 +8,8 @@ ref, and a native ref holds storage: an Icechunk tag keeps every chunk its
 snapshot references, a Neon branch keeps its history window, an Iceberg tag
 blocks snapshot expiry. Each commit adds one pin per changed object, and each
 fork adds a branch. This page is the canonical home for two things: how to
-**preview every store write** before it happens, and the three levers for
-keeping the storage bill in check.
+**preview store writes as plans** before they happen, and the three levers
+for keeping the storage bill in check.
 
 The rule underneath all of it: **tether's VCS history is the reference set.**
 A pin, branch, or listing stays alive as long as some manifest in some commit
@@ -17,9 +17,9 @@ names it. Drop the commit and `gc` releases what it held.
 
 ## Preview before you write: plans
 
-Every command that touches an external system -- `commit`, `new`, `gc`,
-`promote`, `restore`, `drop`, `import`, `repair`, `upgrade`,
-`forget-workspace` -- is a read-only *plan* followed by an *apply*:
+Ten commands -- `commit`, `new`, `restore`, `promote`, `gc`, `drop`,
+`forget-workspace`, `import`, `repair`, `upgrade` -- are a read-only *plan*
+followed by an *apply*:
 
 ```bash
 tether commit -m "Relabel plate1" --dry-run
@@ -78,9 +78,12 @@ apply time, so a fork write that slips in between is not promoted by accident;
 a lazy fork on first writable `open` resets an existing branch only onto the
 head `new` reviewed and agreed to reset.
 
-The one store write without a dry run of its own is that lazy fork: `open`
-creates the branch `new` decided on. `new --eager --dry-run` previews what
-would be created.
+Not every store write is a plan. `pull` pins what moved and commits it,
+`undo` deletes the branches an operation created, `abandon --gc` applies the
+`gc` plan it prints, `add --create` makes a store, and the first writable
+`open` forks the branch `new` decided on. None of those takes `--dry-run`;
+`new --eager --dry-run` previews the forks, and `abandon` without `--gc`
+shows its plan without applying it.
 
 ## Lever 1: do not pin what you will not need -- `--pin record`
 
@@ -128,7 +131,7 @@ tether abandon krlwtmzy ptnwqsyu        # jj change ids, or git shas
 abandoned 3c1e9f0a2b7d, 8d2f4a1b9c0e
 plan: gc (2 write(s))
                unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
-               unpin  db/metrics    [neon] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.b81f4c2d9e60a7c3  no manifest in history references it
 (not applied; `tether gc --no-dry-run` releases these, or re-run with --gc)
 ```
 
@@ -196,16 +199,16 @@ orphans.
 ## Lever 3: `gc`
 
 ```bash
-tether verify --all-history      # confirm what is still referenced actually resolves
-tether gc                        # dry run: the plan
+tether verify --all-history --deep   # confirm what is still referenced actually resolves
+tether gc                            # dry run: the plan
 ```
 
 ```
 plan: gc (5 write(s))
                unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
                unpin  zarr/imaging  [icechunk] tether.0a1b2c3d.c48b2f6e1d07a9b0  no manifest in history references it
-               unpin  db/metrics    [neon] tether.0a1b2c3d.7d1e0c9a2b34e5f6  no manifest in history references it
-               unpin  db/metrics    [neon] tether.0a1b2c3d.c48b2f6e1d07a9b0  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.b81f4c2d9e60a7c3  no manifest in history references it
+               unpin  db/metrics    [neon] tether.0a1b2c3d.3e5a9d07c1f28b64  no manifest in history references it
       delete-listing                a1c9…e3f2.jsonl  unreferenced
 ```
 
@@ -225,8 +228,8 @@ tether gc --no-dry-run
 unpinned 4 pin(s)
   icechunk: 0a1b2c3d.7d1e0c9a2b34e5f6
   icechunk: 0a1b2c3d.c48b2f6e1d07a9b0
-  neon: 0a1b2c3d.7d1e0c9a2b34e5f6
-  neon: 0a1b2c3d.c48b2f6e1d07a9b0
+  neon: 0a1b2c3d.b81f4c2d9e60a7c3
+  neon: 0a1b2c3d.3e5a9d07c1f28b64
 deleted 1 orphan listing(s)
 ```
 
@@ -237,14 +240,15 @@ tether gc --plan /tmp/gc.json
 tether gc --from-plan /tmp/gc.json
 ```
 
-`gc` is the one command whose store writes cannot be undone: `tether undo`
-after a `gc` restores the working refs it forgot and the listings it deleted
-(from the VCS), and reports the released pins and deleted branches as
-irreversible. If you restore a commit that references a released pin --
-`jj undo` of the abandon -- `tether repair` recreates the pin from the
-manifest's state, as long as the
-system has not expired that snapshot yet. That window is the argument for
-running `gc` some time *after* the history edit, not in the same breath.
+A released pin is not undone by `tether undo`: after a `gc` it restores the
+working refs it forgot and the listings it deleted (from the VCS), and
+reports the released pins and deleted branches as irreversible (what `undo`
+reverses per command is one table in the [CLI Guide](07-cli.qmd#undo)). If
+you restore a commit that references a released pin -- `jj undo` of the
+abandon -- `tether repair` recreates the pin from the manifest's state, as
+long as the system has not expired that snapshot yet. That window is the
+argument for running `gc` some time *after* the history edit, not in the same
+breath.
 
 Releasing a tag or branch makes the data *eligible* for reclamation; the
 system decides when. Icechunk needs `repo.expire_snapshots(...)` then
@@ -289,15 +293,21 @@ checkout still works on (plus any `--keep-bookmark NAME`, for a bookmark that
 only exists on another machine) and every branch a live checkout has as its
 working ref or pending fork, and judges the rest by their head. Branches
 from before bookmarks existed -- one per workspace and object -- are judged
-the same way:
+the same way. This table is the one place the verdicts are defined; `drop`
+adds one rule of its own ([CLI Guide](07-cli.qmd#drop)):
 
-| Head state | Decision |
-| --- | --- |
-| natively pinned by some commit (a tag holds it) | `delete-branch` |
-| equal to the base branch's head (nothing was ever written) | `delete-branch` |
-| has writes no commit pinned | `keep-branch` |
-| a `--pin record` state (only this branch keeps it reachable) | `keep-branch` |
-| on a backend whose branches *are* the storage (Neon) | `keep-branch` |
+| Branch head | Default | `--force-prune` |
+| --- | --- | --- |
+| natively pinned by some commit (a tag holds it) | `delete-branch` | `delete-branch` |
+| equal to the base branch's head (nothing was ever written) | `delete-branch` | `delete-branch` |
+| has writes no commit pinned | `keep-branch` | `delete-branch FORCED` (data lost) |
+| a `--pin record` state (only this branch keeps it reachable) | `keep-branch` | `delete-branch FORCED` |
+| on a backend whose branches *are* the storage (`BRANCH_IS_STORAGE`: Neon) | `keep-branch` | `delete-branch FORCED` |
+| the store refuses to delete it (Neon: pins hang off it) | `keep-branch: cannot be deleted` | the same |
+
+Both sweeps stay inside this dataset's namespace: pins and branches whose
+name carries another dataset's id are counted in the plan's notes (`N pin(s)
+of other datasets left alone`) and never touched, `--force-prune` included.
 
 ```bash
 jj bookmark delete relabel                        # the line of work is over

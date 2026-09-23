@@ -51,14 +51,17 @@ are experimental and print a note saying so.
 ## Exit codes and errors
 
 `0` on success, `1` on any `TetherError` (printed to stderr as `error: ...`).
-`verify` also exits `1` when any report is not `ok`, `status` when any
-object is `error`, and `promote` when anything was refused, which makes them
-natural CI gates. `undo`, `repair`,
-`upgrade`, and `forget-workspace` exit `3` when they did part of the job and
-the store would not allow the rest (each such part is printed as
-`IRREVERSIBLE` / `FAILED`). `2` is a usage error (an unknown option, a
-missing argument), as in every Click program. Failures in one object's backend during a fan-out
-are aggregated into one message listing each object.
+`verify` also exits `1` when any report is not `ok` -- `unknown` included,
+which is what a Delta, DuckLake or `--pin record` state reports without
+`--deep` -- `status` when any object is `error`, and `promote` when anything
+was refused, which makes them natural CI gates (`promote --dry-run` exits `0`
+whatever the plan says). `undo`, `repair`, `upgrade`, and `forget-workspace`
+exit `3` when they did part of the job and the store would not allow the rest
+(each such part is printed as `IRREVERSIBLE` / `FAILED`). `2` is a usage
+error (an unknown option, a missing argument), as in every Click program.
+Failures in one object's backend during a fan-out are aggregated into one
+message listing each object. What each error class means and the way out of
+it: [Troubleshooting](14-troubleshooting.qmd).
 
 ## Revisions
 
@@ -87,12 +90,22 @@ only those), and `log.showSignature` / `core.quotePath`. Revset aliases that
 shadow builtins (`all()`) do not change what tether walks: it uses operator
 forms (`::`).
 
+Every environment variable tether reads, in one table (the Configuration and
+Backends pages point here):
+
 | Variable | Effect |
 | --- | --- |
-| `TETHER_REV` | Default `--rev` for `open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
+| `TETHER_REV` | Default `--rev` for `open` and `Repo.open`: handles resolve read-only at that commit's pinned state. Set it in reproducible jobs. |
 | `PATH`, `TETHER_JJ`, `TETHER_GIT` | Which `jj` / `git` tether shells out to: `.tether/secrets.toml` `[vcs] jj_path` / `git_path`, then `TETHER_JJ` / `TETHER_GIT`, then `PATH`. Never the committed `tether.toml` (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
-| Backend credentials | Never stored in manifests; each backend reads them from `.tether/secrets.toml` or the environment (`NEON_API_KEY`, AWS/GCP/Azure defaults, ...; Dolt only from a per-server secrets entry). See [Backends](09-backends.qmd). |
+| `TETHER_PUBLISH_DSN` | The Postgres DSN `tether publish` writes to when `--to` is not given. |
+| `NEON_API_KEY` | The Neon API key, unless `[backends.neon] api_key_env` in `secrets.toml` names another variable. |
+| the variables a Dolt server's `user_env` / `password_env` name | Dolt credentials, only for the server whose `[uris."mysql://host:port"]` entry names them; no variable is read by convention. |
+| AWS / GCP / Azure credential chains | `file` (obstore), `icechunk`, `delta`, `lance`, unless a `secrets.toml` entry supplies a `profile`, `role_arn` or literal keys for the object. |
+| pyiceberg catalog properties and environment | `iceberg`. |
 | `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, ... | Ignored: tether clears the variables that point git at another repository or add config to it (the ones `git rev-parse --local-env-vars` lists), so running inside a git hook still commits to the repository the dataset is in. `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` are honoured. |
+
+Credentials are never stored in manifests. Each backend's sources are listed
+in its Config row in [Backends](09-backends.qmd).
 
 ## Plans
 
@@ -106,7 +119,9 @@ applying, tether re-checks the plan's preconditions -- the manifests, the
 branch heads it will touch, the workspace -- and refuses with
 `StalePlanError` if anything differs from what the plan recorded. `gc` and
 `drop` are dry runs unless `--no-dry-run` or `--from-plan` is given. The
-contract is spelled out in
+other store writes are not plans and take no `--dry-run`: `pull`, `undo`,
+`abandon --gc`, `add --create`, and the lazy fork a writable `open` performs
+(`publish --dry-run` exists, but no `--plan`). The contract is spelled out in
 [Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans).
 
 A plan carries its own preconditions, so each command *requires* a set of
@@ -146,7 +161,7 @@ Action verbs, by command:
 | Command | Verbs |
 | --- | --- |
 | `commit`, `pull` | `pin`, `record`, `vcs-commit` |
-| `new` | `fork`, `defer-fork`, `reuse`, `share`, `trunk` |
+| `new` | `fork`, `defer-fork`, `reuse`, `share`, `trunk`, `refuse` |
 | `restore` | `fork`, `refuse` |
 | `promote` | `fast-forward`, `merge`, `hold`, `refuse` |
 | `gc` | `unpin`, `keep-pin`, `delete-branch`, `keep-branch`, `forget-working-ref`, `delete-listing`; with `--delete-stores`: `delete-store`, `keep-store`, `forget-store`, `forget-touched` |
@@ -155,14 +170,14 @@ Action verbs, by command:
 | `import` | `add`, `update`, `remove` |
 | `publish` | `upsert` |
 | `repair` | `repin`, `refork` |
-| `upgrade` | `rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`, `refingerprint`, `rename-manifest`, `rewrite-locator` |
+| `upgrade` | `rename-pin`, `rename-branch`, `rewrite-history`, `rewrite-manifest`, `refingerprint`, `rename-manifest`, `rewrite-locator`, `vcs-commit` |
 
 `trunk`, `defer-fork`, `reuse`, `share`, `hold`, `refuse`, `keep-branch`,
 `keep-pin`, and `keep-store` are informational -- they write nothing, and a
 plan holding only those is empty.
 
-`share` is how objects that live in one native branch space -- two databases
-of a Neon project, two keys on one Icechunk store -- get *one* branch per
+`share` is how objects that live in one *branch scope* -- two databases of a
+Neon project, two keys on one Icechunk store -- get *one* branch per
 bookmark: the first member forks (or defers) it, the others share it, and a
 member that pins a different state of the same branch is refused (a branch is
 at one point; commit them together on the trunk first). `restore` and
@@ -212,9 +227,12 @@ dataset 3f9c2a1b7d0e (STALE: zarr/imaging); on bookmark relabel
      clean  db/metrics  [neon/forkable] verify=ok
 ```
 
-- The header names the bookmark this working copy is on (`on trunk bookmark
-  main`; `on no bookmark: read-only`), and a `warning:` line follows when the
-  VCS moved, renamed, or deleted it behind tether's back, with what to do.
+- The header's hex is the hash of the working tree's manifests as they are
+  now (`manifest_hash` in `--json`; plans bind to it), not the dataset's id,
+  which is the 8-hex `[dataset] id` in `tether.toml`. It names the bookmark
+  this working copy is on (`on trunk bookmark main`; `on no bookmark:
+  read-only`), and a `warning:` line follows when the VCS moved, renamed, or
+  deleted it behind tether's back, with what to do.
 - States: `new` (no commit yet), `modified` (the bookmark's branch for the
   object differs from the commit), `behind` (on the trunk, a branch-less or
   `--at` object whose system moved past its pin -- `pull` takes it), `clean`,
@@ -282,14 +300,20 @@ first). `undo` uncommits a pull like a commit.
 ## `new`
 
 Decides which bookmark this working copy works on, then records a working ref
-per Forkable object. `-b NAME` creates the bookmark at `REV` (default: here)
--- refused if it exists; `REV` naming a bookmark joins it; any other `REV`
-takes the bookmark at that commit (the one this workspace has, else the
-trunk, else the only one) or, if none, makes the working copy read-only; no
-`REV` keeps the current bookmark. A bookmark another live checkout works on is
-refused unless `--shared`. On the trunk (`[vcs] trunk`, default `main`) the
-working ref is each object's upstream branch (`trunk` in the plan); on any
-other bookmark it is `tether.ws.<dataset>.<bookmark>` in that object's system.
+per Forkable object. Which bookmark depends on the arguments:
+
+- `new -b NAME [REV]`: create `NAME` at `REV` (default: here); refused if it
+  exists.
+- `new NAME`: join an existing bookmark.
+- `new REV`: take the bookmark at that commit (the one this workspace has,
+  else the trunk, else the only one); with none there, the working copy is
+  read-only.
+- `new`: stay on the current bookmark.
+
+A bookmark another live checkout works on is refused unless `--shared`. On
+the trunk (`[vcs] trunk`, default `main`) the working ref is each object's
+upstream branch (`trunk` in the plan); on any other bookmark it is
+`tether.ws.<dataset>.<bookmark>` in that object's system.
 By default (`[new] fork = "lazy"`) that branch is *not created yet* -- the plan
 shows `defer-fork` and the first writable `open` creates it from the pin.
 `--eager` creates them all during `new`. Objects with `pin = "record"` fork
@@ -460,19 +484,12 @@ resolve it (`jj bookmark set`, `jj resolve`) first.
 that are gone (every bookmark the VCS has, or a live checkout works on, is
 kept; `--keep-bookmark NAME` keeps one that only exists elsewhere), legacy
 per-workspace branches from before bookmarks, and this bookmark's branches
-that no current object uses. Each branch gets one verdict:
-
-| Branch head | Default | `--force-prune` |
-| --- | --- | --- |
-| natively pinned by some commit, or equal to the base branch | `delete-branch` | `delete-branch` |
-| holds unpinned writes | `keep-branch` | `delete-branch FORCED` (data lost) |
-| a `--pin record` state (no native ref) | `keep-branch` | `delete-branch FORCED` |
-| on a `BRANCH_IS_STORAGE` backend (Neon) | `keep-branch` | `delete-branch FORCED` |
-| the store refuses to delete it (Neon: pins hang off it) | `keep-branch: cannot be deleted` | same |
-
-Both sweeps stay inside this dataset's namespace: pins and branches whose
-name carries another dataset's id are counted in the plan's notes (`N pin(s)
-of other datasets left alone`) and never touched, `--force-prune` included.
+that no current object uses. Each branch gets one verdict from its head:
+`delete-branch` when a pin holds it or nothing was written, `keep-branch`
+otherwise, and `--force-prune` deletes the kept ones too. The verdict table
+is in [Reclaiming Storage](05-reclaiming-storage.qmd#branches-of-bookmarks-that-are-gone).
+Both sweeps stay inside this dataset's namespace: refs carrying another
+dataset's id are counted in the plan's notes and never touched.
 
 `--delete-stores` (opt-in, **experimental** -- the command says so) adds a
 last step for stores this dataset *created* (`add --create`) that no manifest
@@ -677,10 +694,12 @@ before `add`. Ids are valid `--at` values.
 
 ## `diff`
 
-No arguments: the last commit (`HEAD` in git, `@-` in jj) vs working tree. One revision: that revision vs
-nothing (everything `removed`). Two: `REV_A → REV_B`. `--content` adds each
-changed object's native diff; `--limit` caps entries printed per object
-(counts stay exact).
+No arguments: the last commit (`HEAD` in git, `@-` in jj) vs the working
+tree. One revision: that revision vs the working tree. Two: `REV_A → REV_B`.
+An object whose locator or policy changed but whose state did not is
+`changed` too (`[policy changed; same state]`; `why` in `--json`).
+`--content` adds each changed object's native diff; `--limit` caps entries
+printed per object (counts stay exact).
 
 ## `export`, `publish`, `import`
 
@@ -699,7 +718,7 @@ per-table counts.
 | Command | Shape |
 | --- | --- |
 | `init` | `{"root": "<absolute path>", "dataset_id": "<8 hex>"}` |
-| `backends` | `[{"kind", "installed", "maturity", "tier", "capabilities": [names]}]` (an uninstalled extra: `installed` false, the rest null) |
+| `backends` | `[{"kind", "installed", "maturity", "tier", "capabilities": [names], "note": str or null}]` (an uninstalled extra: `installed` false, `maturity` and `tier` null, `capabilities` `[]`, `note` the import error) |
 | `status` | `{"manifest_hash", "stale", "stale_keys", "fresh", "snapshot_at", "bookmark", "trunk", "bookmark_drift": [str], "vcs_drift": [{"op", "commit", "referenced": {key: bool}}], "objects": [{"key", "kind", "tier", "state", "pinned", "recoverable", "origin", "verify", "error": str or null}]}`; `fresh` is false when the cached snapshot from `snapshot_at` was shown |
 | `set` | `{"changed": {key: {field: {"from", "to"}}}, "unchanged": [keys]}` |
 | `pull` | `{"bookmark", "committed": {key: {"from", "to"}}, "unchanged": [keys], "skipped": [keys], "vcs_commit", "pinned": {key: pin_id or null}}` |
@@ -710,7 +729,7 @@ per-table counts.
 | `open` | `{"key", "read_only", "address", "type"}` |
 | `restore` | `{"from": rev, "working_refs": {key: ref}}`; with `--dry-run`: the plan |
 | `verify` | `{label: {"status", "message"}}` with labels `key` or `<commit12>:key` |
-| `diff` | `[{"key", "change", "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
+| `diff` | `[{"key", "change", "why": [of "state", "pin", "locator", "policy"], "a": pin_id or null, "b": pin_id or null, "detail": ObjectDiff or null, "detail_error": str or null}]` where `ObjectDiff` is `{"summary", "unit", "added", "removed", "modified", "truncated", "note", "entries": [{"path", "change", "detail"}]}` |
 | `log` | `[{"id", "when", "message", "refs": [names]}]` |
 | `gc` | dry run (default): the plan; after applying: `{"dry_run": false, "unpinned": {kind: [pin_ids]}, "deleted_working_refs": {key: [refs]}, "kept_working_refs": {key: [refs]}, "forgotten_working_refs": {key: [refs]}, "deleted_listings": [names], "deleted_stores": {key: where}, "kept_stores": {key: reason}, "forgotten_stores": [keys]}` |
 | `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
