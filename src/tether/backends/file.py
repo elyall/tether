@@ -29,9 +29,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from collections import OrderedDict
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -49,7 +51,7 @@ from tether.backends.base import (
     register_backend,
     wrap_library_errors,
 )
-from tether.errors import BackendError, CapabilityError
+from tether.errors import BackendError, CapabilityError, ConfigError
 from tether.handles import FileHandle, Handle
 from tether.manifest import Locator, Pin, Policy, State
 
@@ -59,30 +61,91 @@ _REMOTE_SCHEMES = frozenset(
 )
 
 # obstore's `ClientConfig`: passed as `client_options`, not as store config.
-_CLIENT_OPTION_KEYS = frozenset(
+_CLIENT_BOOL_KEYS = frozenset(
     {
         "allow_http",
         "allow_invalid_certificates",
-        "connect_timeout",
-        "default_content_type",
-        "default_headers",
         "http1_only",
-        "http2_keep_alive_interval",
-        "http2_keep_alive_timeout",
         "http2_keep_alive_while_idle",
         "http2_only",
-        "pool_idle_timeout",
-        "pool_max_idle_per_host",
-        "proxy_url",
-        "proxy_ca_certificate",
-        "proxy_excludes",
         "randomize_addresses",
-        "read_timeout",
-        "root_certificate",
-        "timeout",
-        "user_agent",
     }
 )
+_CLIENT_DURATION_KEYS = frozenset(
+    {
+        "connect_timeout",
+        "http2_keep_alive_interval",
+        "http2_keep_alive_timeout",
+        "pool_idle_timeout",
+        "read_timeout",
+        "timeout",
+    }
+)
+_CLIENT_OPTION_KEYS = (
+    _CLIENT_BOOL_KEYS
+    | _CLIENT_DURATION_KEYS
+    | frozenset(
+        {
+            "default_content_type",
+            "default_headers",
+            "pool_max_idle_per_host",
+            "proxy_url",
+            "proxy_ca_certificate",
+            "proxy_excludes",
+            "root_certificate",
+            "user_agent",
+        }
+    )
+)
+_STORE_PREFIXES = ("aws_", "google_", "azure_")
+"""How store config spells a key (`AWS_ALLOW_HTTP`); obstore parses a client
+key given that way as a store key and panics."""
+
+_TRUE = frozenset({"true", "1", "yes", "on"})
+_FALSE = frozenset({"false", "0", "no", "off"})
+
+
+def _client_key(key: str) -> str | None:
+    """The `ClientConfig` key `key` names, in any case or store prefix."""
+    name = key.lower()
+    for prefix in _STORE_PREFIXES:
+        if name.startswith(prefix) and name[len(prefix) :] in _CLIENT_OPTION_KEYS:
+            return name[len(prefix) :]
+    return name if name in _CLIENT_OPTION_KEYS else None
+
+
+def _client_value(key: str, value: Any) -> Any:
+    """`value` as obstore's `ClientConfig` takes it for `key`: booleans (from
+    `"true"` or `1` too), durations as strings (a number is seconds: `5` ->
+    `"5000ms"`), counts and text as strings.
+
+    Raises:
+        ConfigError: A value that cannot mean what `key` needs.
+    """
+    if key in _CLIENT_BOOL_KEYS:
+        text = str(value).strip().lower()
+        if isinstance(value, bool) or text in _TRUE | _FALSE:
+            return value if isinstance(value, bool) else text in _TRUE
+    elif key in _CLIENT_DURATION_KEYS:
+        if isinstance(value, timedelta):
+            value = value.total_seconds()
+        if isinstance(value, str) and re.fullmatch(r"\s*\d+(\.\d+)?\s*", value):
+            value = float(value)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{round(value * 1000)}ms"
+        if isinstance(value, str) and value.strip():
+            return value
+    elif key == "default_headers":
+        if isinstance(value, Mapping):
+            return {str(k): str(v) for k, v in value.items()}
+    elif key == "root_certificate":
+        if isinstance(value, str | bytes):
+            return value
+    elif key == "proxy_excludes" and isinstance(value, list | tuple):
+        return ",".join(str(v) for v in value)
+    elif not isinstance(value, bool | Mapping | list | tuple):
+        return str(value)
+    raise ConfigError(f"file client option {key}: cannot use {value!r}")
 
 
 def _parse(uri: str) -> tuple[str, str, str]:
@@ -437,6 +500,10 @@ class FileBackend(ObjectBackend):
         manifests. ``[backends.file] storage_options`` in ``tether.toml`` is
         passed through verbatim (region, endpoint, account name, ...); a locator
         ``region`` overrides it. Tests replace this seam with an in-memory store.
+
+        Raises:
+            ConfigError: An option obstore does not know, or a value it cannot
+                take.
         """
         from obstore.store import from_url
 
@@ -448,15 +515,29 @@ class FileBackend(ObjectBackend):
             options["region"] = str(region)
         # Per-object credentials from secrets.toml, resolved to static keys.
         options.update(storage_options(self.secrets_for(locator)))
-        # HTTP client settings are a separate argument; as store config keys
-        # obstore panics (a BaseException, past `wrap_library_errors`).
-        client = dict(options.pop("client_options", None) or {})
-        client.update(
-            {k: options.pop(k) for k in list(options) if k in _CLIENT_OPTION_KEYS}
-        )
+        # HTTP client settings are a separate argument, however they are
+        # spelled; as store config keys obstore panics (a BaseException,
+        # past `wrap_library_errors`).
+        client: dict[str, Any] = {}
+        for key, value in dict(options.pop("client_options", None) or {}).items():
+            name = _client_key(str(key))
+            if name is None:
+                raise ConfigError(f"file storage_options: unknown client option {key}")
+            client[name] = _client_value(name, value)
+        for key in list(options):
+            name = _client_key(str(key))
+            if name is not None:
+                client[name] = _client_value(name, options.pop(key))
         if client:
             options["client_options"] = client
-        return from_url(root, **options)
+        try:
+            return from_url(root, **options)
+        except Exception as exc:  # unknown keys, unparseable values
+            raise ConfigError(f"file storage_options for {root}: {exc}") from exc
+        except BaseException as exc:
+            if type(exc).__name__ != "PanicException":  # pyo3's, not importable
+                raise
+            raise ConfigError(f"file storage_options for {root}: {exc}") from None
 
     def _store_key(self, root: str, locator: Locator) -> tuple[str, str, str, str]:
         """What a store is built from, beyond `root`: the object's credential

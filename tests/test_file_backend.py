@@ -4,13 +4,14 @@ import hashlib
 import json
 import os
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from tether.backends.base import Capability, ObjectBackend, VerifyStatus
 from tether.backends.file import FileBackend, _parse, _walk_files
-from tether.errors import BackendError
+from tether.errors import BackendError, ConfigError
 from tether.handles import FileHandle
 from tether.manifest import Locator
 from tether.testing import run_conformance
@@ -110,6 +111,85 @@ def test_open_store_passes_client_options_apart(tmp_path: Path) -> None:
     b = FileBackend({"storage_options": {"region": "us-east-1", "allow_http": True}})
     store = b._open_store("s3://bucket", {})
     assert type(store).__name__ == "S3Store"
+
+
+@pytest.mark.parametrize(
+    ("root", "key"),
+    [
+        ("s3://bucket", "allow_http"),
+        ("s3://bucket", "ALLOW_HTTP"),
+        ("s3://bucket", "AWS_ALLOW_HTTP"),
+        ("s3://bucket", "aws_allow_http"),
+        ("s3://bucket", "Aws_Allow_Http"),
+        ("gs://bucket", "GOOGLE_ALLOW_HTTP"),
+        ("az://container", "azure_allow_http"),
+    ],
+)
+@pytest.mark.parametrize("value", [True, "true", "TRUE", 1, "yes"])
+def test_client_options_are_routed_in_any_spelling(
+    root: str, key: str, value: object
+) -> None:
+    """Only the lowercase `allow_http` reached `client_options`; the other
+    spellings obstore accepts elsewhere (`AWS_ALLOW_HTTP`) went to the store
+    config, where they raised pyo3's `PanicException`."""
+    options: dict[str, object] = {key: value}
+    if root.startswith("s3"):
+        options["region"] = "us-east-1"
+    elif root.startswith("az"):
+        options["account_name"] = "acct"
+    store = FileBackend({"storage_options": options})._open_store(root, {})
+    assert str(store.client_options["allow_http"]).lower() == "true"
+
+
+@pytest.mark.parametrize(
+    ("given", "passed"),
+    [
+        ({"timeout": 5}, {"timeout": "5000ms"}),
+        ({"timeout": 2.5}, {"timeout": "2500ms"}),
+        ({"TIMEOUT": "5"}, {"timeout": "5000ms"}),
+        ({"timeout": "2h 37min"}, {"timeout": "2h 37min"}),
+        ({"aws_connect_timeout": timedelta(seconds=3)}, {"connect_timeout": "3000ms"}),
+        ({"http2_keep_alive_interval": 30}, {"http2_keep_alive_interval": "30000ms"}),
+        ({"pool_max_idle_per_host": 10}, {"pool_max_idle_per_host": "10"}),
+        ({"http1_only": 0}, {"http1_only": "false"}),
+        (
+            {"proxy_excludes": ["localhost", ".svc"]},
+            {"proxy_excludes": "localhost,.svc"},
+        ),
+        (
+            {"client_options": {"User_Agent": "tether", "TIMEOUT": 1}},
+            {"user_agent": "tether", "timeout": "1000ms"},
+        ),
+    ],
+)
+def test_client_option_values_are_coerced_to_what_obstore_takes(
+    given: dict[str, object], passed: dict[str, object]
+) -> None:
+    """`timeout = 5` in TOML is an integer; obstore wants a duration string
+    (or a timedelta) and raised `TypeError`. Numbers are seconds."""
+    store = FileBackend(
+        {"storage_options": {"region": "us-east-1", **given}}
+    )._open_store("s3://bucket", {})
+    assert {k: store.client_options[k] for k in passed} == passed
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"bogus": 1},
+        {"client_options": {"bogus": 1}},
+        {"timeout": "banana"},
+        {"timeout": True},
+        {"allow_http": "maybe"},
+        {"default_headers": "x"},
+    ],
+)
+def test_bad_storage_options_raise_config_error_not_a_panic(
+    options: dict[str, object],
+) -> None:
+    b = FileBackend({"storage_options": {"region": "us-east-1", **options}})
+    with pytest.raises(ConfigError, match="file"):
+        b._open_store("s3://bucket", {})
 
 
 def test_directory_fingerprint_tracks_content(tmp_path: Path) -> None:
