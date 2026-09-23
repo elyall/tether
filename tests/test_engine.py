@@ -1402,9 +1402,10 @@ def test_an_interrupted_operation_leaves_a_started_journal_entry(
     assert fresh.ops()[0].id == incomplete.id and not fresh.ops()[0].undoable
     with pytest.raises(TetherError, match="never finished"):
         fresh.undo(incomplete.id)
-    # A bare `undo` skips the incomplete entry: the newest *undoable* one is
-    # the baseline commit.
-    assert fresh.undo().op.command == "commit"
+    # A bare `undo` refuses too, rather than reach past the interrupted entry
+    # to the baseline commit: what the `new` left is to be looked at first.
+    with pytest.raises(TetherError, match="never finished"):
+        fresh.undo()
     assert any(incomplete.id in n and "never finished" in n for n in notes)
 
 
@@ -2473,6 +2474,190 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
         TetherError, match=r"nothing to undo|only fast-forwards|no longer the"
     ):
         repo.undo()
+
+
+def test_undo_of_an_older_op_reverts_only_the_workspace_fields_it_changed(
+    vcs_root: Path,
+) -> None:
+    """Port of the review's `gc/r9`: undoing an older `add` by id put back the
+    whole `workspace.toml` from before it -- the checkout flipped from `feat`
+    to `main` with no working refs, `bookmark_drift` stayed silent, and the
+    next write went straight to the store's `main` branch. Only the fields
+    the operation changed come back now."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    _mem_object(repo, "aux")
+    add_op = repo.ops()[0]
+    assert add_op.command == "add"
+    repo.commit("add aux")
+    repo.new(bookmark="feat", eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"x": "feat 1"})
+    repo.commit("feat write")
+    refs = dict(repo.workspace.working_refs)
+    main_head = store.resolve(system, "main")
+
+    report = repo.undo(add_op.id)
+    assert report.op.command == "add" and report.complete
+    assert "aux" not in repo.objects and any(
+        "manifest removed" in line for line in report.restored
+    )
+    # The `add` changed no bookmark and no working ref, so none comes back
+    # (the snapshot cache the next commit's snapshot filled may).
+    assert not any(
+        "bookmark" in line or "working_refs" in line for line in report.restored
+    )
+    repo = Repo.find(vcs_root)
+    assert repo.workspace.bookmark == "feat"
+    assert repo.workspace.working_refs == refs  # aux's ref stays until gc
+    assert repo.bookmark_drift() == []
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"x": "meant for feat"})
+    assert store.resolve(system, "main") == main_head
+    assert store.read(system, wref) == {"x": "meant for feat"}
+
+
+def test_undo_of_an_older_new_keeps_a_branch_a_commit_since_recorded(
+    vcs_root: Path,
+) -> None:
+    """Port of the review's `gc/r5`: `undo <new>` after a commit on the branch
+    `new` created judged the branch free of new writes -- its head *was* the
+    committed state -- and deleted it. For a `pin = "record"` object that
+    branch was the only ref holding what the commit recorded, and the
+    workspace rolled back to `main` under a working copy still on `probe`."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    store.system(system)
+    repo.add(
+        "db",
+        "memory",
+        {"system": system, "branch": "main"},
+        policy=Policy(pin="record"),
+    )
+    repo.commit("baseline")
+    repo.new(bookmark="probe")  # pin = "record": forked now
+    new_op = repo.ops()[0]
+    assert new_op.command == "new" and new_op.result["created"] == ["db"]
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"probe": "committed"})
+    result = repo.commit("probe work")
+    state = repo.objects["db"].state
+    assert result.vcs_commit is not None and state is not None
+    assert repo.objects["db"].pin is None
+
+    with pytest.raises(TetherError, match="a state the manifest records") as exc:
+        repo.undo(new_op.id)
+    assert wref in str(exc.value) and "--discard" in str(exc.value)
+    assert store.resolve(system, wref) == state["snapshot_id"]
+    assert repo.workspace.bookmark == "probe"
+    assert repo.workspace.working_refs["db"] == wref
+    assert result.vcs_commit in repo.vcs.history_revs()
+    attempt = repo.ops()[0]
+    assert attempt.command == "undo" and attempt.result.get("failed")
+    assert not any(e.undone_by for e in repo.ops() if e.id == new_op.id)
+    # Newest first: the commit comes back as working-tree changes, and the
+    # branch -- now holding a state only the working tree's manifest names --
+    # is still refused without `--discard`.
+    report = repo.undo()
+    assert report.op.command == "commit" and report.complete
+    with pytest.raises(TetherError, match="a state the manifest records"):
+        repo.undo()
+    assert store.resolve(system, wref) == state["snapshot_id"]
+
+
+def test_undo_after_a_drop_revives_nothing(vcs_root: Path) -> None:
+    """Port of the review's `gc/r10`: `drop` runs `new` and `gc` internally
+    and each was journaled as its own undoable entry, so two `tether undo`s
+    after a drop brought the abandoned commit back (`jj new <hidden parent>`)
+    -- naming a pin, a bookmark and a fork that were gone. The steps are the
+    drop's children now: refused on their own, and the drop is never reached
+    past."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="probe", eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"x": "probe"})
+    result = repo.commit("probe write")
+    commit = result.vcs_commit
+    assert commit is not None
+    pin = result.pinned["db"]
+    assert pin is not None
+
+    repo.drop("probe")
+    ops = repo.ops()
+    drop = next(e for e in ops if e.command == "drop")
+    steps = [e for e in ops if e.parent == drop.id]
+    assert sorted(e.command for e in steps) == ["gc", "new"]
+    assert not any(e.undoable for e in steps) and not drop.undoable
+    assert ops[0].parent == drop.id  # the newest entry is a step of the drop
+    workspace = repo.workspace.to_toml()
+    position = repo.vcs.position()
+
+    for _ in range(2):
+        with pytest.raises(
+            TetherError, match=r"is a step of .* which cannot be undone"
+        ):
+            repo.undo()
+    for step in steps:
+        with pytest.raises(TetherError, match="is a step of"):
+            repo.undo(step.id)
+    with pytest.raises(TetherError, match="cannot undo 'drop'"):
+        repo.undo(drop.id)
+    # Refused before anything was journaled or touched.
+    assert [e.command for e in repo.ops()] == [e.command for e in ops]
+    assert repo.workspace.to_toml() == workspace
+    assert repo.vcs.position() == position
+    assert repo.workspace.bookmark == "main" and "probe" not in repo.vcs.bookmarks()
+    assert commit not in repo.vcs.history_revs()
+    assert wref not in store.system(system).branches
+    assert pin.id not in repo.backend_for("memory").list_pins({"system": system})
+    assert all(v.ok for v in repo.verify().values())
+
+
+def test_undo_commit_leaves_other_bookmarks_built_on_it_alone(vcs_root: Path) -> None:
+    """Port of the review's `gc/r8`: under jj, uncommitting C (`squash --from
+    C --into @`) rebased every other child of C -- a bookmark built on it
+    became conflicted, read the baseline manifest, and gc planned to unpin
+    its pin. Refused now while anything but the working copy builds on the
+    commit. git's `reset --soft` rewrites nothing, so there the undo goes
+    ahead and the other branch keeps the commit reachable."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    repo.new(bookmark="feat", eager=True)
+    wref = repo.workspace.working_refs["db"]
+    store.write(system, wref, {"x": 1})
+    r1 = repo.commit("feat write 1")
+    commit_op = repo.ops()[0]
+    assert commit_op.command == "commit" and r1.vcs_commit is not None
+    # A second line on top of feat's commit, with a commit of its own.
+    repo.new(bookmark="exp", eager=True)
+    store.write(system, repo.workspace.working_refs["db"], {"x": 2})
+    r2 = repo.commit("exp write on top of feat")
+    assert r2.vcs_commit is not None and r2.pinned["db"] is not None
+    exp_manifest = repo._objects_at(r2.vcs_commit)["db"]
+    repo.new("feat")  # back on feat: the working copy sits on r1 again
+
+    if repo.vcs.kind == "jj":
+        with pytest.raises(TetherError, match="other commit\\(s\\) built on it") as exc:
+            repo.undo(commit_op.id)
+        assert r2.vcs_commit[:12] in str(exc.value) and "jj backout" in str(exc.value)
+        assert r1.vcs_commit in repo.vcs.history_revs()
+        assert repo.vcs.bookmarks()["feat"] == r1.vcs_commit
+    else:
+        report = repo.undo(commit_op.id)
+        assert report.complete
+    assert repo.vcs.bookmarks()["exp"] == r2.vcs_commit
+    assert repo._objects_at(r2.vcs_commit)["db"] == exp_manifest
+    assert not repo.vcs.conflicted_commits()
+    assert not [a for a in repo.plan_gc().actions if a.op == "unpin"]
 
 
 def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:

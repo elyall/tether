@@ -574,6 +574,13 @@ class VcsAdapter(Protocol):
         working copy as uncommitted changes.
         """
 
+    def dependants(self, commit: str) -> list[str]:
+        """Visible commits built on ``commit`` other than the working copy:
+        what :meth:`uncommit` would rewrite. jj rebases every child of a
+        commit it squashes away, so a bookmark's line on top of it would be
+        rewritten onto the parent; git's ``reset --soft`` moves one branch
+        and leaves the commit in place, so the answer is always empty."""
+
     def new(self, rev: str | None) -> None:
         """Move the working copy so the next ``commit`` lands on top of ``rev``.
 
@@ -1178,6 +1185,19 @@ class JjAdapter:
         self._jj("squash", "--from", commit, "--into", "@", "-u")
         return True
 
+    def dependants(self, commit: str) -> list[str]:
+        # Operator forms only (`::`, `~`): a user's revset aliases must not
+        # change what counts as built on the commit.
+        out = self._jj(
+            "log",
+            "--no-graph",
+            "-r",
+            f"({commit}:: ~ ({commit} | @))",
+            "-T",
+            'commit_id ++ "\\n"',
+        )
+        return out.stdout.split()
+
     def new(self, rev: str | None) -> None:
         self._jj("new", rev if rev is not None else "@")
 
@@ -1524,6 +1544,9 @@ class GitAdapter:
             # A root commit: leave the branch unborn with the tree in place.
             self._git("update-ref", "-d", "HEAD")
         return True
+
+    def dependants(self, commit: str) -> list[str]:
+        return []  # `reset --soft` moves the branch; the commit stays as it is
 
     def new(self, rev: str | None) -> None:
         if rev is None:

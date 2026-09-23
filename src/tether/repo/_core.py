@@ -189,6 +189,8 @@ class RepoCore:
         self._manifest_cache: dict[str, ObjectManifest] = {}
         self._lock_depth = 0
         self._repo_lock_depth = 0
+        self._op_parent: str | None = None
+        """The operation the ones journaled now are steps of (see `_as_step_of`)."""
 
     @contextlib.contextmanager
     def _writer_lock(self) -> Iterator[None]:
@@ -994,6 +996,7 @@ class RepoCore:
             result=dict(result or {}),
             pre=dict(pre or {}),
             undoes=undoes,
+            parent=self._op_parent,
         )
         append_op(self.root, entry)
         return entry
@@ -1018,10 +1021,24 @@ class RepoCore:
             plan=plan.to_dict() if plan is not None else None,
             pre=dict(pre or {}),
             undoes=undoes,
+            parent=self._op_parent,
         )
         entry.status = "started"
         append_op(self.root, entry)
         return entry
+
+    @contextlib.contextmanager
+    def _as_step_of(self, op: OpEntry) -> Iterator[None]:
+        """Journal the operations run inside as steps of `op` (their `parent`),
+        so `undo` treats them as one with it: a `drop` leaves its bookmark
+        with a `new` and sweeps with a `gc`, and neither may come back on its
+        own once the commits are gone."""
+        before = self._op_parent
+        self._op_parent = op.id
+        try:
+            yield
+        finally:
+            self._op_parent = before
 
     def _end_op(
         self,

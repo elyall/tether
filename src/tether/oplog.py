@@ -91,6 +91,10 @@ class OpEntry:
             result follows. An entry still `"started"` in a log nobody is
             writing to is an operation that was interrupted: `ops` flags it,
             `undo` refuses it (what happened is not known), `repair` names it.
+        parent: The id of the operation this one is a step of (`drop` leaves
+            the bookmark with a `new` and sweeps with a `gc`, each journaled).
+            A step is undone with its parent or not at all: `undo` refuses it
+            on its own, so half of a drop cannot come back.
     """
 
     id: str
@@ -102,6 +106,7 @@ class OpEntry:
     undoes: str | None = None
     undone_by: str | None = None
     status: str = "done"
+    parent: str | None = None
     progress: list[dict[str, Any]] = field(default_factory=list)
     """Per-action progress records appended while the operation ran (each a
     dict with at least `action`): what an interrupted operation *did* get
@@ -116,6 +121,7 @@ class OpEntry:
         result: dict[str, Any] | None = None,
         pre: dict[str, Any] | None = None,
         undoes: str | None = None,
+        parent: str | None = None,
     ) -> OpEntry:
         return cls(
             id=new_op_id(),
@@ -125,6 +131,7 @@ class OpEntry:
             result=dict(result or {}),
             pre=dict(pre or {}),
             undoes=undoes,
+            parent=parent,
         )
 
     @property
@@ -143,6 +150,7 @@ class OpEntry:
             "undoes": self.undoes,
             "undone_by": self.undone_by,
             "status": self.status,
+            "parent": self.parent,
             "progress": list(self.progress),
         }
 
@@ -158,18 +166,25 @@ class OpEntry:
             undoes=data.get("undoes"),
             undone_by=data.get("undone_by"),
             status=str(data.get("status") or "done"),
+            parent=data.get("parent"),
         )
+
+    NOT_UNDOABLE = frozenset(
+        {"undo", "repair", "upgrade", "abandon", "drop", "forget-workspace"}
+    )
+    """Commands `undo` cannot reverse: their effects are the VCS's to take
+    back, or were irreversible to begin with."""
 
     @property
     def undoable(self) -> bool:
-        """Not itself an undo, not already undone, complete, and of a
-        reversible kind."""
+        """Not itself an undo, not already undone, complete, not a step of
+        another operation, and of a reversible kind."""
         return (
             self.undoes is None
             and self.undone_by is None
             and not self.incomplete
-            and self.command
-            not in ("undo", "repair", "upgrade", "abandon", "drop", "forget-workspace")
+            and self.parent is None
+            and self.command not in self.NOT_UNDOABLE
         )
 
     def summary(self) -> str:

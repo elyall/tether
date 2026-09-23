@@ -22,6 +22,7 @@ from tether.errors import (
 from tether.manifest import (
     ObjectManifest,
     State,
+    WorkspaceState,
     listings_dir,
     read_objects,
     read_workspace,
@@ -30,6 +31,7 @@ from tether.manifest import (
 )
 from tether.oplog import (
     OpEntry,
+    read_ops,
     report_dict,
 )
 from tether.plan import Action, Plan
@@ -48,6 +50,19 @@ from tether.repo._reports import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.repo import Repo
 
+_WORKSPACE_TABLES = (
+    "base_states",
+    "working_refs",
+    "pending_forks",
+    "pending_resets",
+    "fork_points",
+    "last_snapshot",
+)
+"""The per-object tables of `workspace.toml`, reverted key by key by `undo`.
+`last_snapshot` is a cache `snapshot` also writes outside any journaled
+operation, so a `snapshot` between two operations is charged to the first;
+reverting a cache entry costs one fingerprint at the next snapshot."""
+
 
 class UndoOps(RepoCore):
     """`undo` and `repair`: reversing an operation, and rebuilding what the
@@ -59,8 +74,15 @@ class UndoOps(RepoCore):
     ) -> UndoReport:
         """Reverse an operation from the op log, where the stores still allow it.
 
-        Defaults to the newest entry that can be undone (not an `undo` or
-        `repair`, not already undone). What "reverse" means per command:
+        Defaults to the newest operation -- skipping undos and what they
+        reversed, so several slips in a row are several undos -- and refuses
+        rather than reach past one it cannot reverse (a `drop`, an
+        interrupted operation): undoing the `new` before a `drop` would have
+        brought back half of what the drop threw away. `tether undo ID`
+        names an older operation; only the `workspace.toml` fields that
+        operation changed come back, never what later ones did to the rest.
+        The steps a `drop` journals (its `new`, its `gc`) are undone with it
+        or not at all. What "reverse" means per command:
 
         - `commit`: uncommit. The dataset commit becomes working-tree changes
           again (jj `squash --into @`, git `reset --soft`) if it is still the
@@ -96,7 +118,15 @@ class UndoOps(RepoCore):
         with self._writer_lock(), self._repo_lock():
             entries = self.ops()
             if op_id is None:
-                target = next((e for e in entries if e.undoable), None)
+                # The newest operation, not the newest one that happens to be
+                # reversible: skipping a `drop` to undo the `new` before it
+                # brought back half of what the drop threw away. Undos and
+                # what they reversed are skipped -- several slips in a row
+                # are several undos, newest first.
+                target = next(
+                    (e for e in entries if e.undoes is None and not e.undone_by),
+                    None,
+                )
                 if target is None:
                     raise TetherError("nothing to undo")
             else:
@@ -107,14 +137,29 @@ class UndoOps(RepoCore):
                     raise TetherError(
                         f"{op_id} was already undone by {target.undone_by}"
                     )
-                if target.incomplete:
-                    raise TetherError(
-                        f"{op_id} ({target.command}) never finished, so what it did "
-                        "is not known; `tether verify` and `tether gc --dry-run` show "
-                        "what it left behind"
+            if target.parent is not None:
+                raise TetherError(
+                    f"{target.id} ({target.command}) is a step of {target.parent} "
+                    "(a drop), which cannot be undone; the VCS's own undo brings "
+                    "its commits and bookmark back, then `tether repair` its branches "
+                    "and pins"
+                )
+            if target.incomplete:
+                raise TetherError(
+                    f"{target.id} ({target.command}) never finished, so what it did "
+                    "is not known; `tether verify` and `tether gc --dry-run` show "
+                    "what it left behind"
+                )
+            if target.undoes is not None or not target.undoable:
+                raise TetherError(
+                    f"cannot undo {target.command!r}"
+                    + (
+                        f" ({target.id}, the newest operation); `tether undo ID` "
+                        "names an older one"
+                        if op_id is None
+                        else ""
                     )
-                if target.undoes is not None or not target.undoable:
-                    raise TetherError(f"cannot undo {target.command!r}")
+                )
 
             report = UndoReport(op=target)
             handler = {
@@ -158,7 +203,7 @@ class UndoOps(RepoCore):
                     # one. Something restored, then an error: leave it started.
                     self._end_op(entry, result={**summary(), "failed": str(exc)})
                 raise
-            if not report.restored and report.irreversible:
+            if not report.restored and not report.skipped and report.irreversible:
                 self._end_op(entry, result={**summary(), "failed": "nothing restored"})
                 raise TetherError(
                     f"cannot undo {target.id} ({target.command}):\n"
@@ -174,12 +219,62 @@ class UndoOps(RepoCore):
         self.workspace = read_workspace(self.root)
 
     def _restore_workspace(self, entry: OpEntry, report: UndoReport) -> None:
+        """Put back the `workspace.toml` fields `entry` changed, and only those.
+
+        The whole file from before the operation would also take back what
+        later operations did to other fields: undoing an old `add` moved the
+        checkout to the bookmark it was on then, with that bookmark's working
+        refs, under a working copy the VCS had elsewhere. What the operation
+        changed is the difference between the file before it (`pre`) and
+        after it -- the next journaled operation's `pre`, or the file as it
+        is now when nothing was journaled since.
+        """
         text = entry.pre.get("workspace")
         if text is None:
             return
-        _m.workspace_path(self.root).write_text(str(text), encoding="utf-8")
-        self.workspace = read_workspace(self.root)
-        report.restored.append("workspace.toml restored")
+        before = WorkspaceState.from_toml(str(text))
+        after_text = self._workspace_after(entry)
+        after = (
+            WorkspaceState.from_toml(after_text)
+            if after_text is not None
+            else self.workspace
+        )
+        changed: list[str] = []
+        if before.bookmark != after.bookmark:
+            self.workspace.bookmark = before.bookmark
+            changed.append("bookmark")
+        tables: list[str] = []
+        keys: set[str] = set()
+        for table in _WORKSPACE_TABLES:
+            was, then = getattr(before, table), getattr(after, table)
+            now = getattr(self.workspace, table)
+            for key in sorted(set(was) | set(then)):
+                if was.get(key) == then.get(key):
+                    continue
+                if key in was:
+                    now[key] = was[key]
+                else:
+                    now.pop(key, None)
+                keys.add(key)
+                if table not in tables:
+                    tables.append(table)
+        if tables:
+            changed.append(f"{', '.join(tables)} of {', '.join(sorted(keys))}")
+        if not changed:
+            return
+        write_workspace(self.root, self.workspace)
+        report.restored.append(f"workspace.toml restored ({'; '.join(changed)})")
+
+    def _workspace_after(self, entry: OpEntry) -> str | None:
+        """`workspace.toml` as it was right after `entry`: what the next
+        journaled operation found; `None` when `entry` is the last to have
+        recorded one (the file as it is now is the answer then)."""
+        found = False
+        for e in read_ops(self.root):
+            if found and e.pre.get("workspace") is not None:
+                return str(e.pre["workspace"])
+            found = found or e.id == entry.id
+        return None
 
     def _restore_manifests(
         self, texts: Mapping[str, Any], report: UndoReport | None = None
@@ -196,8 +291,20 @@ class UndoOps(RepoCore):
                     report.restored.append(f"{key}: manifest restored")
         self.objects = read_objects(self.root)
 
-    def _branch_has_new_writes(self, key: str, ref: str) -> State | None:
-        """The head of `ref` if it moved past what this workspace knows; else None."""
+    def _deleting_would_lose(
+        self, key: str, ref: str, source: State | None
+    ) -> tuple[str, State] | None:
+        """What deleting the branch `ref` an operation created would lose:
+        `("writes", head)` for content nothing else holds, `("record", head)`
+        for a state a manifest records -- a commit since, or the working
+        tree -- but no pin holds, so the manifest would name a state that is
+        gone. `None` when the branch is still at `source` (the state it was
+        forked from) or its head is pinned: nothing to lose.
+
+        The committed state used to count as "known" and therefore safe to
+        delete, which for a `pin = "record"` object deleted the one ref that
+        held what the commit recorded.
+        """
         m = self.objects.get(key)
         if m is None:
             return None
@@ -206,14 +313,21 @@ class UndoOps(RepoCore):
             head = backend.fingerprint(m.locator, ref)
         except TetherError:
             return None  # branch gone; nothing to lose
-        known = [
-            self.workspace.base_states.get(key),
-            self.workspace.fork_points.get(key),
-            m.state,
-        ]
-        if any(self._same(m.kind, head, k) for k in known if k is not None):
+        safe = [source, self.workspace.fork_points.get(key)]
+        if any(self._same(m.kind, head, s) for s in safe if s is not None):
             return None
-        return head
+        if m.state is not None and self._same(m.kind, head, m.state):
+            if (
+                m.pin is not None
+                and backend.verify(m.locator, m.state, m.pin, deep=False).status
+                is VerifyStatus.OK
+            ):
+                return None  # the pin holds it
+            return ("record", head)
+        base = self.workspace.base_states.get(key)
+        if base is not None and self._same(m.kind, head, base):
+            return ("record", head)
+        return ("writes", head)
 
     def _undo_branches(
         self,
@@ -229,12 +343,29 @@ class UndoOps(RepoCore):
         `restore`/`new --discard` you choose, not something undo guesses at
         (the branch may have children, pins, or a store that cannot re-point).
         """
-        # Refuse before touching anything if a created branch gained writes.
-        if not discard:
+        # Refuse before touching anything if a created branch holds something
+        # its deletion would lose. What it was forked from is the fork point
+        # the operation recorded (the workspace right after it); for the
+        # newest operation that is the fork point the workspace has now.
+        if not discard and created:
+            after = self._workspace_after(entry)
+            sources = (
+                WorkspaceState.from_toml(after) if after is not None else self.workspace
+            ).fork_points
             dirty = []
             for key, ref in created.items():
-                head = self._branch_has_new_writes(key, ref)
-                if head is not None:
+                loss = self._deleting_would_lose(key, ref, sources.get(key))
+                if loss is None:
+                    continue
+                what, head = loss
+                if what == "record":
+                    dirty.append(
+                        f"{key}: {ref} is at {short_state(head)}, a state the "
+                        "manifest records (a commit since, or the working tree) and "
+                        "no pin holds; deleting the branch would leave the manifest "
+                        "naming a state that is gone"
+                    )
+                else:
                     dirty.append(f"{key}: {ref} has writes since ({short_state(head)})")
             if dirty:
                 raise TetherError(
@@ -263,11 +394,35 @@ class UndoOps(RepoCore):
     def _undo_commit(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         commit = entry.result.get("vcs_commit")
         if commit:
-            if not self.vcs.uncommit(str(commit)):
+            position = self.vcs.position()
+            under = (
+                position.get("parent")
+                if position.get("kind") == "jj"
+                else position.get("commit")
+            )
+            not_parent = (
+                f"commit {str(commit)[:12]} is no longer the working copy's "
+                "parent; uncommit it with jj/git first"
+            )
+            if under != commit:
+                report.irreversible.append(not_parent)
+                return
+            built_on = self.vcs.dependants(str(commit))
+            if built_on:
+                # jj rebases the commit's other children when it is squashed
+                # away: a bookmark's line on top of it would be rewritten onto
+                # the parent, its manifests conflicted or reverted, and gc
+                # would then read the wrong pins from it.
                 report.irreversible.append(
-                    f"commit {str(commit)[:12]} is no longer the working copy's "
-                    "parent; uncommit it with jj/git first"
+                    f"commit {str(commit)[:12]} has {len(built_on)} other commit(s) "
+                    f"built on it ({', '.join(c[:12] for c in built_on[:3])}"
+                    f"{', ...' if len(built_on) > 3 else ''}); squashing it into the "
+                    "working copy would rewrite them -- `jj backout -r "
+                    f"{str(commit)[:12]}` reverts it and leaves them in place"
                 )
+                return
+            if not self.vcs.uncommit(str(commit)):
+                report.irreversible.append(not_parent)
                 return
             report.restored.append(
                 f"uncommitted {str(commit)[:12]}; its manifests are working-tree "
@@ -311,6 +466,7 @@ class UndoOps(RepoCore):
                 report.restored.append(f"bookmark {made} deleted")
             elif made in marks:
                 report.skipped.append(f"bookmark {made} has moved since; kept")
+        self._note_only_resets(entry, report)
 
     def _undo_fork(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         key, ref = str(entry.result.get("key")), str(entry.result.get("ref"))
@@ -323,6 +479,16 @@ class UndoOps(RepoCore):
             reset={key: ref} if existed else {},
         )
         self._restore_workspace(entry, report)
+        self._note_only_resets(entry, report)
+
+    @staticmethod
+    def _note_only_resets(entry: OpEntry, report: UndoReport) -> None:
+        """An operation whose every effect was a reset (a `restore --discard`
+        onto a branch the workspace already had) is undone as far as it can
+        be -- the old heads are named -- and the entry marked so, as a gc
+        with nothing reversible is; `promote` alone is refused outright."""
+        if not report.restored and report.irreversible:
+            report.skipped.append(f"nothing else of this {entry.command} is reversible")
 
     def _undo_gc(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         r = entry.result
@@ -361,6 +527,11 @@ class UndoOps(RepoCore):
             (listings_dir(self.root) / name).write_text(text, encoding="utf-8")
             report.restored.append(f"listing {name}: restored from the VCS")
         self._restore_workspace(entry, report)
+        if not report.restored:
+            # A gc whose every effect was irreversible is undone as far as it
+            # can be, and the entry marked so; that differs from `promote`,
+            # whose undo is refused outright.
+            report.skipped.append("nothing else of this gc is reversible")
 
     def _undo_promote(self, entry: OpEntry, report: UndoReport, discard: bool) -> None:
         before = entry.pre.get("base_states") or {}

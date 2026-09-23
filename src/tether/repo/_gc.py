@@ -1037,42 +1037,46 @@ class GcOps(RepoCore):
             pre = {"vcs": self.vcs.position(), "workspace": self.workspace.to_toml()}
             op = self._begin_op("drop", plan=plan, pre=pre)
             report = DropReport(bookmark=bookmark, plan=plan)
+            # The leave and the sweep are journaled as steps of this entry:
+            # `undo` must not bring the `new` back on its own, which would
+            # revive the bookmark's working refs while its commits stay gone.
             try:
-                # What the dropped commits pinned: not references once they
-                # are gone, but the branch sweep may delete a head one of them
-                # pinned. One object reader for all of them, not one process
-                # per commit.
-                dropped_manifests = [
-                    m
-                    for files in self.vcs.files_at_many(
-                        commits, self._objects_reldir()
-                    ).values()
-                    for m in self._parse_manifests(files).values()
-                ]
-                if leave:
-                    dropped_manifests.extend(self.objects.values())
-                    self.new(str(leave))
-                    report.left_for = str(leave)
-                    self._progress(op, "leave-bookmark", target=str(leave))
-                self.vcs.drop_bookmark(bookmark, commits)
-                report.abandoned = commits
-                self._progress(op, "delete-bookmark", target=bookmark)
-                self._manifest_cache.clear()
-                self.objects = read_objects(self.root)
-                gc_plan = self.plan_gc(
-                    prune_bookmarks=True,
-                    force_prune=bool(ctx.get("force_prune")),
-                    delete_stores=bool(ctx.get("delete_stores")),
-                    scope=GcScope(
-                        bookmarks=frozenset({bookmark}),
-                        dropped_manifests=tuple(dropped_manifests),
-                    ),
-                )
-                report.gc_report = (
-                    self.apply_gc(gc_plan)
-                    if not gc_plan.is_empty
-                    else GcReport(dry_run=False, plan=gc_plan)
-                )
+                with self._as_step_of(op):
+                    # What the dropped commits pinned: not references once
+                    # they are gone, but the branch sweep may delete a head one
+                    # of them pinned. One object reader for all of them, not
+                    # one process per commit.
+                    dropped_manifests = [
+                        m
+                        for files in self.vcs.files_at_many(
+                            commits, self._objects_reldir()
+                        ).values()
+                        for m in self._parse_manifests(files).values()
+                    ]
+                    if leave:
+                        dropped_manifests.extend(self.objects.values())
+                        self.new(str(leave))
+                        report.left_for = str(leave)
+                        self._progress(op, "leave-bookmark", target=str(leave))
+                    self.vcs.drop_bookmark(bookmark, commits)
+                    report.abandoned = commits
+                    self._progress(op, "delete-bookmark", target=bookmark)
+                    self._manifest_cache.clear()
+                    self.objects = read_objects(self.root)
+                    gc_plan = self.plan_gc(
+                        prune_bookmarks=True,
+                        force_prune=bool(ctx.get("force_prune")),
+                        delete_stores=bool(ctx.get("delete_stores")),
+                        scope=GcScope(
+                            bookmarks=frozenset({bookmark}),
+                            dropped_manifests=tuple(dropped_manifests),
+                        ),
+                    )
+                    report.gc_report = (
+                        self.apply_gc(gc_plan)
+                        if not gc_plan.is_empty
+                        else GcReport(dry_run=False, plan=gc_plan)
+                    )
             except Exception as exc:
                 self._end_op(
                     op,

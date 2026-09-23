@@ -1,5 +1,5 @@
-dataset 7e225fca7bd0; on bookmark sweep
-  warning: dataset commit 713126458caf (op d937ea68b370) is no longer in VCS history: undone or abandoned outside tether; its pins for scratch/probe are unreferenced; `gc` will release them, `repair` recreates them if the commit comes back
+dataset d937ea68b370; on bookmark sweep
+  warning: dataset commit 713126458caf (op 1a9979c28619) is no longer in VCS history: undone or abandoned outside tether; its pins for scratch/probe are unreferenced; `gc` will release them, `repair` recreates them if the commit comes back
   warning: dataset commit bae316fbb4cc (op 6cb575772d10) is no longer in VCS history: undone or abandoned outside tether; its pins for features, zarr/imaging are unreferenced; `gc` will release them, `repair` recreates them if the commit comes back
       clean  code  [git/forkable]
       clean  features  [lance/forkable]

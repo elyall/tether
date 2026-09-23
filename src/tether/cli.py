@@ -1058,13 +1058,17 @@ def ops(
             flag = f"  (undone by {e.undone_by})"
         elif e.id in drifted:
             flag = "  (vcs commit gone)"
+        if e.parent:
+            flag += f"  (step of {e.parent})"
         typer.echo(f"{e.id}  {e.at}  {e.command:<8} {e.summary()}{flag}")
 
 
 @app.command()
 def undo(
     op_id: str | None = typer.Argument(
-        None, help="Operation id from `tether ops`; default: the newest undoable one."
+        None,
+        help="Operation id from `tether ops`; default: the newest operation "
+        "(refused, not skipped, when it cannot be undone).",
     ),
     discard: bool = typer.Option(
         False,
@@ -1081,8 +1085,11 @@ def undo(
     (`restore` / `new --discard` put them where you want). gc: restore the
     forgotten working refs and listings; deleted branches and pins are
     irreversible (see `repair`). import/add/remove/set: restore the manifests.
-    promote: refused, with the previous base heads printed. Exit code 2 when
-    part of the work could not be reversed; the rest was.
+    promote: refused, with the previous base heads printed. drop, and the
+    `new` and `gc` it runs: refused (the VCS's undo brings the commits back,
+    `repair` the branches and pins). An older operation, named by id, gets
+    back only the workspace fields it changed. Exit code 2 when part of the
+    work could not be reversed; the rest was.
     """
     repo = _repo()
     try:
