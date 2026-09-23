@@ -590,15 +590,24 @@ class ObjectOps(RepoCore):
     ) -> Handle:
         """Return a native handle for an object.
 
+        Every open without `rev` first re-reads the workspace and the
+        manifests, so a `Repo` that has lived a while (a notebook, a service)
+        opens on the bookmark the checkout is on *now* -- another process may
+        have run `new` since. A read-only open does so without the checkout
+        lock, which readers never need. A handle already open stays on the
+        branch it was opened on: open it again after a `new`.
+
         Args:
             key: Object key.
             rev: VCS revision whose pinned (or recorded Addressable) state to
                 open read-only. Defaults to `$TETHER_REV` when set.
             read_only: Force read-only or writable. Defaults to writable for
-                Forkable objects (at their working ref) and read-only otherwise.
-                A writable open creates the working branch first when `new`
-                deferred it (lazy forking): a store write with no plan of its
-                own (`new --eager --dry-run` previews it).
+                Forkable objects (at their working ref) and read-only otherwise
+                -- and read-only where writing commands are refused for want
+                of the checkout lock (Windows). A writable open creates the
+                working branch first when `new` deferred it (lazy forking): a
+                store write with no plan of its own (`new --eager --dry-run`
+                previews it).
 
         Returns:
             A backend-specific `tether.handles.Handle`.
@@ -611,6 +620,10 @@ class ObjectOps(RepoCore):
                 revision open on an Observed object.
             TetherError: The object has no committed state at `rev`.
         """
+        if rev is None and not getattr(self._lock_depth, "writer", 0):
+            # Inside a command that holds the lock the state is already fresh,
+            # and the command's own.
+            self._refresh()
         if key not in self.objects and rev is None:
             raise ConfigError(f"no such object: {key}")
         rev = rev if rev is not None else os.environ.get(TETHER_REV_ENV)
@@ -622,7 +635,11 @@ class ObjectOps(RepoCore):
         backend = self.backend_for(m.kind)
         eff = effective_capabilities(backend, m.locator, m.policy)
         forkable = Capability.FORK in eff
-        want_write = (not read_only) if read_only is not None else forkable
+        want_write = (
+            (not read_only)
+            if read_only is not None
+            else forkable and self._checkout_lockable()
+        )
 
         if want_write:
             if not forkable:
@@ -632,11 +649,8 @@ class ObjectOps(RepoCore):
                     key=key,
                     kind=m.kind,
                 )
-            # Under the checkout lock, which re-reads the workspace and the
-            # manifests: a `Repo` that has lived a while (a notebook) must
-            # hand back a handle on the branch the checkout is on *now* --
-            # another process may have run `new` since -- not on the working
-            # ref it loaded at construction, which on the trunk is upstream.
+            # Under the checkout lock, which re-reads the state once more: a
+            # lazy fork must be decided and created by one writer.
             with self._writer_lock():
                 return self._open_writable(key)
 

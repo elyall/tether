@@ -1482,6 +1482,117 @@ def test_a_writable_open_follows_the_checkout_as_it_is_on_disk(
         notebook.open("db")
 
 
+@pytest.mark.parametrize("move", ["new-bookmark", "back-to-trunk", "added-key"])
+def test_a_read_only_open_follows_the_checkout_as_it_is_on_disk(
+    vcs_root: Path, move: str
+) -> None:
+    """A read-only `open` used the workspace and manifests this Repo loaded:
+    after another process ran `new -b feat` and wrote there, a notebook's
+    reader still read the trunk; after `new main` it still read `feat`; a
+    key another process registered was 'no such object'. It refreshes now,
+    without the checkout lock."""
+    notebook = Repo.init(vcs_root)
+    system = _mem_object(notebook)
+    store = default_store()
+    notebook.commit("baseline")
+    other = Repo.find(vcs_root)  # another process
+    branch = f"tether.ws.{notebook.config.dataset_id}.feat"
+    if move == "added-key":
+        extra = _mem_object(other, "extra")
+        store.write(extra, "main", {"extra": 1})
+        handle = notebook.open("extra", read_only=True)
+        assert isinstance(handle, MemoryHandle) and handle.ref == "main"
+        assert handle.read() == {"extra": 1}
+        writable = notebook.open("extra")
+        assert isinstance(writable, MemoryHandle) and writable.ref == "main"
+        return
+    other.new(bookmark="feat")
+    written = other.open("db")
+    assert isinstance(written, MemoryHandle) and written.ref == branch
+    written.write({"x": "feat"})
+    if move == "back-to-trunk":
+        before = notebook.open("db", read_only=True)
+        assert isinstance(before, MemoryHandle) and before.ref == branch
+        other.new("main")
+    handle = notebook.open("db", read_only=True)
+    assert isinstance(handle, MemoryHandle) and handle.read_only
+    expected = branch if move == "new-bookmark" else "main"
+    assert handle.ref == expected and notebook.workspace.bookmark == (
+        "feat" if move == "new-bookmark" else "main"
+    )
+    assert handle.read() == store.read(system, expected)
+
+
+def test_a_handle_opened_before_another_process_moves_the_checkout_stays_put(
+    vcs_root: Path,
+) -> None:
+    """What refreshing cannot reach: a native handle is bound to the branch it
+    was opened on. Opened on the trunk, it keeps writing upstream after
+    another process runs `new -b`; the next `open` is on the new branch."""
+    notebook = Repo.init(vcs_root)
+    system = _mem_object(notebook)
+    store = default_store()
+    notebook.commit("baseline")
+    handle = notebook.open("db")
+    assert isinstance(handle, MemoryHandle) and handle.ref == "main"
+    Repo.find(vcs_root).new(bookmark="feat", eager=True)
+    handle.write({"x": "late"})
+    assert store.read(system, "main") == {"x": "late"}
+    branch = f"tether.ws.{notebook.config.dataset_id}.feat"
+    assert store.read(system, branch) != {"x": "late"}
+    reopened = notebook.open("db")
+    assert isinstance(reopened, MemoryHandle) and reopened.ref == branch
+
+
+def test_refresh_parses_only_the_manifests_that_changed(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writable `open` re-read every manifest under the lock (124 ms at 400
+    objects). A refresh parses a file again only when its size, mtime, ctime
+    or inode moved -- or when it was last parsed within a couple of seconds
+    of changing, where a same-tick rewrite could leave all four alone."""
+    from tether.manifest import objects_dir
+    from tether.repo import _core
+
+    repo = Repo.init(vcs_root)
+    for key in ("a", "b", "nested/c"):
+        _mem_object(repo, key)
+    repo.commit("baseline")
+    parsed: list[str] = []
+    real = _core._parse_manifest
+
+    def counting(text: str) -> ObjectManifest:
+        manifest = real(text)
+        parsed.append(manifest.key)
+        return manifest
+
+    monkeypatch.setattr(_core, "_parse_manifest", counting)
+    repo._refresh()
+    repo._refresh()
+    assert sorted(parsed) == ["a", "a", "b", "b", "nested/c", "nested/c"]  # racy
+    monkeypatch.setattr(_core, "_RACY_NS", 0)  # as if written long ago
+    parsed.clear()
+    repo._refresh()
+    repo._refresh()
+    assert sorted(parsed) == ["a", "b", "nested/c"]  # parsed once, then kept
+    other = Repo.find(vcs_root)
+    other.set_policy(["b"], pin="record")  # another process rewrites one
+    other.remove("a")
+    parsed.clear()
+    repo.open("nested/c", read_only=True)
+    assert parsed == ["b"]
+    assert sorted(repo.objects) == ["b", "nested/c"]
+    assert repo.objects["b"].policy.pin == "record"
+    # Rewritten in place with the same size: the timestamps tell.
+    path = objects_dir(vcs_root) / "b.toml"
+    text = path.read_text(encoding="utf-8")
+    swapped = text.replace('pin = "record"', 'pin = "native"')
+    assert len(swapped) == len(text)
+    path.write_text(swapped, encoding="utf-8")
+    repo._refresh()
+    assert repo.objects["b"].policy.pin == "native"
+
+
 def test_new_forgets_the_snapshot_cache_of_the_branches_it_leaves(
     vcs_root: Path,
 ) -> None:
@@ -1650,6 +1761,16 @@ def test_without_fcntl_writing_commands_refuse_and_reading_ones_work(
             attempt()
     assert "late" not in repo.objects and repo.workspace.bookmark == "main"
     assert repo.open("db", read_only=True).read_only
+    # A default open is a reader's too: read-only here rather than refused,
+    # and it still follows the checkout another (POSIX) process moved.
+    default = repo.open("db")
+    assert isinstance(default, MemoryHandle) and default.read_only
+    monkeypatch.undo()
+    Repo.find(vcs_root).new(bookmark="feat", eager=True)
+    monkeypatch.setattr(_core, "fcntl", None)
+    moved = repo.open("db")
+    assert isinstance(moved, MemoryHandle) and moved.read_only
+    assert moved.ref == f"tether.ws.{repo.config.dataset_id}.feat"
 
 
 def test_relative_local_paths_are_pinned_down_at_add(

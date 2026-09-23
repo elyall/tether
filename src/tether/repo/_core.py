@@ -4,19 +4,21 @@ plan verification. Command families are mixins over :class:`RepoCore`."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import os
 import threading
+import time
 import warnings
 
 try:  # POSIX advisory locks; without them (Windows) writing commands refuse
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Self
+from typing import TYPE_CHECKING, Any, NoReturn, Self, TypeVar
 
 from tether import manifest as _m
 from tether.backends.base import (
@@ -62,6 +64,7 @@ from tether.manifest import (
     read_objects,
     read_secrets,
     read_workspace,
+    validate_key,
     working_ref_name,
     workspace_path,
     write_config,
@@ -105,6 +108,21 @@ so reproducible jobs pin their inputs without code changes.
 # Python work per object is microseconds, so threads -- not asyncio -- are the
 # right tool and a generous pool costs nothing when idle.
 _MAX_WORKERS = 16
+
+_T = TypeVar("_T")
+
+_RACY_NS = 2_000_000_000
+"""A file rewritten in the timestamp tick it was read in can keep its size,
+mtime and ctime (and, on a reused inode, its inode); ticks are up to two
+seconds on some filesystems. A parse made that close to the file's last
+change is not reused (see `RepoCore._parse_cached`)."""
+
+
+def _parse_manifest(text: str) -> ObjectManifest:
+    """One working-tree manifest, as `read_objects` reads it."""
+    manifest = ObjectManifest.from_toml(text)
+    validate_key(manifest.key)
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -244,7 +262,11 @@ class RepoCore:
         # (an older dataset that just gained a secrets.toml); `init` and
         # `upgrade` write the full list.
         ensure_ignored(root, only_present=True)
-        self.objects = read_objects(root)
+        self._parsed: dict[Path, tuple[tuple[int, int, int, int], Any]] = {}
+        """Path -> (stat signature, parse) of the working-tree files
+        `_refresh` reads; see `_parse_cached`."""
+        self._refresh_guard = threading.Lock()
+        self.objects = self._read_objects_changed()
         self.workspace = read_workspace(root)
         if not workspace_path(root).is_file():
             # A read-only checkout keeps the id in memory, as before.
@@ -440,15 +462,58 @@ class RepoCore:
             self._repo_guard.release()
 
     def _refresh(self) -> None:
-        """Reload the per-checkout state from disk (see `_writer_lock`).
+        """Reload the per-checkout state from disk (see `_writer_lock`, and
+        `open`, which refreshes without the lock).
 
         A checkout with no `workspace.toml` keeps the in-memory state: one
         construction could not write (a read-only checkout), or
-        `forget-workspace` removed it.
+        `forget-workspace` removed it. Only files that changed since this
+        `Repo` last parsed them are parsed again; the rest cost a `stat`, so
+        a long-lived `Repo` pays for what moved, not for every manifest.
         """
-        if _m.workspace_path(self.root).is_file():
-            self.workspace = read_workspace(self.root)
-        self.objects = read_objects(self.root)
+        with self._refresh_guard:
+            path = _m.workspace_path(self.root)
+            if path.is_file():
+                # Commands change the workspace in place; the parse is kept
+                # pristine.
+                self.workspace = copy.deepcopy(
+                    self._parse_cached(path, WorkspaceState.from_toml)
+                )
+            self.objects = self._read_objects_changed()
+
+    def _parse_cached(self, path: Path, parse: Callable[[str], _T]) -> _T:
+        """`parse(text of path)`, reusing the last parse while the file's size,
+        mtime, ctime and inode are unchanged -- unless that parse was made
+        within `_RACY_NS` of the file's last change."""
+        st = path.stat()
+        signature = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        hit = self._parsed.get(path)
+        if hit is not None and hit[0] == signature:
+            return hit[1]
+        value = parse(path.read_text(encoding="utf-8"))
+        if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) >= _RACY_NS:
+            self._parsed[path] = (signature, value)
+        else:
+            self._parsed.pop(path, None)
+        return value
+
+    def _read_objects_changed(self) -> dict[str, ObjectManifest]:
+        """`read_objects`, through `_parse_cached`."""
+        base = _m.objects_dir(self.root)
+        listed = sorted(base.rglob("*.toml")) if base.is_dir() else []
+        objects: dict[str, ObjectManifest] = {}
+        for path in listed:
+            manifest = self._parse_cached(path, _parse_manifest)
+            objects[manifest.key] = manifest
+        kept = set(listed)
+        for path in [p for p in self._parsed if base in p.parents and p not in kept]:
+            del self._parsed[path]
+        return objects
+
+    def _checkout_lockable(self) -> bool:
+        """Whether this platform has the advisory lock writing commands take
+        (`_writer_lock`); without it (Windows) they are refused."""
+        return fcntl is not None
 
     # -- construction ---------------------------------------------------------- #
     @classmethod
