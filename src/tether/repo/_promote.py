@@ -378,15 +378,25 @@ class PromoteOps(RepoCore):
         marks = self.vcs.bookmarks()
         trunk_commit = marks.get(self.config.trunk)
         here = marks.get(bookmark)
-        if not trunk_commit or not here or self.vcs.is_ancestor(trunk_commit, here):
+        if self.config.trunk in self.vcs.conflicted_bookmarks():
+            # Several targets, none of them in `marks`: the guard below would
+            # read that as "no trunk yet" and let the move pick one side.
+            why = (
+                f"{self.config.trunk} has conflicting targets (a divergent move or "
+                f"fetch; `jj bookmark list`); landing would settle it on this "
+                f"bookmark and drop the other side. `jj bookmark set "
+                f"{self.config.trunk} -r REV` first"
+            )
+        elif not trunk_commit or not here or self.vcs.is_ancestor(trunk_commit, here):
             return
-        why = (
-            f"{self.config.trunk} ({trunk_commit[:12]}) has commits this bookmark "
-            f"({bookmark} at {here[:12]}) does not; landing would move "
-            f"{self.config.trunk} backwards or sideways and drop them. Merge or "
-            f"rebase the manifests onto {self.config.trunk} first, or name keys to "
-            "land a subset (which never moves the trunk)"
-        )
+        else:
+            why = (
+                f"{self.config.trunk} ({trunk_commit[:12]}) has commits this "
+                f"bookmark ({bookmark} at {here[:12]}) does not; landing would move "
+                f"{self.config.trunk} backwards or sideways and drop them. Merge or "
+                f"rebase the manifests onto {self.config.trunk} first, or name keys "
+                "to land a subset (which never moves the trunk)"
+            )
         plan.actions = [
             Action(
                 "refuse",
@@ -594,7 +604,16 @@ class PromoteOps(RepoCore):
                 marks = self.vcs.bookmarks()
                 commit = marks.get(bookmark)
                 trunk_commit = marks.get(self.config.trunk)
-                if commit and (
+                if commit and self.config.trunk in self.vcs.conflicted_bookmarks():
+                    # Absent from `marks` because it has several targets, not
+                    # because there is no trunk yet: moving it would drop the
+                    # other side.
+                    report.trunk_held = (
+                        f"{self.config.trunk} has conflicting targets since the "
+                        f"plan; not moved -- `jj bookmark set {self.config.trunk} "
+                        "-r REV`, merge the manifests and promote again"
+                    )
+                elif commit and (
                     not trunk_commit or self.vcs.is_ancestor(trunk_commit, commit)
                 ):
                     self.vcs.bookmark_set(self.config.trunk, commit)

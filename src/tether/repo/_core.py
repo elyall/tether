@@ -54,6 +54,7 @@ from tether.manifest import (
     listing_name,
     listings_dir,
     manifest_hash,
+    pin_id_of_ref,
     read_config,
     read_listing,
     read_objects,
@@ -504,6 +505,12 @@ class RepoCore:
         if b not in marks:
             if self.vcs.kind == "git" and here == [b]:
                 return []  # unborn branch: HEAD is on it
+            if b in self.vcs.conflicted_bookmarks():
+                return [
+                    f"bookmark {b!r} has conflicting targets (a divergent move or "
+                    f"fetch; `jj bookmark list`); `jj bookmark set {b} -r REV` "
+                    "picks one"
+                ]
             renamed = [
                 n for n in here if n != b and n != self.config.trunk and n in marks
             ]
@@ -570,6 +577,12 @@ class RepoCore:
         if b not in marks:
             if self.vcs.kind == "git" and here == [b]:
                 return  # an unborn branch: HEAD is on it, the first commit births it
+            if b in self.vcs.conflicted_bookmarks():
+                raise StaleWorkingCopyError(
+                    f"bookmark {b!r} has conflicting targets (a divergent move or "
+                    f"fetch; `jj bookmark list`); `jj bookmark set {b} -r REV` picks "
+                    "one, then commit again"
+                )
             raise StaleWorkingCopyError(
                 f"bookmark {b!r} no longer exists; `tether new -b {b}` recreates it, "
                 "`tether new NAME` joins another"
@@ -677,6 +690,68 @@ class RepoCore:
                 continue
             with contextlib.suppress(Exception):
                 yield (root / rel), read_workspace(root / rel)
+
+    def _live_checkout_manifests(self) -> Iterator[ObjectManifest]:
+        """The working-tree manifests of every *other* live checkout of this
+        dataset. They name pins no history may: an undone commit, a `commit
+        --no-vcs`, a commit that died between its pins and its VCS commit.
+        `gc` counts them as references, so a checkout that cannot be read
+        stops it rather than silently going uncounted."""
+        here = self.root.resolve()
+        for root, _ws in self._iter_live_workspaces():
+            if root.resolve() == here:
+                continue
+            try:
+                objects = read_objects(root)
+            except Exception as exc:
+                raise TetherError(
+                    f"cannot read the manifests of checkout {root} ({exc}); "
+                    "they may reference pins, so nothing is released until they read"
+                ) from exc
+            yield from objects.values()
+
+    def _inflight_pins(self) -> set[str]:
+        """Pin ids that operations still running -- or interrupted -- in any
+        live checkout set out to create or have created: a `commit` between
+        its pins and its VCS commit names them in no history yet."""
+        ids: set[str] = set()
+        for root, _ws in self._iter_live_workspaces():
+            for op in read_ops(root):
+                if not op.incomplete:
+                    continue
+                for a in (op.plan or {}).get("actions") or []:
+                    pid = (a.get("params") or {}).get("pin_id")
+                    if a.get("op") in ("pin", "repin") and pid:
+                        ids.add(str(pid))
+                for record in op.progress:
+                    if record.get("action") in ("pin", "repin"):
+                        pid = pin_id_of_ref(
+                            str(record.get("ref") or record.get("target") or "")
+                        )
+                        if pid:
+                            ids.add(pid)
+        return ids
+
+    def _refuse_conflicts(self, what: str) -> None:
+        """Refuse `what` while jj reports a conflicted bookmark or commit.
+
+        A conflicted bookmark has several targets and is left out of
+        `bookmarks()`, so the commits it reaches would count as reachable
+        from nothing; a conflicted commit's manifests are several answers.
+        Neither is a state to judge references in.
+        """
+        found = [
+            f"bookmark {name} has conflicting targets (`jj bookmark list`)"
+            for name in self.vcs.conflicted_bookmarks()
+        ] + [
+            f"commit {commit[:12]} is conflicted (`jj resolve`)"
+            for commit in self.vcs.conflicted_commits()
+        ]
+        if found:
+            raise VcsError(
+                f"{what} refused while the VCS reports conflicts, which hide what "
+                f"history references: {'; '.join(found)}. Resolve them first"
+            )
 
     def bookmark_holders(self, bookmark: str) -> list[str]:
         """Workspace ids of *other* live checkouts working on `bookmark`."""

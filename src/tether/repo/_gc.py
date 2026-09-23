@@ -22,6 +22,7 @@ from tether.errors import (
     MultiObjectError,
     StalePlanError,
     TetherError,
+    VcsError,
 )
 from tether.manifest import (
     ObjectManifest,
@@ -142,7 +143,17 @@ class GcOps(RepoCore):
 
         `scope` is `drop`'s: judge one bookmark's branches only, and plan as
         if its commits were already gone (see `GcScope`).
+
+        A pin is referenced when any of these name it: a manifest in history
+        (every side of a conflicted jj commit included), the working tree of
+        this or any other live checkout, or an operation still running or
+        interrupted in one of them. Refused while jj reports a conflicted
+        bookmark or commit.
+
+        Raises:
+            VcsError: The VCS reports conflicts.
         """
+        self._refuse_conflicts("gc")
         scope = scope or GcScope()
         excluded = set(scope.excluded_commits)
         gone = set(scope.gone_bookmarks)
@@ -179,10 +190,13 @@ class GcOps(RepoCore):
                 if sig not in seen:
                     seen.add(sig)
                     history_manifests.append(m)
-        for m in self.objects.values():
+        # Working trees: this checkout's and every other live one's.
+        working = [*self.objects.values(), *self._live_checkout_manifests()]
+        for m in working:
             if m.pin is not None:
                 backend = self.backend_for(m.kind)
                 referenced.setdefault(key_for(backend, m.locator), set()).add(m.pin.id)
+        inflight = self._inflight_pins()
 
         plan = Plan(
             command="gc",
@@ -257,7 +271,13 @@ class GcOps(RepoCore):
                     f"{m.key}: {foreign} pin(s) of other datasets left alone"
                 )
             keep = referenced.get(sys_key, set())
-            for pid in sorted(mine - keep):
+            running = mine & inflight - keep
+            if running:
+                plan.notes.append(
+                    f"{m.key}: {len(running)} pin(s) of unfinished operation(s) "
+                    "kept (see `tether ops`)"
+                )
+            for pid in sorted(mine - keep - running):
                 plan.actions.append(
                     Action(
                         "unpin",
@@ -290,7 +310,7 @@ class GcOps(RepoCore):
             plan.notes.append(f"keeping live bookmarks: {', '.join(sorted(live))}")
             self._plan_prune_bookmarks(
                 plan,
-                [*all_manifests, *self.objects.values()],
+                [*all_manifests, *working],
                 key_for,
                 live,
                 force_prune,
@@ -302,9 +322,9 @@ class GcOps(RepoCore):
                 dropped=dropped,
             )
 
-        # Listings no manifest (in history or the working tree) names.
+        # Listings no manifest (in history or a working tree) names.
         wanted: set[str] = set()
-        for m in [*all_manifests, *self.objects.values()]:
+        for m in [*all_manifests, *working]:
             if m.state is not None:
                 backend = self.backend_for(m.kind)
                 wanted.add(
@@ -328,7 +348,7 @@ class GcOps(RepoCore):
             plan_stores(
                 self,
                 plan,
-                [*all_manifests, *self.objects.values()],
+                [*all_manifests, *working],
                 keep_bookmarks=(
                     set(plan.context.get("live_bookmarks") or ())
                     if prune_bookmarks
@@ -370,6 +390,16 @@ class GcOps(RepoCore):
             for key, ref in self.workspace.working_refs.items()
             if key in self.objects
         }
+        # A branch `new` decided on but has not created yet is spoken for,
+        # and so is every branch another live checkout works on or has
+        # pending: a `--shared` sibling's writes are on a branch that only
+        # its `workspace.toml` names.
+        in_use.update(self.workspace.pending_forks.values())
+        here = self.root.resolve()
+        for root, ws in self._iter_live_workspaces():
+            if root.resolve() != here:
+                in_use.update(ws.working_refs.values())
+                in_use.update(ws.pending_forks.values())
 
         # States that hold data per system: pinned (safe) vs merely recorded.
         pinned: dict[str, list[State | None]] = {}
@@ -531,6 +561,7 @@ class GcOps(RepoCore):
         """
         with self._writer_lock(), self._repo_lock():
             self._verify_plan(plan, "gc")
+            self._refuse_conflicts("gc")
             report = GcReport(dry_run=False, plan=plan)
             errors: dict[str, Exception] = {}
             forgot = False
@@ -742,12 +773,15 @@ class GcOps(RepoCore):
         Raises:
             ConfigError: The trunk, an unknown bookmark, or one another live
                 checkout works on.
+            VcsError: The VCS reports a conflicted bookmark or commit; which
+                commits only this bookmark reaches cannot be told then.
         """
         trunk = self.config.trunk
         if bookmark == trunk:
             raise ConfigError(
                 f"{bookmark!r} is the trunk bookmark; it cannot be dropped"
             )
+        self._refuse_conflicts("drop")
         marks = self.vcs.bookmarks()
         if bookmark not in marks:
             raise ConfigError(f"no bookmark {bookmark!r}")
@@ -857,15 +891,17 @@ class GcOps(RepoCore):
         # this checkout is on the bookmark its working tree still names the
         # bookmark's objects; plan against the destination's manifests.
         objects, refs = self.objects, self.workspace.working_refs
+        pending = self.workspace.pending_forks
         excluded = list(commits)
         try:
             if here:
                 # As after `new <destination>`: its manifests, none of this
-                # bookmark's working refs, and (jj) without the empty
-                # working-copy commit on top of the bookmark, whose tree still
-                # names the bookmark's pins.
+                # bookmark's working refs or pending forks, and (jj) without
+                # the empty working-copy commit on top of the bookmark, whose
+                # tree still names the bookmark's pins.
                 self.objects = self._objects_at(destination)
                 self.workspace.working_refs = {}
+                self.workspace.pending_forks = {}
                 excluded.append(self.vcs.current_rev())
             preview = self.plan_gc(
                 prune_bookmarks=True,
@@ -879,6 +915,7 @@ class GcOps(RepoCore):
             )
         finally:
             self.objects, self.workspace.working_refs = objects, refs
+            self.workspace.pending_forks = pending
         plan.actions.extend(preview.actions)
         plan.notes.extend(preview.notes)
         if remotes:
@@ -909,6 +946,7 @@ class GcOps(RepoCore):
         """
         with self._writer_lock(), self._repo_lock():
             self._verify_plan(plan, "drop")
+            self._refuse_conflicts("drop")
             ctx = plan.context
             # 0.1.0b3 plans record the id without requiring it.
             if not any(p.kind == "workspace_id" for p in plan.preconditions) and (
@@ -1183,7 +1221,12 @@ class GcOps(RepoCore):
                     moved[name] = dest
             self._manifest_cache.clear()
             self.objects = read_objects(self.root)
-            gc_plan = self.plan_gc()
+            try:
+                gc_plan = self.plan_gc()
+            except VcsError as exc:
+                # The rebase left a conflict: the VCS half is done, the store
+                # half waits for `gc` once it is resolved.
+                gc_plan = Plan(command="gc", notes=[str(exc)])
             report = AbandonReport(abandoned=ids, gc_plan=gc_plan)
             self._log_op(
                 "abandon",

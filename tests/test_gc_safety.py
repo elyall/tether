@@ -1,0 +1,251 @@
+"""`gc` keeps anything that might still be needed: pins named only by another
+checkout's working tree or by an operation that has not finished, branches a
+`--shared` sibling works on, and everything while jj reports a conflict."""
+
+from __future__ import annotations
+
+import subprocess
+import uuid
+from pathlib import Path
+
+import pytest
+
+from tether.backends.memory import default_store
+from tether.errors import VcsError
+from tether.handles import MemoryHandle
+from tether.repo import Repo
+
+
+def _baseline(vcs_root: Path) -> tuple[Repo, str]:
+    repo = Repo.init(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    return repo, system
+
+
+def _write(repo: Repo, payload: dict) -> None:
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write(payload)
+
+
+def _other_checkout(repo: Repo, vcs_root: Path, other_root: Path, rev: str) -> Repo:
+    """A second checkout of the repository, at `rev`."""
+    cmd = (
+        ["jj", "workspace", "add", str(other_root), "-r", rev]
+        if repo.vcs.kind == "jj"
+        else ["git", "worktree", "add", "--detach", str(other_root), rev]
+    )
+    subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    return Repo.find(other_root)
+
+
+def _jj(vcs_root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["jj", *args], cwd=vcs_root, check=True, capture_output=True, text=True
+    )
+    return proc.stdout.strip()
+
+
+@pytest.mark.parametrize("how", ["undo", "novcs"])
+def test_gc_counts_pins_another_checkouts_working_tree_names(
+    vcs_root: Path, tmp_path: Path, how: str
+) -> None:
+    """r4: checkout B commits and undoes (git: `reset --soft`; jj: squash into
+    `@`), or commits with `vcs=False`. Its working-tree manifest names a pin
+    no history does; A's gc used to release it, and B's next commit then
+    recorded a manifest whose pin `verify` called missing."""
+    a, system = _baseline(vcs_root)
+    b = _other_checkout(a, vcs_root, tmp_path / "other", a.vcs.bookmarks()["main"])
+    b.new(bookmark="bwork")
+    _write(b, {"x": "B"})
+    if how == "undo":
+        result = b.commit("B work")
+        b.undo()
+    else:
+        result = b.commit("B work", vcs=False)
+    pin = result.pinned["db"]
+    assert pin is not None
+    assert Repo.find(tmp_path / "other").objects["db"].pin == pin
+
+    a = Repo.find(vcs_root)
+    plan = a.plan_gc()
+    assert not [x for x in plan.actions if x.op == "unpin"], plan.render()
+    a.apply_gc(plan)
+    assert pin.ref in default_store().system(system).tags
+    assert all(r.ok for r in Repo.find(tmp_path / "other").verify().values())
+
+
+def test_gc_keeps_the_pins_of_an_operation_that_has_not_finished(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit killed between its pins and its manifests leaves a started
+    journal entry whose progress names the pin and no manifest anywhere; gc
+    in another checkout must treat that as a reference, and the retried
+    commit must still be whole."""
+    from tether.repo import _commit as commit_module
+
+    a, system = _baseline(vcs_root)
+    a.new(bookmark="feat")
+    _write(a, {"v": 1})
+
+    def killed(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt  # not an Exception: no rollback, as a kill
+
+    monkeypatch.setattr(commit_module, "write_object", killed)
+    with pytest.raises(KeyboardInterrupt):
+        a.commit("v1")
+    monkeypatch.undo()
+    started = [e for e in Repo.find(vcs_root).incomplete_ops()]
+    assert [e.command for e in started] == ["commit"]
+    pinned = [r for r in started[0].progress if r.get("action") == "pin"]
+    assert len(pinned) == 1
+    pin_ref = str(pinned[0]["ref"])
+
+    b = _other_checkout(a, vcs_root, tmp_path / "other", a.vcs.bookmarks()["main"])
+    plan = b.plan_gc()
+    assert not [x for x in plan.actions if x.op == "unpin"], plan.render()
+    assert any("unfinished operation" in n for n in plan.notes)
+    b.apply_gc(plan)
+    assert pin_ref in default_store().system(system).tags
+
+    retried = Repo.find(vcs_root).commit("v1, again")
+    assert retried.vcs_commit is not None
+    assert all(r.ok for r in Repo.find(vcs_root).verify().values())
+
+
+def test_prune_keeps_a_branch_a_shared_checkout_works_on(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """r7 / r12: A is on bookmark x with its fork still pending; B joined x
+    with `--shared`, forked the branch and committed. A's `--prune-bookmarks`
+    judged the branch by its own working refs alone: 'this bookmark's
+    branch; no object uses it', deleted, B's next write failed."""
+    a, system = _baseline(vcs_root)
+    a.new(bookmark="x")  # lazy: A has no branch yet
+    ref = a.workspace.pending_forks["db"]
+    assert not a.workspace.working_refs
+    store = default_store()
+    if a.vcs.kind == "jj":
+        b = _other_checkout(a, vcs_root, tmp_path / "other", a.vcs.bookmarks()["x"])
+        b.new("x", shared=True)
+        _write(b, {"base": 1, "b": "committed"})
+        b.commit("B on x")
+        assert b.workspace.working_refs["db"] == ref
+        _write(b, {"base": 1, "b": "uncommitted follow-up"})
+    else:
+        # git checks a branch out in one worktree only: the sibling is a
+        # clone, whose work shows up in the store alone. A's own pending
+        # fork names the branch, and that has to be enough.
+        m = a.objects["db"]
+        assert m.pin is not None
+        a.backend_for("memory").fork(m.locator, m.pin, ref)
+        store.write(system, ref, {"base": 1, "b": "uncommitted follow-up"})
+
+    a = Repo.find(vcs_root)
+    for force in (False, True):
+        plan = a.plan_gc(prune_bookmarks=True, force_prune=force)
+        assert not [
+            x for x in plan.actions if x.op in ("delete-branch", "keep-branch")
+        ], plan.render()
+    a.gc(dry_run=False, prune_bookmarks=True, force_prune=True)
+    assert ref in store.system(system).branches
+    assert store.read(system, ref) == {"base": 1, "b": "uncommitted follow-up"}
+    if a.vcs.kind == "jj":
+        b = Repo.find(tmp_path / "other")
+        _write(b, {"base": 1, "b": "next write"})
+        assert store.read(system, ref) == {"base": 1, "b": "next write"}
+
+
+def test_gc_and_drop_refuse_while_jj_reports_a_conflicted_commit(
+    vcs_root: Path,
+) -> None:
+    """r2: `jj rebase -b feat -d main` where both lines changed `db` leaves
+    feat's commit conflicted. Its manifest has two answers, and only one is
+    the tree jj shows; nothing is judged until the conflict is resolved."""
+    repo, system = _baseline(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicts")
+    repo.new(bookmark="feat")
+    _write(repo, {"x": "feat"})
+    feat_pin = repo.commit("feat write").pinned["db"]
+    assert feat_pin is not None
+    repo.new("main")
+    _write(repo, {"x": "main"})
+    repo.commit("trunk write")
+    _jj(vcs_root, "rebase", "-b", "feat", "-d", "main")
+    repo = Repo.find(vcs_root)
+    (conflicted,) = repo.vcs.conflicted_commits()
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_gc()
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_drop("feat")
+    assert feat_pin.ref in default_store().system(system).tags
+    # `abandon` of another line still does its VCS half; the store half waits.
+    repo.new(bookmark="side")
+    _write(repo, {"x": "side"})
+    side = repo.commit("side write")
+    assert side.vcs_commit is not None and side.pinned["db"] is not None
+    repo.new("main")
+    report = repo.abandon([side.vcs_commit])
+    assert report.abandoned == [side.vcs_commit]
+    assert report.gc_plan is not None and report.gc_plan.is_empty
+    assert any("conflict" in n for n in report.gc_plan.notes)
+    # Resolved (here by dropping the conflicted commit): gc judges again, and
+    # both lines' pins are what nothing references now.
+    _jj(vcs_root, "abandon", conflicted)
+    repo = Repo.find(vcs_root)
+    assert not repo.vcs.conflicted_commits()
+    unpins = {x.target for x in repo.plan_gc().actions if x.op == "unpin"}
+    assert unpins == {feat_pin.ref, side.pinned["db"].ref}
+
+
+def test_promote_refuses_a_conflicted_trunk(vcs_root: Path) -> None:
+    """r3: two concurrent moves of `main` (the shape a divergent `jj git
+    fetch` leaves) make it a bookmark with two targets. `bookmarks()` left it
+    out, the trunk guard read that as 'no trunk yet', and the apply settled
+    the conflict on this bookmark's commit, dropping both other commits."""
+    repo, _system = _baseline(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicted bookmarks")
+    repo.new(bookmark="feat")
+    _write(repo, {"x": "feat"})
+    repo.commit("feat write")
+    _jj(vcs_root, "new", "--no-edit", "main", "-m", "landed elsewhere 1")
+    _jj(vcs_root, "new", "--no-edit", "main", "-m", "landed elsewhere 2")
+    s1 = _jj(
+        vcs_root,
+        "log",
+        "--no-graph",
+        "-r",
+        'description(glob:"landed elsewhere 1*")',
+        "-T",
+        "commit_id",
+    )
+    s2 = _jj(
+        vcs_root,
+        "log",
+        "--no-graph",
+        "-r",
+        'description(glob:"landed elsewhere 2*")',
+        "-T",
+        "commit_id",
+    )
+    op = _jj(vcs_root, "op", "log", "--no-graph", "-n1", "-T", "id")
+    _jj(vcs_root, "bookmark", "set", "main", "-r", s1)
+    _jj(vcs_root, "--at-op", op, "bookmark", "set", "main", "-r", s2)
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.conflicted_bookmarks() == ["main"]
+    with pytest.raises(VcsError, match="conflict"):
+        repo.plan_gc()
+
+    plan = repo.plan_promote()
+    assert plan.actions and all(a.op == "refuse" for a in plan.actions)
+    assert "conflicting targets" in plan.actions[0].detail
+    report = repo.apply_promote(plan)
+    assert report.trunk_moved is None and report.refused
+    assert repo.vcs.conflicted_bookmarks() == ["main"]  # both sides still stand
+    assert repo.vcs.alive_commits([s1, s2]) == {s1, s2}
+    assert repo.bookmark_drift() == []  # feat is fine; the trunk is what is conflicted

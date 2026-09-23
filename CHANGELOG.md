@@ -43,6 +43,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gc` counts every live checkout's working-tree manifests and the pins of
+  operations still running or interrupted as references; it released a pin
+  another checkout's undone or `--no-vcs` commit named, and one a commit had
+  cut just before it was killed. `--prune-bookmarks` keeps every branch any
+  live checkout works on or has pending; it deleted the branch a `--shared`
+  sibling was writing to.
+- `gc`, `drop` and `promote` refuse while jj reports a conflicted bookmark or
+  commit (`gc` and `drop` raise; `promote` refuses the plan). A conflicted
+  bookmark was left out of what history reaches, and `promote` moved a
+  conflicted trunk onto its own bookmark, dropping the other side. `status`
+  and `commit` name a conflicted bookmark instead of calling it gone.
 - `commit` raises when the new commit's tree lacks a manifest (a dataset under
   an ignored directory made an empty commit that `status` called clean).
 - git: a `git commit` a hook refused left the manifests staged, naming the pins

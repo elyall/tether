@@ -123,6 +123,19 @@ def ref_for_pin(pin_id: str) -> str:
     return f"{REF_PREFIX}{pin_id}"
 
 
+def pin_id_of_ref(ref: str) -> str | None:
+    """The pin id a ``tether.<id>`` ref carries, a generation suffix
+    (``tether.<id>.2``, Icechunk's answer to a burnt tag name) dropped;
+    ``None`` for any other ref."""
+    if not ref.startswith(REF_PREFIX):
+        return None
+    rest = ref[len(REF_PREFIX) :]
+    parts = rest.split(".")
+    if len(parts) == 3 and parts[2].isdigit():
+        rest = f"{parts[0]}.{parts[1]}"
+    return rest if pin_dataset(rest) else None
+
+
 OWNER_REF_PREFIX = f"{REF_PREFIX}owner."
 
 
