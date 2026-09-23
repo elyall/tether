@@ -670,6 +670,29 @@ def test_abandon_keeps_descendant_manifests_as_snapshots(vcs_root: Path) -> None
     assert (vcs_root / "ds/.tether/objects/db.toml").read_text() == "state = 1\n"
 
 
+def test_abandon_keeps_a_manifest_the_abandoned_commit_added(vcs_root: Path) -> None:
+    """Dropping the commit that added a manifest: the descendants keep it
+    (snapshot semantics). git's fix-up put it back into the rebased commits
+    through plumbing but left the worktree at the rebased tree, so the
+    manifest showed as deleted and the next commit deleted it."""
+    vcs = detect_vcs(vcs_root)
+    objects = "ds/.tether/objects"
+    _write(vcs_root, f"{objects}/base.toml", "state = 0\n")
+    vcs.commit([objects], "base")
+    _write(vcs_root, f"{objects}/a.toml", "state = 1\n")
+    adds_a = vcs.commit([objects], "adds a")
+    _write(vcs_root, f"{objects}/b.toml", "state = 2\n")
+    vcs.commit([objects], "adds b")
+
+    vcs.abandon([adds_a], objects)
+    tip = vcs.resolve("@-" if vcs.kind == "jj" else "HEAD")
+    assert sorted(vcs.files_at(tip, objects)) == [
+        f"{objects}/{n}.toml" for n in ("a", "b", "base")
+    ]
+    assert (vcs_root / objects / "a.toml").read_text() == "state = 1\n"
+    assert not vcs.dirty([objects])
+
+
 def test_bookmarks(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     _write(vcs_root, "tether.toml", "v=1\n")

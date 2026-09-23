@@ -2016,6 +2016,10 @@ class GitAdapter:
             fixed = self.rewrite_history(
                 keep_dir, lambda c, files, want=desired: want.get(c, files)
             )
+            if fixed and before[descendants[-1]]:
+                # The fix-up rewrote HEAD through plumbing; the worktree still
+                # holds the rebased tree, without what the fix-up put back.
+                self._git("checkout", "HEAD", "--", keep_dir)
             for old_d, new_d in zip(descendants, new_descendants, strict=True):
                 mapping[old_d] = fixed.get(new_d, new_d)
             done.append(commit)

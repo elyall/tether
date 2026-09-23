@@ -331,10 +331,9 @@ def test_abandon_restores_later_manifests_under_a_hostile_config(
 ) -> None:
     """`abandon` writes a descendant's manifests back as they were; one the
     abandoned commit had added is a new file there, which a user's
-    `auto-track = "none()"` left out of the rewritten commit."""
+    `auto-track = "none()"` left out of the rewritten commit (jj), and which
+    the rebase left deleted in the worktree (git)."""
     repo = Repo.init(vcs_root)
-    if repo.vcs.kind != "jj":
-        pytest.skip("jj snapshots; git rewrites through plumbing")
     _mem_object(repo, "base")
     repo.commit("baseline")
     _mem_object(repo, "a")
