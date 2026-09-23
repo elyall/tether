@@ -19,12 +19,14 @@ plumbing works there), which is ~50x cheaper per read.
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,19 +68,38 @@ _JJ_ISOLATION = (
     'ui.color="never"',
     "--config",
     'ui.paginate="never"',
+)
+"""What every jj call gets, ahead of the user's config: plain output (a
+`ui.color = "always"` put escape codes into every commit id tether parsed).
+Snapshots follow the user's `snapshot` settings: a new file of theirs lands
+in the change it was made in before tether moves the working copy, as under
+their own jj commands. tether's own paths are left out of that
+(`_JJ_TETHER_PATHS`) and tracked by name (`JjAdapter._track`). Revsets use
+operator forms (`::`, `x::`) where one exists, so a
+`revset-aliases."all()"` cannot redefine what gc walks."""
+
+_JJ_TETHER_PATHS = 'root-glob:"**/.tether/**"'
+"""Taken out of the user's `snapshot.auto-track` for tether's calls. A
+manifest `add` wrote goes wherever the checkout goes (an undo's return
+included) until a commit tracks it by name, and a per-checkout file
+(`secrets.toml`, the op log) is never tracked by tether, even where the
+committed `.gitignore` misses it."""
+
+_JJ_TRACK_ONLY = (
     "--config",
     'snapshot.auto-track="none()"',
     "--config",
     'snapshot.max-new-file-size="1GiB"',
 )
-"""What every jj call gets, ahead of the user's config: plain output (a
-`ui.color = "always"` put escape codes into every commit id tether parsed),
-and a snapshot that tracks nothing on its own -- tether tracks its own paths
-by name (`JjAdapter._track`), so a `snapshot.auto-track = "none()"` cannot
-leave them out of the commit, and the user's new-file size limit does not
-apply to a listing. Their own new files are tracked by their next jj command,
-under their config, as before. Revsets use operator forms (`::`, `x::`) where
-one exists, so a `revset-aliases."all()"` cannot redefine what gc walks."""
+"""For `jj file track` of tether's paths. That command's own snapshot tracks
+nothing new, so lifting the new-file size limit (a listing may exceed the
+user's) reaches the named paths only, never the user's files."""
+
+_JJ_PARKED = ("--config", 'snapshot.auto-track="none()"')
+"""For every call after tether has moved the working copy itself, until it
+is back (`JjAdapter._parked`). An older commit's `.gitignore` may not ignore
+what is on disk -- `secrets.toml`, the op log, a later-ignored `.venv` -- and
+a snapshot there under the user's auto-track would commit it into history."""
 
 _GIT_ISOLATION = (
     "-c",
@@ -700,10 +721,42 @@ class JjAdapter:
         self._exe = executable
         self._git_exe = git_executable or shutil.which("git")
         self._version_checked = False
+        self._parking = threading.local()
+        self._auto_track: str | None = None
 
     def _jj(self, *args: str, check: bool = True) -> _Run:
         self._require_version()
-        return _run([self._exe, *_JJ_ISOLATION, *args], cwd=self.root, check=check)
+        if getattr(self._parking, "depth", 0):
+            track = _JJ_PARKED
+        else:
+            value = json.dumps(self._user_auto_track())
+            track = ("--config", f"snapshot.auto-track={value}")
+        return _run(
+            [self._exe, *_JJ_ISOLATION, *track, *args], cwd=self.root, check=check
+        )
+
+    def _user_auto_track(self) -> str:
+        """The user's `snapshot.auto-track` (jj's default: `all()`) without
+        tether's paths (`_JJ_TETHER_PATHS`); read once per adapter."""
+        if self._auto_track is None:
+            out = _run(
+                [self._exe, *_JJ_ISOLATION, "config", "get", "snapshot.auto-track"],
+                cwd=self.root,
+                check=False,
+            )
+            theirs = out.stdout.strip() if out.returncode == 0 else ""
+            self._auto_track = f"({theirs or 'all()'}) ~ {_JJ_TETHER_PATHS}"
+        return self._auto_track
+
+    @contextlib.contextmanager
+    def _parked(self) -> Iterator[None]:
+        """Snapshot nothing new while tether has the working copy elsewhere
+        (see `_JJ_PARKED`); enter once the user's working copy is snapshotted."""
+        self._parking.depth = getattr(self._parking, "depth", 0) + 1
+        try:
+            yield
+        finally:
+            self._parking.depth -= 1
 
     def _require_version(self) -> None:
         """Refuse a jj older than `MIN_JJ_VERSION`, once per adapter."""
@@ -721,11 +774,11 @@ class JjAdapter:
         self._version_checked = True
 
     def _track(self, relpaths: list[str]) -> None:
-        """Track tether's paths by name: tether's snapshots track nothing on
-        their own (see `_JJ_ISOLATION`), and a commit of untracked paths is an
+        """Track tether's paths by name: a user's `snapshot.auto-track` or
+        size limit may leave them out, and a commit of untracked paths is an
         empty commit that jj reports as a success."""
         if relpaths:
-            self._jj("file", "track", *relpaths)
+            self._jj("file", "track", *_JJ_TRACK_ONLY, *relpaths)
 
     def _git_store(self) -> tuple[Path, Path | None] | None:
         """Locate the git object store backing this jj repo.
@@ -1077,7 +1130,8 @@ class JjAdapter:
             self._jj("new", rev)
         elif not self.position().get("empty"):
             self._jj("new", "@")
-        self._jj("bookmark", "set", name, "-r", "@-", "--allow-backwards")
+        with self._parked():
+            self._jj("bookmark", "set", name, "-r", "@-", "--allow-backwards")
 
     def is_ancestor(self, ancestor: str, rev: str) -> bool:
         out = self._jj(
@@ -1333,29 +1387,33 @@ class JjAdapter:
         old_commits = dict(pairs)
         before = {c: self.files_at(c, keep_dir) for c in descendants}
         start = self.position()
-        self._jj("abandon", *ids)
-        # Snapshot semantics for keep_dir: put every descendant's files back.
-        # The working-copy change is a descendant too, but an *empty* one only
-        # inherited its files; it follows its new parent instead.
-        wc = start["id"]
-        for change in descendants:
-            files = before[change]
-            if change == wc:
-                if not start.get("empty"):
-                    for path, text in files.items():
-                        (self.root / path).write_text(text, encoding="utf-8")
-                continue
-            if self.files_at(change, keep_dir) == files:
-                continue
-            self._jj("new", change)
-            for path, text in files.items():
-                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
-                (self.root / path).write_text(text, encoding="utf-8")
-            self._jj("squash", "-u")
-        if descendants and descendants[-1] != wc:
-            # `jj new` moved the working copy; go back (the old @ may have
-            # been abandoned as empty, so land on its rebased parent).
-            self.goto({**self.position(), "empty": True})
+        with self._parked():
+            self._jj("abandon", *ids)
+            # Snapshot semantics for keep_dir: put every descendant's files
+            # back. The working-copy change is a descendant too, but an *empty*
+            # one only inherited its files; it follows its new parent instead.
+            wc = start["id"]
+            for change in descendants:
+                files = before[change]
+                if change == wc:
+                    if not start.get("empty"):
+                        for path, text in files.items():
+                            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                            (self.root / path).write_text(text, encoding="utf-8")
+                        self._track(list(files))
+                    continue
+                if self.files_at(change, keep_dir) == files:
+                    continue
+                self._jj("new", change)
+                for path, text in files.items():
+                    (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (self.root / path).write_text(text, encoding="utf-8")
+                self._track(list(files))
+                self._jj("squash", "-u")
+            if descendants and descendants[-1] != wc:
+                # `jj new` moved the working copy; go back (the old @ may have
+                # been abandoned as empty, so land on its rebased parent).
+                self.goto({**self.position(), "empty": True})
         mapping = {}
         for change in descendants:
             try:
@@ -1402,36 +1460,38 @@ class JjAdapter:
         mapping: dict[str, str] = {}
         flags = ["--ignore-immutable"] if ignore_immutable else []
         rewritten = False
-        for change, commit in changes:
-            if change == start["id"]:
-                continue  # the working copy: the caller edits it in place
-            files = self.files_at(commit, reldir)
-            new_files = transform(commit, files)
-            if new_files == files:
-                continue
-            # A child of the change holding the new texts, squashed into it;
-            # jj rebases the descendants and keeps the change id.
-            self._jj("new", *flags, change)
-            for path, text in new_files.items():
-                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
-                (self.root / path).write_text(text, encoding="utf-8")
-            self._jj("squash", "-u", *flags)
-            rewritten = True
-        if rewritten:
-            for change, commit in descendants:
+        with self._parked():
+            for change, commit in changes:
                 if change == start["id"]:
+                    continue  # the working copy: the caller edits it in place
+                files = self.files_at(commit, reldir)
+                new_files = transform(commit, files)
+                if new_files == files:
                     continue
-                try:
-                    now = self.resolve(change)
-                except VcsError:
-                    continue  # an empty working-copy change dropped along the way
-                if now != commit:
-                    mapping[commit] = now
-        # The recorded parent may itself have been rewritten; a `jj new` on the
-        # old commit id would revive the hidden pre-rewrite history.
-        if start.get("parent") in mapping:
-            start = {**start, "parent": mapping[start["parent"]]}
-        self.goto(start)
+                # A child of the change holding the new texts, squashed into
+                # it; jj rebases the descendants and keeps the change id.
+                self._jj("new", *flags, change)
+                for path, text in new_files.items():
+                    (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (self.root / path).write_text(text, encoding="utf-8")
+                self._track(list(new_files))
+                self._jj("squash", "-u", *flags)
+                rewritten = True
+            if rewritten:
+                for change, commit in descendants:
+                    if change == start["id"]:
+                        continue
+                    try:
+                        now = self.resolve(change)
+                    except VcsError:
+                        continue  # an empty working-copy change dropped along the way
+                    if now != commit:
+                        mapping[commit] = now
+            # The recorded parent may itself have been rewritten; a `jj new` on
+            # the old commit id would revive the hidden pre-rewrite history.
+            if start.get("parent") in mapping:
+                start = {**start, "parent": mapping[start["parent"]]}
+            self.goto(start)
         return mapping
 
 

@@ -29,6 +29,12 @@ def _write(repo: Repo, key: str, payload: dict) -> None:
     handle.write(payload)
 
 
+def _jj(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["jj", *args], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
+
+
 def test_core_loop_and_gc_under_a_hostile_user_config(
     vcs_root: Path, hostile_vcs_config: Path
 ) -> None:
@@ -102,6 +108,163 @@ def test_commit_after_a_no_vcs_commit_lands_manifests_no_commit_tracked_yet(
     assert sorted(committed) == sorted(keys)
     assert all(committed[k].state == repo.objects[k].state for k in keys)
     assert not repo.vcs.dirty(repo._vcs_paths())
+
+
+@pytest.mark.parametrize("config", ["default", "hostile"])
+@pytest.mark.parametrize("how", ["new", "new-bookmark-at-main", "drop"])
+@pytest.mark.parametrize("path", ["notes.txt", "scratch/deep/notes.txt"])
+def test_a_new_file_of_the_users_stays_in_the_change_it_was_made_in(
+    vcs_root: Path, request: pytest.FixtureRequest, config: str, how: str, path: str
+) -> None:
+    """jj: a file the user created and no jj command has snapshotted yet,
+    then a tether command that moves the working copy. tether's snapshots
+    tracked nothing new, so the file survived the move on disk and the
+    user's next jj command committed it into the destination bookmark. It
+    belongs to the change it was made in -- or, under the user's own
+    `auto-track = "none()"`, to no change, as their jj would leave it."""
+    if config == "hostile":
+        request.getfixturevalue("hostile_vcs_config")
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj snapshots the working copy")
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    _write(repo, "db", {"x": 1})
+    repo.commit("feat work")
+    made_in = repo.vcs.position()["id"]
+    user_file = vcs_root / path
+    user_file.parent.mkdir(parents=True, exist_ok=True)
+    user_file.write_text("mine\n", encoding="utf-8")
+    if how == "new":
+        repo.new("main")
+    elif how == "new-bookmark-at-main":
+        repo.new("main", bookmark="other")
+    else:
+        repo.drop("feat")
+    _jj(vcs_root, "status")  # the user's next command: a snapshot, their config
+    assert path not in _jj(vcs_root, "file", "list", "-r", "@").split()
+    assert path not in _jj(vcs_root, "file", "list", "-r", "@-").split()
+    if config == "default":
+        assert path in _jj(vcs_root, "file", "list", "-r", made_in).split()
+        assert not user_file.exists()
+    else:
+        assert user_file.read_text(encoding="utf-8") == "mine\n"
+
+
+@pytest.mark.parametrize("how", ["new", "undo"])
+def test_tethers_own_new_manifest_follows_the_checkout(
+    vcs_root: Path, how: str
+) -> None:
+    """jj, default auto-track: the user's new file lands in the change it was
+    made in, but a manifest an uncommitted `add` wrote is tether's, tracked
+    by name when a commit takes it. Snapshotted into the change being left,
+    it vanished from the checkout -- `undo` of an older `new -b` lost the
+    later `add` and left a stray commit holding it."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj snapshots the working copy")
+    _mem_object(repo)
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    new_op = repo.ops()[0]
+    made_in = repo.vcs.position()["id"]
+    _mem_object(repo, "aux")
+    (vcs_root / "notes.txt").write_text("mine\n", encoding="utf-8")
+    if how == "new":
+        repo.new("main")
+    else:
+        repo.undo(new_op.id)
+    assert "aux" in Repo.find(vcs_root).objects
+    assert "notes.txt" in _jj(vcs_root, "file", "list", "-r", made_in).split()
+    assert not (vcs_root / "notes.txt").exists()
+    heads = _jj(
+        vcs_root, "log", "--no-graph", "-r", "heads(::) ~ @", "-T", 'change_id ++ "\\n"'
+    ).split()
+    for head in heads:
+        listed = _jj(vcs_root, "file", "list", "-r", head).split()
+        assert ".tether/objects/aux.toml" not in listed, head
+
+
+def test_abandon_restores_later_manifests_under_a_hostile_config(
+    vcs_root: Path, hostile_vcs_config: Path
+) -> None:
+    """`abandon` writes a descendant's manifests back as they were; one the
+    abandoned commit had added is a new file there, which a user's
+    `auto-track = "none()"` left out of the rewritten commit."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj snapshots; git rewrites through plumbing")
+    _mem_object(repo, "base")
+    repo.commit("baseline")
+    _mem_object(repo, "a")
+    first = repo.commit("adds a")
+    _mem_object(repo, "b")
+    repo.commit("adds b")
+    assert first.vcs_commit is not None
+    repo.abandon([first.vcs_commit])
+    tip = repo.vcs.bookmarks()["main"]
+    assert sorted(repo._objects_at(tip)) == ["a", "b", "base"]
+    assert not repo.vcs.dirty(repo._vcs_paths())
+
+
+@pytest.mark.parametrize("how", ["rewrite", "abandon", "new-bookmark"])
+def test_per_checkout_files_never_reach_an_older_commit(
+    vcs_root: Path, how: str
+) -> None:
+    """jj: tether parks the working copy on older commits to rewrite them
+    (`upgrade`, `abandon`) or starts a bookmark at one. An older
+    `.tether/.gitignore` may not ignore `secrets.toml` or the op log, and a
+    snapshot there under the user's auto-track (`all()` by default) squashed
+    them into history. Snapshots taken while parked track nothing new."""
+    from tether.vcs import JjAdapter
+
+    if not (vcs_root / ".jj").is_dir():
+        pytest.skip("jj snapshots the working copy")
+    vcs = JjAdapter(vcs_root)
+    tdir = vcs_root / ".tether"
+    (tdir / "objects").mkdir(parents=True)
+    (tdir / ".gitignore").write_text("/workspace.toml\n", encoding="utf-8")
+    (tdir / "objects" / "a.toml").write_text("v = 1\n", encoding="utf-8")
+    old = vcs.commit([".tether"], "a layout from before the op log")
+    (tdir / ".gitignore").write_text(
+        "/workspace.toml\n/ops.jsonl\n/secrets.toml\n", encoding="utf-8"
+    )
+    (tdir / "objects" / "b.toml").write_text("v = 1\n", encoding="utf-8")
+    mid = vcs.commit([".tether"], "ignore the per-checkout files")
+    (tdir / "objects" / "a.toml").write_text("v = 2\n", encoding="utf-8")
+    vcs.commit([".tether"], "later")
+    (tdir / "secrets.toml").write_text('[vcs]\ngit_path = "/x"\n', encoding="utf-8")
+    (tdir / "ops.jsonl").write_text("{}\n", encoding="utf-8")
+    if how == "rewrite":
+        mapping = vcs.rewrite_history(
+            ".tether/objects",
+            lambda _c, files: {
+                p: t.replace("v = 1", "v = 0") for p, t in files.items()
+            },
+        )
+        assert mapping
+    elif how == "abandon":
+        vcs.abandon([mid], ".tether/objects")
+    else:
+        vcs.new_bookmark("probe", old)
+    commits = _jj(
+        vcs_root,
+        "log",
+        "--ignore-working-copy",
+        "--no-graph",
+        "-r",
+        "::@ ~ root()",
+        "-T",
+        'commit_id ++ "\\n"',
+    ).split()
+    for commit in commits:
+        listed = _jj(
+            vcs_root, "file", "list", "--ignore-working-copy", "-r", commit
+        ).split()
+        assert ".tether/secrets.toml" not in listed, (how, commit)
+        assert ".tether/ops.jsonl" not in listed, (how, commit)
+    assert (tdir / "secrets.toml").is_file() and (tdir / "ops.jsonl").is_file()
 
 
 def test_commit_refuses_to_report_success_when_the_manifests_were_left_out(
