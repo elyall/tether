@@ -163,6 +163,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `add --create` makes and, once the object is removed, the store
   `gc --delete-stores` reclaims; both used the default endpoint and ambient
   credentials.
+- `icechunk`: a `profile` or `role_arn` entry hands Icechunk a refresh
+  callback, so a handle held past the role's expiry keeps writing; only new
+  opens used to get fresh keys.
 
 ### Experimental
 

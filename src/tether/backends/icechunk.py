@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import re
 import shutil
 from collections.abc import Collection, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -111,7 +114,7 @@ class IcechunkBackend(ObjectBackend):
             from tether.credentials import aws_credentials
 
             secrets = self.secrets_for(locator)
-            creds = aws_credentials(secrets)
+            accepted = _keywords(ic.s3_storage)
             kwargs: dict[str, Any] = {
                 "bucket": parsed.netloc,
                 "prefix": parsed.path.lstrip("/") or None,
@@ -120,11 +123,12 @@ class IcechunkBackend(ObjectBackend):
             if secrets.get("endpoint_url"):
                 kwargs["endpoint_url"] = str(secrets["endpoint_url"])
             kwargs.update(self._s3_flags(secrets))
-            if creds:
+            if self._refreshes(secrets):
+                kwargs["get_credentials"] = _RefreshedCredentials(_as_json(secrets))
+            elif creds := aws_credentials(secrets):
                 kwargs.update(creds)
             else:
                 kwargs["from_env"] = True
-            accepted = _keywords(ic.s3_storage)
             missing = sorted(set(kwargs) - accepted) if accepted is not None else []
             if missing:
                 raise BackendError(
@@ -147,14 +151,34 @@ class IcechunkBackend(ObjectBackend):
     def _s3_flags(self, secrets: dict[str, Any]) -> dict[str, bool]:
         return {k: True for k in self._S3_FLAGS if _truthy(secrets.get(k))}
 
+    @staticmethod
+    def _refreshes(secrets: dict[str, Any]) -> bool:
+        """Whether the repository is opened with a `get_credentials` callback:
+        a profile or role (keys that expire) and an icechunk that takes one.
+        Everything opened from the repository -- a writable session held for
+        hours included -- then asks for fresh keys before the old ones
+        expire, instead of failing mid-write."""
+        import icechunk as ic
+
+        from tether.credentials import refreshable
+
+        accepted = _keywords(ic.s3_storage)
+        takes = accepted is None or "get_credentials" in accepted
+        return takes and refreshable(secrets)
+
     def _credentials(self, locator: Locator) -> dict[str, str] | None:
-        """The static keys the repository at `locator` is opened with; `None`
-        for local storage or when the ambient environment serves."""
+        """What the repository at `locator` is opened with, as `_repo`
+        compares it: the static keys; the secrets entry a refresh callback
+        resolves (keys it rotates itself do not reopen the repository);
+        `None` for local storage or when the ambient environment serves."""
         if local_path(self._uri(locator)) is not None:
             return None
         from tether.credentials import aws_credentials
 
-        return aws_credentials(self.secrets_for(locator))
+        secrets = self.secrets_for(locator)
+        if self._refreshes(secrets):
+            return {"get_credentials": _as_json(secrets)}
+        return aws_credentials(secrets)
 
     def _repo(self, locator: Locator):
         import icechunk as ic
@@ -162,9 +186,10 @@ class IcechunkBackend(ObjectBackend):
         uri = self._uri(locator)
         creds = self._credentials(locator)
         repo = self._repos.get(uri)
-        # Keys assumed from a role expire: `aws_credentials` hands out a fresh
-        # set near expiry, and a Repository holding the old ones would fail
-        # its next request, so it is rebuilt when the keys change.
+        # Static keys assumed from a role expire (an icechunk without
+        # `get_credentials`): `aws_credentials` hands out a fresh set near
+        # expiry, and a Repository holding the old ones would fail its next
+        # request, so it is rebuilt when the keys change.
         if repo is None or self._repo_creds.get(uri) != creds:
             repo = ic.Repository.open(self._storage(locator))
             self._remember(uri, repo, creds)
@@ -923,6 +948,41 @@ def _keywords(fn: Any) -> frozenset[str] | None:
 
 def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _as_json(options: dict[str, Any]) -> str:
+    return json.dumps(options, sort_keys=True, default=str)
+
+
+@dataclass(frozen=True)
+class _RefreshedCredentials:
+    """Icechunk's `get_credentials`: the keys an object's `secrets.toml`
+    profile or role resolves to now (`tether.credentials`, cached until
+    near expiry), and when to ask again -- `REFRESH_MARGIN` before they
+    expire. Plain data, so it pickles with the storage when Icechunk sends a
+    session to another process."""
+
+    options: str
+    """The object's secrets entry, as JSON."""
+
+    def __call__(self) -> Any:
+        import icechunk as ic
+
+        from tether.credentials import REFRESH_MARGIN, aws_credentials_expiring
+
+        creds, expires = aws_credentials_expiring(json.loads(self.options))
+        if creds is None:  # pragma: no cover - only built for a profile or role
+            raise BackendError("no credentials to refresh", kind="icechunk")
+        return ic.S3StaticCredentials(
+            access_key_id=creds["access_key_id"],
+            secret_access_key=creds["secret_access_key"],
+            session_token=creds.get("session_token"),
+            expires_after=(
+                None
+                if expires is None
+                else datetime.fromtimestamp(expires - REFRESH_MARGIN, tz=UTC)
+            ),
+        )
 
 
 def _generation_number(tag: str) -> int:

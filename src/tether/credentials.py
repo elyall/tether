@@ -26,7 +26,12 @@ from typing import Any
 
 from tether.errors import ConfigError
 
-__all__ = ["aws_credentials", "storage_options"]
+__all__ = [
+    "aws_credentials",
+    "aws_credentials_expiring",
+    "refreshable",
+    "storage_options",
+]
 
 _CREDENTIAL_KEYS = ("access_key_id", "secret_access_key", "session_token")
 
@@ -79,26 +84,43 @@ def aws_credentials(options: Mapping[str, Any]) -> dict[str, str] | None:
         ConfigError: A profile or role is named but `boto3` is not installed,
             or the credentials could not be resolved.
     """
+    return aws_credentials_expiring(options)[0]
+
+
+def aws_credentials_expiring(
+    options: Mapping[str, Any],
+) -> tuple[dict[str, str] | None, float | None]:
+    """:func:`aws_credentials` and when those keys expire, as epoch seconds
+    (`None`: literal or static profile keys, which do not, or the
+    environment). What a storage library's refresh callback hands back."""
     if options.get("access_key_id"):
         out = {k: str(options[k]) for k in _CREDENTIAL_KEYS if options.get(k)}
         if "secret_access_key" not in out:
             raise ConfigError("access_key_id set without secret_access_key")
-        return out
+        return out, None
     profile = options.get("profile")
     role = options.get("role_arn")
     if not profile and not role:
-        return None
+        return None, None
     key = _cache_key(options)
     with _lock:
         hit = _cache.get(key)
     if hit is not None:
         creds, expires = hit
         if expires is None or expires - _now() > REFRESH_MARGIN:
-            return dict(creds)
+            return dict(creds), expires
     creds, expires = _resolve(options, profile, role)
     with _lock:
         _cache[key] = (creds, expires)
-    return dict(creds)
+    return dict(creds), expires
+
+
+def refreshable(options: Mapping[str, Any]) -> bool:
+    """Whether `options` name credentials that expire and are resolved
+    again: a `role_arn` or `profile`, not literal keys."""
+    return not options.get("access_key_id") and bool(
+        options.get("role_arn") or options.get("profile")
+    )
 
 
 def _resolve(

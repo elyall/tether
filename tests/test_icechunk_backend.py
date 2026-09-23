@@ -391,18 +391,102 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
-def test_icechunk_repository_is_rebuilt_when_credentials_refresh(
+def test_icechunk_role_credentials_refresh_inside_a_long_lived_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile or role entry opens the repository with Icechunk's
+    `get_credentials` callback, not static keys: a session held open past
+    the role's expiry asks for fresh keys itself instead of failing
+    mid-write, and the cached Repository is never rebuilt for a rotation.
+    Literal keys stay static, and no entry stays `from_env`."""
+    import pickle
+    from datetime import UTC, datetime
+
+    from tether import credentials
+    from tether.backends.icechunk import IcechunkBackend
+
+    clock = {"now": 1_000_000.0}
+    issued: list[str] = []
+
+    def resolve(options: dict, profile: object, role: object) -> tuple[dict, float]:
+        issued.append(f"ASIA{len(issued) + 1}")
+        creds = {
+            "access_key_id": issued[-1],
+            "secret_access_key": "s",
+            "session_token": "t",
+        }
+        return creds, clock["now"] + 3600
+
+    monkeypatch.setattr(credentials, "_resolve", resolve)
+    monkeypatch.setattr(credentials, "_now", lambda: clock["now"])
+    monkeypatch.setattr(credentials, "_cache", {})
+    opened: list[dict] = []
+    monkeypatch.setattr(ic, "s3_storage", lambda **kw: kw)
+    monkeypatch.setattr(
+        ic.Repository,
+        "open",
+        staticmethod(lambda storage: opened.append(storage) or object()),
+    )
+    b = IcechunkBackend()
+    b.configure_secrets(
+        {},
+        {
+            "s3://role/": {"role_arn": "arn:aws:iam::1:role/r"},
+            "s3://profile/": {"profile": "lab"},
+            "s3://literal/": {"access_key_id": "AKIA", "secret_access_key": "k"},
+        },
+    )
+    loc = {"uri": "s3://role/repo", "branch": "main"}
+    repo = b._repo(loc)
+    (storage,) = opened
+    assert "access_key_id" not in storage and "from_env" not in storage
+    refresh = storage["get_credentials"]
+    first = refresh()
+    assert first.access_key_id == "ASIA1" and first.session_token == "t"
+    assert first.expires_after == datetime.fromtimestamp(
+        clock["now"] + 3600 - credentials.REFRESH_MARGIN, tz=UTC
+    )
+    clock["now"] += 3600 - credentials.REFRESH_MARGIN  # when Icechunk asks again
+    second = pickle.loads(pickle.dumps(refresh))()  # a session sent to a worker
+    assert second.access_key_id == "ASIA2"
+    assert b._repo(loc) is repo and len(opened) == 1  # never rebuilt
+    b._repo({"uri": "s3://profile/repo"})
+    assert "get_credentials" in opened[-1]
+    b._repo({"uri": "s3://literal/repo"})
+    assert opened[-1]["access_key_id"] == "AKIA" and "get_credentials" not in opened[-1]
+    b._repo({"uri": "s3://none/repo"})
+    assert opened[-1].get("from_env") is True
+
+
+def test_icechunk_repository_is_rebuilt_when_static_credentials_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_repo` caches one Repository per URI. Keys assumed from a role expire,
-    and `aws_credentials` returns a fresh set near expiry: a Repository
-    opened with the old keys is rebuilt then, and only then. Local storage
-    has no credentials and is cached as before."""
+    """Where `s3_storage` takes no `get_credentials`, a role's keys are
+    static: `_repo` caches one Repository per URI and rebuilds it when
+    `aws_credentials` hands out a fresh set near expiry, and only then.
+    Local storage has no credentials and is cached as before."""
     from tether import credentials
     from tether.backends.icechunk import IcechunkBackend
 
     opened: list[dict] = []
-    monkeypatch.setattr(ic, "s3_storage", lambda **kw: kw)
+
+    def s3_storage(
+        *,
+        bucket: str,
+        prefix: str | None,
+        region: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        session_token: str | None = None,
+        from_env: bool | None = None,
+    ) -> dict:
+        return {
+            k: v
+            for k, v in locals().items()
+            if v is not None and k not in ("bucket", "prefix", "region")
+        }
+
+    monkeypatch.setattr(ic, "s3_storage", s3_storage)
     monkeypatch.setattr(
         ic.Repository,
         "open",
