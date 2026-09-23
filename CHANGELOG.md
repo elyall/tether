@@ -45,6 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (per URI prefix or object) for an S3-compatible server such as SeaweedFS
   or MinIO; without them `add --create` could not reach one.
 
+- `Capability.CONDITIONAL_REF` declares that a backend's ref moves honour
+  `expected`; conformance fails a backend that claims it and ignores it.
+- `new --shared` adopts a peer's uncommitted writes when they build on the
+  bookmark's pin, instead of asking for `--discard`.
+
 ### Changed
 
 - Partial success (an `undo`, `repair`, `upgrade` or `forget-workspace` that
@@ -77,10 +82,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetched or `--release-foreign` is passed; `GcReport.kept_pins` and `gc
   --json` list them.
 - jj 0.43 is the minimum version; an older one is refused.
-- jj and git run with tether's own colour, pager, auto-tracking and revset
-  settings, whatever the user's config says; colour forced on, `all()`
-  aliased or auto-tracking off had corrupted commit ids, made empty commits,
-  or shrunk the history `gc` walks.
+- jj and git run with tether's own colour and pager settings, whatever the
+  user's config says; tether tracks its own files by name, and its revsets
+  use no name an alias can redefine. Colour forced on, `all()` aliased or
+  auto-tracking off had corrupted commit ids, made empty commits, or shrunk
+  the history `gc` walks.
 - `file`, `icechunk`, `lance`, `delta`: every spelling of a local path --
   `/p`, `/p/`, `file:///p`, a path through a symlinked parent such as macOS's
   `/tmp` -- is one store to pin ids, listings and `gc`. New pins of an
@@ -95,6 +101,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory (symlinks) states in the new form where the data is unchanged,
   and makes DuckLake paths absolute. 0.1.0b3 refuses a version 5 dataset,
   so clones on the two releases cannot take turns.
+
+- Saved plans are format 3, with a digest binding their actions and context
+  to their preconditions; re-run a plan saved in format 1 or 2.
+- `gc` and `promote` print what they applied along with the failures, and
+  exit 3 when part of the work was done.
+- jj calls keep only your identity, signing, snapshot and git settings.
+- A new file of yours that jj has not snapshotted stays in the change it was
+  made in when tether moves the working copy.
+- Every `open` follows the checkout's current bookmark; on Windows a default
+  `open` is read-only.
 
 ### Removed
 
@@ -145,9 +161,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gc` counts every live checkout's working-tree manifests and the pins of
   running or interrupted operations as references; `--prune-bookmarks` keeps
   every branch a live checkout works on or has pending.
-- `gc`, `drop` and `promote` refuse while jj reports a conflicted bookmark or
-  commit; `status` and `commit` name a conflicted bookmark instead of calling
-  it gone.
+- `gc` and `drop` refuse while jj reports a conflicted bookmark or a
+  `.tether/` conflict no later commit resolved, and `promote` while its trunk
+  is conflicted; `status` and `commit` name a conflicted bookmark instead of
+  calling it gone.
 - `commit` raises when the new commit's tree lacks a manifest (a dataset under
   an ignored directory made an empty commit `status` called clean).
 - git: a hook-refused `git commit` left the manifests staged; the index is
@@ -182,6 +199,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has; a dataset that ever held a lakeFS object failed them even after
   `remove`. Their pins still count as references.
 
+- `promote` landed uncommitted writes after `tether undo` or
+  `commit --no-vcs`: it checks forks against the bookmark's commit.
+- `tether undo ID` of an older `new -b` sent the checkout to `main`; it
+  reverts only the fields nothing has changed since.
+- Lance's conditional fork replaced a peer's branch, and git's moved a
+  branch checked out in another worktree; `repair`'s refork is conditional.
+- git: `status.showUntrackedFiles = no` hid new manifests from `commit`.
+- The pin index claimed pins other clones had made, and kept released ones.
+- A writable `open` re-read every manifest; only changed files are parsed.
+- A plain `status` hid the errors a `status --snapshot` had cached.
+- `tether diff` on a jj merge working copy showed every object as added.
+- `file`: client options in another spelling (`AWS_ALLOW_HTTP`) panicked, and
+  a non-string value (`timeout = 5`) raised.
+- Threads resolving one AWS profile or role made one STS call each.
+
 ### Experimental
 
 - `neon`: `add` requires `database` and `role`; connection URIs name their
@@ -195,6 +227,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ducklake`: a leading `~` in `metadata` or `data_path` is expanded (it was
   stored as `<cwd>/~/...`), and a bare `sqlite:` or `duckdb:` metadata path
   is stored absolute too.
+- `neon`: objects on one branch fingerprinted at once each created its
+  endpoint; Neon allows one read-write endpoint per branch.
 
 ## [0.1.0b3] - 2026-09-18
 
