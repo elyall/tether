@@ -220,7 +220,14 @@ class DeltaBackend(ObjectBackend):
             )
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         raise CapabilityError("delta cannot fork; write a new table instead")
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:

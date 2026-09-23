@@ -319,7 +319,8 @@ class FileBackend(ObjectBackend):
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
-        self._stores: dict[str, Any] = {}
+        self._stores: dict[tuple[str, str, str, str], Any] = {}
+        """Open stores by :meth:`_store_key`."""
         self._listings: OrderedDict[str, ListingRows] = OrderedDict()
         self._hashes = _HashCache(None)
 
@@ -407,12 +408,29 @@ class FileBackend(ObjectBackend):
         options.update(storage_options(self.secrets_for(locator)))
         return from_url(root, **options)
 
+    def _store_key(self, root: str, locator: Locator) -> tuple[str, str, str, str]:
+        """What a store is built from, beyond `root`: the object's credential
+        rule (two prefixes of one bucket may have different `[uris."..."]`
+        entries), its region, and the keys the rule resolves to right now (a
+        role's expire; a fresh set means a fresh store)."""
+        from tether.credentials import aws_credentials
+
+        secrets = self.secrets_for(locator)
+        creds = aws_credentials(secrets) or {}
+        return (
+            root,
+            json.dumps(secrets, sort_keys=True, default=str),
+            str(locator.get("region") or ""),
+            json.dumps(creds, sort_keys=True),
+        )
+
     def _store(self, root: str, locator: Locator) -> Any:
-        store = self._stores.get(root)
+        key = self._store_key(root, locator)
+        store = self._stores.get(key)
         if store is None:
             self._obstore()  # surface a clear error before touching the store
             store = self._open_store(root, locator)
-            self._stores[root] = store
+            self._stores[key] = store
         return store
 
     # -- store lifecycle (local directories) ----------------------------- #
@@ -620,7 +638,14 @@ class FileBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.DRIFTED, "content changed since commit")
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         raise CapabilityError("file backend cannot fork", kind="file")
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:

@@ -409,7 +409,14 @@ class ObjectBackend(Protocol):
         """Check that ``state``/``pin`` still hold."""
         raise NotImplementedError(f"{self.kind} backend does not verify")
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         """Create a writable branch ``name`` off ``source``. Requires ``FORK``.
 
         ``source`` is a :class:`~tether.manifest.Pin` (fork from the native ref)
@@ -419,6 +426,15 @@ class ObjectBackend(Protocol):
         **Reset contract**: if ``name`` already exists it is moved back onto
         ``source`` (whatever was written on it is discarded); a branch already
         at ``source`` is left alone. The conformance suite checks this.
+
+        **Conditional move**: ``expected`` is the head ``name`` must hold for
+        the move to happen -- the state the caller reviewed, or
+        :data:`ABSENT` when the branch must not exist yet. When it holds
+        something else, raise :class:`~tether.errors.RefMovedError` and move
+        nothing (compare content states: ``VOLATILE_KEYS`` may differ).
+        ``None`` moves unconditionally, as before 0.1.0b4; see
+        :func:`accepts_expected` for how the engine treats a backend whose
+        signature predates the keyword.
         """
         raise NotImplementedError(f"{self.kind} backend does not fork")
 
@@ -550,26 +566,44 @@ class ObjectBackend(Protocol):
     """What to tell a user when tether cannot move the base branch (no
     ``PROMOTE`` / ``MERGE``, or the base diverged and there is no merge)."""
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
         """Fast-forward the locator's base branch to ``source``. Requires ``PROMOTE``.
 
         ``source`` is a working ref name, a :class:`~tether.manifest.Pin`, or a
         recorded ``State``. Implementations must refuse (``BackendError``) when
         the base head is not an ancestor of ``source`` -- a fast-forward never
         discards anything -- and be a no-op when the base is already there.
+        ``expected`` is the base head the caller reviewed: when the base holds
+        another state, raise :class:`~tether.errors.RefMovedError` and move
+        nothing (a compare-and-swap where the system has one -- git's
+        `update-ref` with an old value, Icechunk's `from_snapshot_id`).
         Returns the base branch's new state.
         """
         raise CapabilityError(f"{self.kind} backend cannot promote", kind=self.kind)
 
-    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+    def merge(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        message: str,
+        *,
+        expected: State | None = None,
+    ) -> State:
         """Three-way merge ``source`` into the base branch.
 
         ``source`` is a working ref, a ``Pin``, or a ``State``. The engine
         passes the *state* the plan reviewed, so what is merged is what was
         shown -- a ref is a name someone can move between plan and apply.
         Requires ``MERGE``. Raises :class:`~tether.errors.MergeConflict` (and
-        leaves the base untouched) when the system reports conflicts. Returns
-        the base branch's new state.
+        leaves the base untouched) when the system reports conflicts, and
+        :class:`~tether.errors.RefMovedError` when ``expected`` is given and
+        the base head is not that state. Returns the base branch's new state.
         """
         raise CapabilityError(f"{self.kind} backend cannot merge", kind=self.kind)
 
@@ -781,6 +815,125 @@ def content_state(backend: ObjectBackend, state: State | None) -> State | None:
     if not volatile:
         return state
     return {k: v for k, v in state.items() if k not in volatile}
+
+
+ABSENT: State = {}
+"""`expected` for a conditional :meth:`ObjectBackend.fork`: the branch must
+not exist yet. An empty state, which no fingerprint ever is; test for it with
+``not expected`` and never mutate it."""
+
+
+def check_expected(
+    backend: ObjectBackend,
+    locator: Locator,
+    expected: State | None,
+    *,
+    ref: str | None = None,
+    what: str = "fork",
+) -> None:
+    """The conditional half of a ref move, for a system with no native
+    compare-and-swap: read the head and refuse when it is not ``expected``.
+
+    ``ref`` is the working branch a `fork` moves (absent when not listed by
+    `list_working_refs`; :data:`ABSENT` expects that); ``None`` means the
+    locator's base branch, which `promote` and `merge` move. A check before
+    the act, so a write in between still slips through -- narrower than
+    git's `update-ref` or Icechunk's `from_snapshot_id`, which backends with
+    one should use instead -- but the plan's reviewed head is compared, not
+    ignored. `None` checks nothing.
+
+    Raises:
+        RefMovedError: The head is not ``expected``.
+    """
+    from tether.errors import RefMovedError
+
+    if expected is None:
+        return
+    if ref is not None:
+        present = ref in backend.list_working_refs(locator)
+        if not expected:
+            if present:
+                raise RefMovedError(
+                    f"{what}: {ref} exists, expected absent", kind=backend.kind
+                )
+            return
+        if not present:
+            raise RefMovedError(
+                f"{what}: {ref} is gone, expected {_short(expected)}",
+                kind=backend.kind,
+            )
+        head = backend.fingerprint(locator, ref)
+    else:
+        base_locator = {k: v for k, v in locator.items() if k != "at"}
+        head = backend.fingerprint(base_locator, None)
+    if content_state(backend, head) != content_state(backend, expected):
+        raise RefMovedError(
+            f"{what}: {ref or backend.base_branch(locator)} is at {_short(head)}, "
+            f"expected {_short(expected)}",
+            kind=backend.kind,
+        )
+
+
+def _short(state: State) -> str:
+    return ", ".join(f"{k}={str(v)[:12]}" for k, v in sorted(state.items()))
+
+
+def accepts_expected(method: Callable[..., Any]) -> bool:
+    """Whether a backend's `fork`, `promote` or `merge` takes the `expected`
+    keyword (see :meth:`ObjectBackend.fork`).
+
+    Backends written before 0.1.0b4 do not declare it; the engine calls those
+    without it and their moves are unconditional, as they always were, rather
+    than failing every fork with a `TypeError`.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):  # a builtin or a mock: let the call decide
+        return True
+    return "expected" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def fork_ref(
+    backend: ObjectBackend,
+    locator: Locator,
+    source: Pin | State,
+    name: str,
+    expected: State | None,
+) -> str:
+    """:meth:`ObjectBackend.fork` with ``expected`` where the backend takes
+    it; a backend predating the keyword is called the old way."""
+    if expected is None or not accepts_expected(backend.fork):
+        return backend.fork(locator, source, name)
+    return backend.fork(locator, source, name, expected=expected)
+
+
+def promote_ref(
+    backend: ObjectBackend,
+    locator: Locator,
+    source: str | Pin | State,
+    expected: State | None,
+) -> State:
+    """:meth:`ObjectBackend.promote`, as :func:`fork_ref` is to `fork`."""
+    if expected is None or not accepts_expected(backend.promote):
+        return backend.promote(locator, source)
+    return backend.promote(locator, source, expected=expected)
+
+
+def merge_ref(
+    backend: ObjectBackend,
+    locator: Locator,
+    source: str | Pin | State,
+    message: str,
+    expected: State | None,
+) -> State:
+    """:meth:`ObjectBackend.merge`, as :func:`fork_ref` is to `fork`."""
+    if expected is None or not accepts_expected(backend.merge):
+        return backend.merge(locator, source, message)
+    return backend.merge(locator, source, message, expected=expected)
 
 
 _B = TypeVar("_B")

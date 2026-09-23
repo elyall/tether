@@ -58,6 +58,16 @@ class MergeConflict(BackendError):
         self.conflicts = list(conflicts or [])
 
 
+class RefMovedError(BackendError):
+    """A conditional ref move found the ref elsewhere than `expected`.
+
+    Raised by ``fork``, ``promote`` and ``merge`` when the caller passed the
+    head it reviewed and the ref no longer holds it (or exists when it was
+    expected absent); nothing was written. The engine reports it as a plan
+    gone stale: re-plan, and review what moved.
+    """
+
+
 class CapabilityError(BackendError):
     """An operation was requested that the backend does not support.
 

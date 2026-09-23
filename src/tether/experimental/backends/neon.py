@@ -28,6 +28,7 @@ from tether.backends.base import (
     ObjectBackend,
     VerifyReport,
     VerifyStatus,
+    check_expected,
     register_backend,
     wrap_library_errors,
 )
@@ -435,7 +436,15 @@ class NeonBackend(ObjectBackend):
             )
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
+        check_expected(self, locator, expected, ref=name)
         self._fresh()
         project_id = self._project(locator)
         if isinstance(source, Pin):

@@ -31,9 +31,9 @@ def _init_code_repo(path: Path) -> str:
     return _git(path, "rev-parse", "HEAD")
 
 
-def _commit_on(path: Path, branch: str, text: str) -> str:
+def _commit_on(path: Path, branch: str, text: str, name: str = "main.py") -> str:
     _git(path, "checkout", "-q", branch)
-    (path / "main.py").write_text(text, encoding="utf-8")
+    (path / name).write_text(text, encoding="utf-8")
     _git(path, "add", "-A")
     _git(path, "commit", "-qm", "change")
     return _git(path, "rev-parse", "HEAD")
@@ -60,9 +60,12 @@ class GitHarness:
         self._n += 1
         path = Path(locator["path"])
         branch = working_ref or locator["ref"]
-        _commit_on(path, branch, f"print({self._n})\n")
+        # A new file per write: two branches written this way merge cleanly,
+        # which the MERGE checks rely on.
+        _commit_on(path, branch, f"print({self._n})\n", name=f"m{self._n}.py")
         # Leave HEAD on the base branch: git refuses to move a checked-out
-        # branch (`branch -f`), which is what a fork reset does.
+        # branch (`branch -f`), which is what a fork reset does, and merges
+        # into the checked-out branch, which is what `merge` needs.
         _git(path, "checkout", "-q", locator["ref"])
 
     def fresh_locator(self) -> dict:
@@ -174,6 +177,149 @@ def test_git_fork_onto_a_branch_at_the_source_leaves_it_alone(tmp_path: Path) ->
         check=True,
     ).stdout
     assert again == reflog
+
+
+def _reflog(code: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(code), "reflog", "show", ref],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def test_git_fork_with_expected_is_a_compare_and_swap(tmp_path: Path) -> None:
+    """`expected` is the head the caller reviewed: the branch moves through
+    `update-ref <new> <old>`, so a branch that is elsewhere (or exists when
+    ABSENT said it must not) is refused as `RefMovedError` and left as it
+    was. The right `expected` moves it; a branch already at the source that
+    matches `expected` is left alone."""
+    from tether.backends.base import ABSENT
+    from tether.errors import RefMovedError
+
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    b = GitBackend()
+    loc = {"path": str(code), "ref": main}
+    name = "tether.ws.0a1b2c3d.work"
+    assert b.fork(loc, {"sha": sha0}, name, expected=ABSENT) == name
+    assert _git(code, "rev-parse", name) == sha0
+    sha1 = _commit_on(code, name, "print(1)\n")
+    _git(code, "checkout", "-q", main)
+
+    # Stale: the caller reviewed the branch at sha0, it is at sha1 now.
+    with pytest.raises(RefMovedError, match="expected"):
+        b.fork(loc, {"sha": sha0}, name, expected={"sha": sha0})
+    assert _git(code, "rev-parse", name) == sha1
+    with pytest.raises(RefMovedError, match="expected absent"):
+        b.fork(loc, {"sha": sha0}, name, expected=ABSENT)
+    assert _git(code, "rev-parse", name) == sha1
+    # Expected to exist but gone: moved too.
+    with pytest.raises(RefMovedError, match="nothing"):
+        b.fork(loc, {"sha": sha0}, "tether.ws.0a1b2c3d.gone", expected={"sha": sha0})
+    assert not _git(code, "branch", "--list", "tether.ws.0a1b2c3d.gone")
+
+    # The right expected moves it; at the source and matching, it is left alone.
+    assert b.fork(loc, {"sha": sha0}, name, expected={"sha": sha1}) == name
+    assert _git(code, "rev-parse", name) == sha0
+    before = _reflog(code, name)
+    assert b.fork(loc, {"sha": sha0}, name, expected={"sha": sha0}) == name
+    assert _reflog(code, name) == before
+
+    # Like `branch -f`, the compare-and-swap does not move a checked-out branch.
+    _git(code, "checkout", "-q", name)
+    with pytest.raises(BackendError, match="checked out"):
+        b.fork(loc, {"sha": sha1}, name, expected={"sha": sha0})
+    assert _git(code, "rev-parse", name) == sha0
+    _git(code, "checkout", "-q", main)
+    # Without `expected` the move is unconditional, as before.
+    assert b.fork(loc, {"sha": sha1}, name) == name
+    assert _git(code, "rev-parse", name) == sha1
+
+
+def test_git_promote_refuses_when_the_base_moved_after_the_ancestry_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The not-checked-out path promotes with `update-ref <new> <old>`, `old`
+    being the head the plan reviewed: a commit that lands on the base between
+    the ancestry check and the move fails the move as `RefMovedError`, and
+    the concurrent commit stays the base's head."""
+    from tether.errors import RefMovedError
+
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    _git(code, "checkout", "-q", "-b", "elsewhere")  # the base is not checked out
+    b = GitBackend()
+    loc = {"path": str(code), "ref": main}
+    wref = b.fork(loc, {"sha": sha0}, "tether.ws.0a1b2c3d.work")
+    fork_sha = _commit_on(code, wref, "print('fork')\n")
+    _git(code, "checkout", "-q", "elsewhere")
+    reviewed = b.fingerprint(loc, None)
+    assert reviewed["sha"] == sha0
+
+    landed: dict[str, str] = {}
+    original = GitBackend.ancestor_of
+
+    def racing(self: GitBackend, locator: dict, ancestor: dict, descendant: str):
+        answer = original(self, locator, ancestor, descendant)
+        landed["sha"] = _commit_on(code, main, "print('concurrent')\n")
+        _git(code, "checkout", "-q", "elsewhere")
+        return answer
+
+    monkeypatch.setattr(GitBackend, "ancestor_of", racing)
+    with pytest.raises(RefMovedError, match="promote"):
+        b.promote(loc, wref, expected=reviewed)
+    monkeypatch.undo()
+    assert _git(code, "rev-parse", main) == landed["sha"] != fork_sha
+    assert _git(code, "rev-parse", wref) == fork_sha
+
+    # The plan is stale now: refused before anything is compared or merged;
+    # without `expected`, the divergence itself is refused.
+    with pytest.raises(RefMovedError):
+        b.promote(loc, wref, expected=reviewed)
+    with pytest.raises(BackendError, match="not an ancestor"):
+        b.promote(loc, wref)
+    assert _git(code, "rev-parse", main) == landed["sha"]
+
+    # Reviewed at the current head: promoted through the compare-and-swap.
+    b.fork(loc, {"sha": landed["sha"]}, wref)
+    fork_sha = _commit_on(code, wref, "print('fork again')\n")
+    _git(code, "checkout", "-q", "elsewhere")
+    promoted = b.promote(loc, wref, expected=b.fingerprint(loc, None))
+    assert promoted["sha"] == fork_sha == _git(code, "rev-parse", main)
+
+    # The checked-out path (`merge --ff-only`) compares the reviewed head too.
+    _git(code, "checkout", "-q", main)
+    stale = b.fingerprint(loc, None)
+    fork_sha = _commit_on(code, wref, "print('more')\n")
+    _git(code, "checkout", "-q", main)
+    with pytest.raises(RefMovedError):
+        b.promote(loc, wref, expected={"sha": sha0})
+    assert _git(code, "rev-parse", main) == stale["sha"]
+    assert b.promote(loc, wref, expected=stale)["sha"] == fork_sha
+    assert _git(code, "rev-parse", main) == fork_sha
+
+
+def test_git_merge_refuses_a_stale_expected(tmp_path: Path) -> None:
+    from tether.errors import RefMovedError
+
+    code = tmp_path / "code"
+    sha0 = _init_code_repo(code)
+    main = _git(code, "branch", "--show-current")
+    b = GitBackend()
+    loc = {"path": str(code), "ref": main}
+    wref = b.fork(loc, {"sha": sha0}, "tether.ws.0a1b2c3d.work")
+    _commit_on(code, wref, "print('fork')\n", name="fork.py")
+    reviewed = b.fingerprint(loc, None)
+    moved = _commit_on(code, main, "print('main')\n", name="main2.py")
+    with pytest.raises(RefMovedError, match="merge"):
+        b.merge(loc, wref, "stale", expected=reviewed)
+    assert _git(code, "rev-parse", main) == moved
+    merged = b.merge(loc, wref, "merge the fork", expected={"sha": moved})
+    assert merged["sha"] == _git(code, "rev-parse", main) != moved
+    assert _git(code, "log", "-1", "--format=%P").count(" ") == 1
 
 
 def test_git_refuses_option_shaped_refs_from_manifests(

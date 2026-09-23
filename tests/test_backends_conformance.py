@@ -23,7 +23,11 @@ class MemoryHarness:
     def mutate(self, locator: Locator, working_ref: str | None) -> None:
         self._n += 1
         branch = working_ref or locator.get("branch", "main")
-        self.store.write(locator["system"], branch, {"n": self._n})
+        # A new key per write, on top of what the branch holds: two branches
+        # written this way merge without conflict, which the MERGE checks need.
+        payload = self.store.read(locator["system"], branch)
+        payload[f"n{self._n}"] = self._n
+        self.store.write(locator["system"], branch, payload)
 
     def fresh_locator(self) -> Locator:
         return {"system": f"sys-{uuid.uuid4().hex[:8]}", "branch": "main"}

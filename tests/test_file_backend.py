@@ -252,6 +252,89 @@ def test_remote_object_and_prefix_fingerprints(
     assert b.verify({"uri": f"{root}/raw/plate1/"}, pre2, None, deep=False).ok
 
 
+def test_store_cache_is_per_credential_rule_not_per_bucket(
+    backend: tuple[FileBackend, _MemoryStores], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Port of the review's `r_creds.py`: the store cache was keyed on the
+    bucket root alone, so two prefixes of one bucket with different
+    `[uris."..."]` rules shared whichever store was built first -- the second
+    prefix was read with the first prefix's credentials. One store per rule
+    (and per locator region); the same rule still shares one store."""
+    b, stores = backend
+    store = stores("s3://bucket", {})
+    obstore.put(store, "a/x", b"1")
+    obstore.put(store, "a/y", b"11")
+    obstore.put(store, "b/y", b"2")
+    b.configure_secrets(
+        {},
+        {
+            "s3://bucket/a/": {"access_key_id": "AKIA_A", "secret_access_key": "sk-a"},
+            "s3://bucket/b/": {"access_key_id": "AKIA_B", "secret_access_key": "sk-b"},
+        },
+    )
+    opened_with: list[tuple[str, str | None, object]] = []
+
+    def recording(root: str, locator: Locator) -> MemoryStore:
+        rule = b.secrets_for(locator).get("access_key_id")
+        opened_with.append((root, rule, locator.get("region")))
+        return stores(root, locator)
+
+    monkeypatch.setattr(b, "_open_store", recording)
+    b.fingerprint({"uri": "s3://bucket/a/x"}, None)
+    b.fingerprint({"uri": "s3://bucket/b/y"}, None)
+    b.fingerprint({"uri": "s3://bucket/a/y"}, None)  # same rule: same store
+    b.fingerprint({"uri": "s3://bucket/b/y", "region": "eu-west-1"}, None)
+    assert opened_with == [
+        ("s3://bucket", "AKIA_A", None),
+        ("s3://bucket", "AKIA_B", None),
+        ("s3://bucket", "AKIA_B", "eu-west-1"),
+    ]
+    # An object no rule covers uses the environment: one more store, shared.
+    obstore.put(store, "c/z", b"3")
+    b.fingerprint({"uri": "s3://bucket/c/z"}, None)
+    b.fingerprint({"uri": "s3://bucket/c/z"}, None)
+    assert opened_with[-1] == ("s3://bucket", None, None) and len(opened_with) == 4
+
+
+def test_store_is_rebuilt_when_the_rule_resolves_to_fresh_credentials(
+    backend: tuple[FileBackend, _MemoryStores], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keys assumed from a role expire; `aws_credentials` hands out a fresh
+    set near expiry, and a store signing with the old ones would start
+    failing. The cache compares the resolved keys, not only the rule."""
+    from tether import credentials
+
+    b, stores = backend
+    obstore.put(stores("s3://bucket", {}), "k", b"1")
+    b.configure_secrets({}, {"s3://bucket/": {"role_arn": "arn:aws:iam::1:role/r"}})
+    current = {
+        "access_key_id": "ASIA1",
+        "secret_access_key": "s1",
+        "session_token": "t1",
+    }
+    monkeypatch.setattr(credentials, "aws_credentials", lambda options: dict(current))
+    opened = 0
+
+    def counting(root: str, locator: Locator) -> MemoryStore:
+        nonlocal opened
+        opened += 1
+        return stores(root, locator)
+
+    monkeypatch.setattr(b, "_open_store", counting)
+    loc = {"uri": "s3://bucket/k"}
+    b.fingerprint(loc, None)
+    b.fingerprint(loc, None)
+    assert opened == 1
+    current = {
+        "access_key_id": "ASIA2",
+        "secret_access_key": "s2",
+        "session_token": "t2",
+    }
+    b.fingerprint(loc, None)
+    b.fingerprint(loc, None)
+    assert opened == 2
+
+
 def test_remote_missing_object(backend: tuple[FileBackend, _MemoryStores]) -> None:
     b, _ = backend
     with pytest.raises(BackendError):

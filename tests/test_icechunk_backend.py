@@ -174,6 +174,187 @@ def test_icechunk_backend_conformance(tmp_path: Path) -> None:
     run_conformance(IcechunkHarness(tmp_path))
 
 
+def test_icechunk_repository_is_rebuilt_when_credentials_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_repo` caches one Repository per URI. Keys assumed from a role expire,
+    and `aws_credentials` returns a fresh set near expiry: a Repository
+    opened with the old keys is rebuilt then, and only then. Local storage
+    has no credentials and is cached as before."""
+    from tether import credentials
+    from tether.backends.icechunk import IcechunkBackend
+
+    opened: list[dict] = []
+    monkeypatch.setattr(ic, "s3_storage", lambda **kw: kw)
+    monkeypatch.setattr(
+        ic.Repository,
+        "open",
+        staticmethod(lambda storage: opened.append(storage) or object()),
+    )
+    current = {
+        "access_key_id": "ASIA1",
+        "secret_access_key": "s1",
+        "session_token": "t1",
+    }
+    monkeypatch.setattr(
+        credentials,
+        "aws_credentials",
+        lambda options: dict(current) if options.get("role_arn") else None,
+    )
+    b = IcechunkBackend()
+    b.configure_secrets({}, {"s3://bucket/": {"role_arn": "arn:aws:iam::1:role/r"}})
+    loc = {"uri": "s3://bucket/repo", "branch": "main"}
+    b._repo(loc)
+    b._repo(loc)
+    assert len(opened) == 1 and opened[0]["access_key_id"] == "ASIA1"
+    current = {
+        "access_key_id": "ASIA2",
+        "secret_access_key": "s2",
+        "session_token": "t2",
+    }
+    b._repo(loc)
+    b._repo(loc)
+    assert len(opened) == 2 and opened[1]["access_key_id"] == "ASIA2"
+    # No rule: the environment serves, and there is nothing to compare.
+    b._repo({"uri": "s3://elsewhere/repo"})
+    b._repo({"uri": "s3://elsewhere/repo"})
+    assert len(opened) == 3 and opened[2].get("from_env") is True
+
+    monkeypatch.undo()
+    real = IcechunkBackend()
+    uri = _new_repo(tmp_path / "repo")
+    assert real._repo({"uri": uri}) is real._repo({"uri": uri})
+
+
+def _main_history(uri: str) -> list[str]:
+    repo = ic.Repository.open(ic.local_filesystem_storage(uri))
+    return [str(info.id) for info in repo.ancestry(branch="main")]
+
+
+def test_icechunk_promote_refuses_when_main_moved_after_the_ancestry_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Port of the review's `r_icechunk.py`: `promote` checked that main's
+    head was an ancestor of the fork, then `reset_branch` moved main
+    unconditionally, so a commit landing on main in between vanished from
+    main's history. With the head the plan reviewed as `expected`, the reset
+    is Icechunk's compare-and-swap (`from_snapshot_id`): refused as
+    `RefMovedError`, and the concurrent commit stays main's head."""
+    from tether.backends.icechunk import IcechunkBackend
+    from tether.errors import RefMovedError
+
+    uri = _new_repo(tmp_path / "repo")
+    b = IcechunkBackend()
+    loc = {"uri": uri, "branch": "main"}
+    reviewed = b.fingerprint(loc, None)
+    wref = b.fork(loc, reviewed, "tether.ws.c0fe5a1e.feat")
+    _commit(uri, wref, 2)
+    fork_head = b.fingerprint(loc, wref)
+
+    landed: dict[str, str] = {}
+    original = IcechunkBackend.ancestor_of
+
+    def racing(self: IcechunkBackend, locator: dict, ancestor: dict, descendant: str):
+        answer = original(self, locator, ancestor, descendant)
+        _commit(uri, "main", 99)  # a concurrent writer, right after the check
+        landed["sid"] = _main_history(uri)[0]
+        return answer
+
+    monkeypatch.setattr(IcechunkBackend, "ancestor_of", racing)
+    with pytest.raises(RefMovedError, match="promote"):
+        b.promote(loc, wref, expected=reviewed)
+    monkeypatch.undo()
+    history = _main_history(uri)
+    assert history[0] == landed["sid"], "the concurrent commit must stay main's head"
+    assert fork_head["snapshot_id"] not in history
+    assert b.fingerprint(loc, None) == {"snapshot_id": landed["sid"]}
+
+    # The plan is stale now: refused before anything is compared or reset;
+    # without `expected`, the divergence itself is refused.
+    with pytest.raises(RefMovedError):
+        b.promote(loc, wref, expected=reviewed)
+    with pytest.raises(BackendError, match="not an ancestor"):
+        b.promote(loc, wref)
+    # Reviewed at the current head: promoted, through the compare-and-swap.
+    b.fork(loc, b.fingerprint(loc, None), wref)
+    _commit(uri, wref, 3)
+    promoted = b.promote(loc, wref, expected=b.fingerprint(loc, None))
+    assert promoted == b.fingerprint(loc, wref) == b.fingerprint(loc, None)
+
+
+def test_icechunk_fork_with_expected_is_a_compare_and_swap(tmp_path: Path) -> None:
+    """A stale `expected` (the branch moved on) or ABSENT on an existing
+    branch is refused and the branch left alone; ABSENT on a fresh name
+    creates it; the right `expected` moves it."""
+    from tether.backends.base import ABSENT
+    from tether.backends.icechunk import IcechunkBackend
+    from tether.errors import RefMovedError
+
+    uri = _new_repo(tmp_path / "repo")
+    b = IcechunkBackend()
+    loc = {"uri": uri, "branch": "main"}
+    source = b.fingerprint(loc, None)
+    name = "tether.ws.c0fe5a1e.work"
+    assert b.fork(loc, source, name, expected=ABSENT) == name
+    _commit(uri, name, 5)
+    head = b.fingerprint(loc, name)
+    with pytest.raises(RefMovedError, match="expected"):
+        b.fork(loc, source, name, expected=source)
+    assert b.fingerprint(loc, name) == head
+    with pytest.raises(RefMovedError, match="expected absent"):
+        b.fork(loc, source, name, expected=ABSENT)
+    assert b.fingerprint(loc, name) == head
+    with pytest.raises(RefMovedError, match="gone"):
+        b.fork(loc, source, "tether.ws.c0fe5a1e.gone", expected=source)
+    with pytest.raises(RefMovedError, match="nothing"):
+        b.fork(loc, source, "tether.ws.c0fe5a1e.gone", expected=head)
+    assert "tether.ws.c0fe5a1e.gone" not in b.list_working_refs(loc)
+    assert b.fork(loc, source, name, expected=head) == name
+    assert b.fingerprint(loc, name) == source
+    # At the source and matching `expected`: left alone.
+    assert b.fork(loc, source, name, expected=source) == name
+    assert b.fingerprint(loc, name) == source
+
+
+def test_icechunk_without_from_snapshot_id_checks_before_the_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Icechunk 1.x's `reset_branch` has no `from_snapshot_id`: the backend
+    then compares the head first and resets unconditionally (a check before
+    the act, `check_expected`), with the same refusals."""
+    from tether.backends.icechunk import IcechunkBackend
+    from tether.errors import RefMovedError
+
+    assert IcechunkBackend._conditional_reset() is True  # 2.2.0 in the venv
+    monkeypatch.setattr(
+        IcechunkBackend, "_conditional_reset", staticmethod(lambda: False)
+    )
+    uri = _new_repo(tmp_path / "repo")
+    b = IcechunkBackend()
+    loc = {"uri": uri, "branch": "main"}
+    source = b.fingerprint(loc, None)
+    wref = b.fork(loc, source, "tether.ws.c0fe5a1e.work")
+    _commit(uri, wref, 7)
+    head = b.fingerprint(loc, wref)
+    with pytest.raises(RefMovedError):
+        b.fork(loc, source, wref, expected=source)
+    assert b.fingerprint(loc, wref) == head
+    assert b.fork(loc, source, wref, expected=head) == wref
+    assert b.fingerprint(loc, wref) == source
+
+    _commit(uri, wref, 8)
+    fork_head = b.fingerprint(loc, wref)
+    _commit(uri, "main", 9)
+    with pytest.raises(RefMovedError):
+        b.promote(loc, wref, expected=source)
+    assert b.fingerprint(loc, None) != fork_head
+    b.fork(loc, b.fingerprint(loc, None), wref)
+    _commit(uri, wref, 10)
+    assert b.promote(loc, wref, expected=b.fingerprint(loc, None)) == b.fingerprint(
+        loc, wref
+    )
+
+
 def test_icechunk_library_errors_become_backend_errors(tmp_path: Path) -> None:
     """Every protocol method re-raises icechunk's exceptions as BackendError,
     so the engine's `except TetherError` sites see a refusal rather than a

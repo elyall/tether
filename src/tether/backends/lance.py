@@ -32,6 +32,7 @@ from tether.backends.base import (
     VerifyStatus,
     base_at,
     canonical_uri,
+    check_expected,
     iso_utc,
     register_backend,
 )
@@ -227,7 +228,15 @@ class LanceBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, str(exc))
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
+        check_expected(self, locator, expected, ref=name)
         ds = self._dataset(locator)
         # A tag name, or the recorded (branch, version) for pin-less forks.
         origin: str | Ref = (

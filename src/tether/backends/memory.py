@@ -22,7 +22,7 @@ from tether.backends.base import (
     base_at,
     register_backend,
 )
-from tether.errors import BackendError, MergeConflict
+from tether.errors import BackendError, MergeConflict, RefMovedError
 from tether.handles import Handle, MemoryHandle
 from tether.manifest import (
     WORKING_REF_PREFIX,
@@ -231,7 +231,37 @@ class MemoryBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.MISSING, f"snapshot {sid} gone")
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def _require_head(
+        self, name: str, ref: str, expected: State | None, what: str
+    ) -> None:
+        """The conditional half of a ref move: `ref` holds `expected` (or
+        does not exist, for `ABSENT`), else nothing may move."""
+        if expected is None:
+            return
+        head = self.store.system(name).branches.get(ref)
+        if not expected:
+            if head is not None:
+                raise RefMovedError(
+                    f"{what}: {ref} exists (at {head}), expected absent",
+                    key=name,
+                    kind="memory",
+                )
+            return
+        if head != str(expected["snapshot_id"]):
+            raise RefMovedError(
+                f"{what}: {ref} is at {head}, expected {expected['snapshot_id']}",
+                key=name,
+                kind="memory",
+            )
+
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         system = self._system(locator)
         sys = self.store.system(system)
         if isinstance(source, Pin):
@@ -244,6 +274,7 @@ class MemoryBackend(ObjectBackend):
             sid = str(source["snapshot_id"])
             if sid not in sys.snapshots:
                 raise BackendError(f"snapshot {sid} gone", key=system, kind="memory")
+        self._require_head(system, name, expected, "fork")
         sys.branches[name] = sid
         return name
 
@@ -310,10 +341,17 @@ class MemoryBackend(ObjectBackend):
         target = self._source_sid(name, descendant)
         return str(ancestor["snapshot_id"]) in self.store.ancestors(name, target)
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
         name = self._system(locator)
         sys = self.store.system(name)
         base = self._base_branch(locator)
+        self._require_head(name, base, expected, "promote")
         head = sys.branches[base]
         target = self._source_sid(name, source)
         if target == head:
@@ -327,10 +365,18 @@ class MemoryBackend(ObjectBackend):
         sys.branches[base] = target
         return {"snapshot_id": target}
 
-    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+    def merge(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        message: str,
+        *,
+        expected: State | None = None,
+    ) -> State:
         name = self._system(locator)
         sys = self.store.system(name)
         base = self._base_branch(locator)
+        self._require_head(name, base, expected, "merge")
         head = sys.branches[base]
         src = self._source_sid(name, source)
         if src == head or src in self.store.ancestors(name, head):

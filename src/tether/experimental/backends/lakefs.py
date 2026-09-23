@@ -30,6 +30,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    check_expected,
     iso_utc,
     register_backend,
 )
@@ -234,7 +235,15 @@ class LakeFSBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, str(exc))
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
+        check_expected(self, locator, expected, ref=name)
         repo = self._repo(locator)
         if isinstance(source, Pin):
             target = self._tag_commit(repo, source.ref)
@@ -323,7 +332,14 @@ class LakeFSBackend(ObjectBackend):
             ) from exc
         return self.fingerprint(locator, base)
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        check_expected(self, locator, expected, what="promote")
         # lakeFS merges are the promotion primitive (fast-forward when possible).
         repo = self._repo(locator)
         base = self._base_branch(locator)
@@ -340,7 +356,15 @@ class LakeFSBackend(ObjectBackend):
             )
         return self._merge(locator, ref, f"tether promote: {ref} -> {base}")
 
-    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+    def merge(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        message: str,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        check_expected(self, locator, expected, what="merge")
         return self._merge(
             locator, self._source_ref(self._repo(locator), source), message
         )

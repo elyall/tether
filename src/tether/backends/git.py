@@ -26,9 +26,10 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    check_expected,
     register_backend,
 )
-from tether.errors import BackendError, MergeConflict
+from tether.errors import BackendError, MergeConflict, RefMovedError
 from tether.handles import GitHandle, Handle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 from tether.vcs import git_env
@@ -47,6 +48,10 @@ _HARDENED = (
 (`core.fsmonitor`, hooks, `ext::` transports), and git takes any directory
 holding `HEAD`, `objects/` and `refs/` for a bare repository, which a clone
 can ship as plain files; tether needs none of it."""
+
+_ZERO_SHA = "0" * 40
+"""`update-ref`'s old value for "the ref must not exist yet" (git spells an
+absent ref as the all-zero object id)."""
 
 
 class GitBackend(ObjectBackend):
@@ -339,7 +344,14 @@ class GitBackend(ObjectBackend):
             )
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         ref = source.ref if isinstance(source, Pin) else str(source["sha"])
         sha = self._run(
             locator,
@@ -348,22 +360,73 @@ class GitBackend(ObjectBackend):
             "--end-of-options",
             f"{_guard(ref, 'source')}^{{commit}}",
         )
-        exists = self._run(
+        exists = self._branch_sha(locator, _guard(name, "branch"))
+        if expected is None:
+            if exists == sha:
+                return name  # already at the source: left alone (no reflog entry)
+            if exists:
+                self._run(locator, "branch", "-f", "--end-of-options", name, sha)
+            else:
+                self._run(locator, "branch", "--end-of-options", name, sha)
+            return name
+        # `update-ref` with an old value is git's compare-and-swap: the branch
+        # moves only if it still holds `expected` (or does not exist yet, for
+        # ABSENT), in one ref transaction.
+        old = _old_value(expected)
+        if exists and exists == sha == old:
+            return name  # already at the source: left alone
+        if exists and exists != sha and self._checked_out(locator) == name:
+            # What `branch -f` refuses too: moving the ref under a checkout
+            # leaves its index and working tree describing another commit.
+            raise BackendError(
+                f"branch {name} is checked out; check out another branch before "
+                "it is reset",
+                kind="git",
+            )
+        proc = self._proc(locator, "update-ref", f"refs/heads/{name}", sha, old)
+        if proc.returncode != 0:
+            raise self._moved_or_failed(locator, name, old, proc.stderr, what="fork")
+        return name
+
+    def _branch_sha(self, locator: Locator, branch: str) -> str:
+        """The commit `refs/heads/<branch>` names, or `""` when there is no
+        such branch (a tag of the same name does not count)."""
+        return self._run(
             locator,
             "rev-parse",
             "--verify",
             "--quiet",
-            "--end-of-options",
-            f"{_guard(name, 'branch')}^{{commit}}",
+            f"refs/heads/{branch}",
             check=False,
         )
-        if exists == sha:
-            return name  # already at the source: left alone (no reflog entry)
-        if exists:
-            self._run(locator, "branch", "-f", "--end-of-options", name, sha)
-        else:
-            self._run(locator, "branch", "--end-of-options", name, sha)
-        return name
+
+    def _moved_or_failed(
+        self, locator: Locator, branch: str, old: str, stderr: str, *, what: str
+    ) -> BackendError:
+        """Why `update-ref refs/heads/<branch> <new> <old>` failed.
+
+        `RefMovedError` when the branch is not at `old` -- that is what the
+        compare-and-swap refuses, and git's message does not say so in a
+        form worth parsing; anything else (a locked ref, permissions) is the
+        failure itself.
+        """
+        now = self._branch_sha(locator, branch)
+        if old == _ZERO_SHA:
+            if not now:
+                return BackendError(
+                    f"git update-ref {branch} failed: {stderr.strip()}", kind="git"
+                )
+            return RefMovedError(
+                f"{what}: {branch} exists (at {now[:12]}), expected absent", kind="git"
+            )
+        if now == old:
+            return BackendError(
+                f"git update-ref {branch} failed: {stderr.strip()}", kind="git"
+            )
+        return RefMovedError(
+            f"{what}: {branch} is at {now[:12] or 'nothing'}, expected {old[:12]}",
+            kind="git",
+        )
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
         out = self._proc(
@@ -558,7 +621,13 @@ class GitBackend(ObjectBackend):
             return proc.returncode == 0
         raise BackendError(f"git merge-base failed: {proc.stderr.strip()}", kind="git")
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
         base = self._base_branch(locator)
         target = self._run(
             locator,
@@ -568,6 +637,15 @@ class GitBackend(ObjectBackend):
             f"{_guard(self._source_ref(source), 'source')}^{{commit}}",
         )
         head = self._run(locator, "rev-parse", "--verify", f"refs/heads/{base}")
+        # The old value for `update-ref`: the head the caller reviewed, or the
+        # one just read when no plan is involved.
+        old = head if expected is None else _old_value(expected)
+        if old != head:
+            raise RefMovedError(
+                f"promote: {base} is at {head[:12]}, expected "
+                f"{'absent' if old == _ZERO_SHA else old[:12]}",
+                kind="git",
+            )
         if target == head:
             return self.fingerprint(locator, base)
         if not self.ancestor_of(locator, {"sha": head}, target):
@@ -583,12 +661,28 @@ class GitBackend(ObjectBackend):
                     "them first",
                     kind="git",
                 )
+            # `merge --ff-only` moves HEAD, the index and the working tree
+            # together and has no old-value form, so on this path the head
+            # compared above is a check before the act: a commit landing on
+            # `base` between the two is not caught the way `update-ref`
+            # catches it below.
             self._run(locator, "merge", "--ff-only", "--end-of-options", target)
         else:
-            self._run(locator, "update-ref", f"refs/heads/{base}", target, head)
+            proc = self._proc(locator, "update-ref", f"refs/heads/{base}", target, old)
+            if proc.returncode != 0:
+                raise self._moved_or_failed(
+                    locator, base, old, proc.stderr, what="promote"
+                )
         return self.fingerprint(locator, base)
 
-    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+    def merge(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        message: str,
+        *,
+        expected: State | None = None,
+    ) -> State:
         source_ref = self._source_ref(source)
         base = self._base_branch(locator)
         if self._checked_out(locator) != base:
@@ -601,6 +695,10 @@ class GitBackend(ObjectBackend):
                 f"{base} has uncommitted changes; commit or stash them first",
                 kind="git",
             )
+        # `git merge` works on the checkout and has no old-value form: the
+        # reviewed head is compared right before it, a check rather than a
+        # swap.
+        check_expected(self, locator, expected, what="merge")
         proc = self._proc(
             locator,
             "merge",
@@ -751,6 +849,12 @@ def _sha(value: object) -> str:
     if not _HEX.match(text):
         raise BackendError(f"not a git commit id: {text!r}", kind="git")
     return text
+
+
+def _old_value(expected: State) -> str:
+    """`expected` as the old value of an `update-ref` compare-and-swap: its
+    sha, or all zeros for `ABSENT` (the ref must not exist yet)."""
+    return _sha(expected["sha"]) if expected else _ZERO_SHA
 
 
 def _factory(config: dict) -> GitBackend:

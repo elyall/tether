@@ -305,7 +305,14 @@ class DuckLakeBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, str(exc))
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         raise CapabilityError("ducklake cannot fork; copy the catalog instead")
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:

@@ -22,6 +22,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    check_expected,
     iso_utc,
     register_backend,
     wrap_library_errors,
@@ -250,7 +251,15 @@ class IcebergBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.OK)
         return VerifyReport(VerifyStatus.MISSING, f"snapshot {sid} expired/absent")
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
+        check_expected(self, locator, expected, ref=name)
         table = self._table(locator)
         if isinstance(source, Pin):
             ref = self._refs(table).get(source.ref)
@@ -323,7 +332,14 @@ class IcebergBackend(ObjectBackend):
             )
         return False
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        check_expected(self, locator, expected, what="promote")
         table = self._table(locator)
         base = self._base_branch(locator)
         head = self._resolve(table, base)

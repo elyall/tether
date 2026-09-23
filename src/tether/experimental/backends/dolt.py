@@ -37,6 +37,7 @@ from tether.backends.base import (
     VerifyReport,
     VerifyStatus,
     base_at,
+    check_expected,
     iso_utc,
     register_backend,
     wrap_library_errors,
@@ -443,7 +444,15 @@ class DoltBackend(ObjectBackend):
             return VerifyReport(VerifyStatus.MISSING, f"commit {commit} not found")
         return VerifyReport(VerifyStatus.OK)
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
+        check_expected(self, locator, expected, ref=name)
         client = self._client(locator)
         if isinstance(source, Pin):
             target = client.tag_hash(source.ref)
@@ -513,7 +522,14 @@ class DoltBackend(ObjectBackend):
             )
         return self.fingerprint(locator, base)
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        check_expected(self, locator, expected, what="promote")
         client = self._client(locator)
         base = self._base_branch(locator)
         src = self._source_ref(source)
@@ -534,7 +550,15 @@ class DoltBackend(ObjectBackend):
         )
         return self._merged_state(locator, result, src)
 
-    def merge(self, locator: Locator, source: str | Pin | State, message: str) -> State:
+    def merge(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        message: str,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        check_expected(self, locator, expected, what="merge")
         client = self._client(locator)
         source_ref = self._source_ref(source)
         result = client.merge(

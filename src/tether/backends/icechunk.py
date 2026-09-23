@@ -9,6 +9,7 @@ expiry, which makes them ideal, GC-proof pins.
 from __future__ import annotations
 
 import contextlib
+import functools
 import re
 import shutil
 from collections.abc import Collection, Iterator
@@ -26,12 +27,13 @@ from tether.backends.base import (
     VerifyStatus,
     base_at,
     canonical_uri,
+    check_expected,
     iso_utc,
     local_path,
     register_backend,
     wrap_library_errors,
 )
-from tether.errors import BackendError, CapabilityError
+from tether.errors import BackendError, CapabilityError, RefMovedError
 from tether.handles import Handle, IcechunkHandle
 from tether.manifest import (
     WORKING_REF_PREFIX,
@@ -71,6 +73,8 @@ class IcechunkBackend(ObjectBackend):
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
         self._repos: dict[str, Any] = {}
+        self._repo_creds: dict[str, dict[str, str] | None] = {}
+        """The credentials each cached `Repository` was opened with."""
 
     # -- storage / repo -------------------------------------------------- #
     def _uri(self, locator: Locator) -> str:
@@ -125,15 +129,36 @@ class IcechunkBackend(ObjectBackend):
             kind="icechunk",
         )
 
+    def _credentials(self, locator: Locator) -> dict[str, str] | None:
+        """The static keys the repository at `locator` is opened with; `None`
+        for local storage or when the ambient environment serves."""
+        if local_path(self._uri(locator)) is not None:
+            return None
+        from tether.credentials import aws_credentials
+
+        return aws_credentials(self.secrets_for(locator))
+
     def _repo(self, locator: Locator):
         import icechunk as ic
 
         uri = self._uri(locator)
+        creds = self._credentials(locator)
         repo = self._repos.get(uri)
-        if repo is None:
+        # Keys assumed from a role expire: `aws_credentials` hands out a fresh
+        # set near expiry, and a Repository holding the old ones would fail
+        # its next request, so it is rebuilt when the keys change.
+        if repo is None or self._repo_creds.get(uri) != creds:
             repo = ic.Repository.open(self._storage(locator))
-            self._repos[uri] = repo
+            self._remember(uri, repo, creds)
         return repo
+
+    def _remember(self, uri: str, repo: Any, creds: dict[str, str] | None) -> None:
+        self._repos[uri] = repo
+        self._repo_creds[uri] = creds
+
+    def _forget(self, uri: str) -> None:
+        self._repos.pop(uri, None)
+        self._repo_creds.pop(uri, None)
 
     def _base_branch(self, locator: Locator) -> str:
         return str(locator.get("branch", "main"))
@@ -339,7 +364,53 @@ class IcechunkBackend(ObjectBackend):
         except ic.IcechunkError as exc:
             return VerifyReport(VerifyStatus.MISSING, str(exc))
 
-    def fork(self, locator: Locator, source: Pin | State, name: str) -> str:
+    @staticmethod
+    @functools.cache
+    def _conditional_reset() -> bool:
+        """Whether `Repository.reset_branch` takes `from_snapshot_id` -- the
+        compare-and-swap `fork` and `promote` move a branch with. Icechunk
+        1.x (the resolution on Python 3.11) lacks it; there the reviewed head
+        is compared before an unconditional reset (:func:`check_expected`)."""
+        import inspect
+
+        import icechunk as ic
+
+        try:
+            params = inspect.signature(ic.Repository.reset_branch).parameters
+        except (TypeError, ValueError):  # a builtin with no signature data
+            return False
+        return "from_snapshot_id" in params
+
+    def _moved_or_failed(
+        self, repo: Any, branch: str, from_sid: str, exc: BaseException, *, what: str
+    ) -> BackendError:
+        """Why `reset_branch(..., from_snapshot_id=from_sid)` failed:
+        `RefMovedError` when the branch is not at `from_sid` -- that is what
+        the compare-and-swap refuses, and Icechunk's own message does not say
+        which snapshot it found -- else the failure itself."""
+        import icechunk as ic
+
+        try:
+            now: str | None = str(repo.lookup_branch(branch))
+        except ic.IcechunkError:
+            now = None
+        if now == from_sid:
+            return BackendError(
+                f"{what}: cannot reset branch {branch}: {exc}", kind="icechunk"
+            )
+        return RefMovedError(
+            f"{what}: {branch} is at {now or 'nothing'}, expected {from_sid}",
+            kind="icechunk",
+        )
+
+    def fork(
+        self,
+        locator: Locator,
+        source: Pin | State,
+        name: str,
+        *,
+        expected: State | None = None,
+    ) -> str:
         import icechunk as ic
 
         repo = self._repo(locator)
@@ -348,11 +419,44 @@ class IcechunkBackend(ObjectBackend):
         else:
             # Recorded state (no tag): the snapshot must still be reachable.
             sid = self._resolve(repo, str(source["snapshot_id"]))
-        try:
-            repo.create_branch(name, sid)
+        if expected is None:
+            try:
+                repo.create_branch(name, sid)
+                return name
+            except ic.IcechunkError:
+                pass
+            return self._reset(repo, name, sid)
+        if not expected:
+            # ABSENT: `create_branch` is itself the conditional write -- it
+            # refuses a branch that exists.
+            try:
+                repo.create_branch(name, sid)
+            except ic.IcechunkError as exc:
+                if name in repo.list_branches():
+                    raise RefMovedError(
+                        f"fork: {name} exists, expected absent", kind="icechunk"
+                    ) from exc
+                raise BackendError(
+                    f"cannot create branch {name}: {exc}", kind="icechunk"
+                ) from exc
             return name
-        except ic.IcechunkError:
-            pass
+        from_sid = str(expected["snapshot_id"])
+        if from_sid == sid or not self._conditional_reset():
+            # Nothing to move (expected at the source already), or no
+            # compare-and-swap in this icechunk: a check before the act.
+            check_expected(self, locator, expected, ref=name)
+            return name if from_sid == sid else self._reset(repo, name, sid)
+        try:
+            repo.reset_branch(name, sid, from_snapshot_id=from_sid)
+        except ic.IcechunkError as exc:
+            raise self._moved_or_failed(repo, name, from_sid, exc, what="fork") from exc
+        return name
+
+    def _reset(self, repo: Any, name: str, sid: str) -> str:
+        """Move branch `name` onto `sid` unconditionally; a branch already
+        there is left alone."""
+        import icechunk as ic
+
         try:
             if repo.lookup_branch(name) == sid:
                 return name  # already at the source: left alone
@@ -478,7 +582,7 @@ class IcechunkBackend(ObjectBackend):
         # The marker lives in the repository's own metadata: only a tether that
         # made the store writes it, and a clone's manifest cannot forge it.
         repo.update_metadata({self._OWNER_KEY: owner})
-        self._repos[uri] = repo
+        self._remember(uri, repo, self._credentials(locator))
         return self.fingerprint(locator, None)
 
     def owner(self, locator: Locator) -> str | None:
@@ -550,7 +654,7 @@ class IcechunkBackend(ObjectBackend):
                     f"({', '.join(foreign)}); not removing it",
                     kind="icechunk",
                 )
-            self._repos.pop(uri, None)
+            self._forget(uri)
             shutil.rmtree(root)
             return
         if parsed.scheme == "s3":
@@ -567,7 +671,7 @@ class IcechunkBackend(ObjectBackend):
                     f"({', '.join(foreign[:5])}); not removing it",
                     kind="icechunk",
                 )
-            self._repos.pop(uri, None)
+            self._forget(uri)
             if keys:
                 obs.delete(self._prefix_store(locator), keys)
             return
@@ -602,10 +706,24 @@ class IcechunkBackend(ObjectBackend):
         wanted = str(ancestor["snapshot_id"])
         return any(str(info.id) == wanted for info in repo.ancestry(snapshot_id=target))
 
-    def promote(self, locator: Locator, source: str | Pin | State) -> State:
+    def promote(
+        self,
+        locator: Locator,
+        source: str | Pin | State,
+        *,
+        expected: State | None = None,
+    ) -> State:
+        import icechunk as ic
+
         repo = self._repo(locator)
         base = self._base_branch(locator)
         head = str(repo.lookup_branch(base))
+        from_sid = None if expected is None else str(expected.get("snapshot_id", ""))
+        if from_sid is not None and head != from_sid:
+            raise RefMovedError(
+                f"promote: {base} is at {head}, expected {from_sid or 'absent'}",
+                kind="icechunk",
+            )
         target = self._source_sid(repo, source)
         if target == head:
             return {"snapshot_id": head}
@@ -615,7 +733,20 @@ class IcechunkBackend(ObjectBackend):
                 f"{self.PROMOTE_HINT}",
                 kind="icechunk",
             )
-        repo.reset_branch(base, target)
+        if from_sid is None or not self._conditional_reset():
+            # No reviewed head to hold the base to (or no compare-and-swap in
+            # this icechunk): the ancestry check above is the whole guard.
+            repo.reset_branch(base, target)
+            return {"snapshot_id": target}
+        # The base moves only if it still holds the head the ancestry was
+        # checked against; a commit that landed in between fails the reset
+        # instead of vanishing from the base's history.
+        try:
+            repo.reset_branch(base, target, from_snapshot_id=from_sid)
+        except ic.IcechunkError as exc:
+            raise self._moved_or_failed(
+                repo, base, from_sid, exc, what="promote"
+            ) from exc
         return {"snapshot_id": target}
 
     def open(
