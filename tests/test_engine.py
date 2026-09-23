@@ -1446,6 +1446,88 @@ def test_a_long_lived_repo_does_not_write_back_stale_workspace_state(
     assert Repo.find(vcs_root).workspace.bookmark == "work"
 
 
+def test_a_writable_open_follows_the_checkout_as_it_is_on_disk(
+    vcs_root: Path,
+) -> None:
+    """Port of the review's `engine/e5` and `r1`: a long-lived Repo's writable
+    `open` used the workspace it loaded at construction. After another process
+    ran `new -b feat`, the notebook's handle was still on the trunk's upstream
+    branch, and its write landed on the store's `main`. The open now takes the
+    checkout lock -- which re-reads the workspace -- and, for a fork `new`
+    deferred, materializes the bookmark's branch itself."""
+    notebook = Repo.init(vcs_root)
+    system = _mem_object(notebook)
+    store = default_store()
+    notebook.commit("baseline")
+    main_head = store.resolve(system, "main")
+
+    Repo.find(vcs_root).new(bookmark="feat")  # another process; lazy fork
+    handle = notebook.open("db")  # no snapshot or status in between
+    assert isinstance(handle, MemoryHandle) and not handle.read_only
+    branch = f"tether.ws.{notebook.config.dataset_id}.feat"
+    assert handle.ref == branch
+    handle.write({"x": 1})
+    assert store.resolve(system, "main") == main_head  # upstream untouched
+    assert store.read(system, branch) == {"x": 1}
+    now = Repo.find(vcs_root).workspace
+    assert now.bookmark == "feat" and now.working_refs == {"db": branch}
+    assert notebook.workspace.bookmark == "feat"
+
+    # And an object another process removed in the meantime is no longer there
+    # to open, whatever this Repo remembers.
+    Repo.find(vcs_root).remove("db")
+    with pytest.raises(ConfigError, match="no such object"):
+        notebook.open("db")
+
+
+def test_new_forgets_the_snapshot_cache_of_the_branches_it_leaves(
+    vcs_root: Path,
+) -> None:
+    """Port of the review's `engine/e9` and `r2`: `new` kept `last_snapshot`
+    from the previous bookmark, so a cached `status` reported the old branch's
+    head under the new bookmark's name and `commit --no-snapshot` pinned it as
+    the new bookmark's state -- on the trunk, a manifest saying `main` was at a
+    head that only ever existed on the feature branch."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    baseline = repo.commit("baseline")
+    assert baseline.pinned["db"] is not None
+    s0 = repo.objects["db"].state
+    assert s0 is not None
+    repo.new(bookmark="a", eager=True)
+    a_ref = repo.workspace.working_refs["db"]
+    store.write(system, a_ref, {"wip-on-a": 1})  # uncommitted work on a
+    repo.snapshot()  # `tether status --snapshot`
+    a_head = store.resolve(system, a_ref)
+    assert repo.workspace.last_snapshot["db"] == {"snapshot_id": a_head}
+
+    repo.new(bookmark="b")  # same commit; b's branch forked lazily
+    assert "db" not in repo.workspace.last_snapshot
+    (db,) = repo.status(do_snapshot=False).objects
+    assert db.current_state == s0 and not db.changed  # the pin, not a's head
+    repo.open("db")  # materializes b's branch at the pin
+    b_ref = repo.workspace.working_refs["db"]
+    assert store.resolve(system, b_ref) == s0["snapshot_id"] != a_head
+    result = repo.commit("b: nothing written", do_snapshot=False)
+    assert result.vcs_commit is None and not result.pinned  # nothing observed
+    assert Repo.find(vcs_root).objects["db"].state == s0
+
+    # Back to the trunk with b's head written to but uncommitted: the cache
+    # does not follow, so `commit --no-snapshot` records nothing there either.
+    store.write(system, b_ref, {"wip-on-b": 1})
+    repo.snapshot()
+    assert repo.workspace.last_snapshot["db"] == {
+        "snapshot_id": store.resolve(system, b_ref)
+    }
+    repo.new("main")
+    assert "db" not in repo.workspace.last_snapshot
+    result = repo.commit("trunk commit, cached fingerprints", do_snapshot=False)
+    assert result.vcs_commit is None and not result.pinned
+    assert Repo.find(vcs_root).objects["db"].state == s0
+    assert store.resolve(system, "main") == s0["snapshot_id"]
+
+
 def test_one_writer_per_checkout(vcs_root: Path) -> None:
     """A second Repo on the same checkout waits for the lock and gives up
     after `LOCK_TIMEOUT`; the lock is re-entrant within one Repo."""

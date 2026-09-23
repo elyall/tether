@@ -613,26 +613,13 @@ class ObjectOps(RepoCore):
                     key=key,
                     kind=m.kind,
                 )
-            stale = self.stale_keys()
-            if stale:
-                raise StaleWorkingCopyError(
-                    f"working copy is stale: the committed state of {', '.join(stale)} "
-                    "changed since this workspace forked; run `tether new` to refork "
-                    "before writing"
-                )
-            working_ref = self._working_ref(key)
-            if working_ref is None and key in self.workspace.pending_forks:
-                working_ref = self.materialize_fork(key)  # lazy fork: first write
-            if working_ref is None:
-                if self.workspace.bookmark is None:
-                    raise StaleWorkingCopyError(
-                        f"no working ref for {key!r}: this working copy is on no "
-                        "bookmark and is read-only; `tether new -b NAME` to write"
-                    )
-                raise StaleWorkingCopyError(
-                    f"no working ref for {key!r}; run `tether new` first"
-                )
-            return backend.open(m.locator, working_ref, read_only=False)
+            # Under the checkout lock, which re-reads the workspace and the
+            # manifests: a `Repo` that has lived a while (a notebook) must
+            # hand back a handle on the branch the checkout is on *now* --
+            # another process may have run `new` since -- not on the working
+            # ref it loaded at construction, which on the trunk is upstream.
+            with self._writer_lock():
+                return self._open_writable(key)
 
         # Read-only handle at the object's position: its working ref when it
         # has one, else the committed pin / state -- rather than wherever
@@ -646,6 +633,34 @@ class ObjectOps(RepoCore):
                 state = m.state or backend.fingerprint(m.locator, None)
                 return backend.open(m.locator, state, read_only=True)
         return backend.open(m.locator, working_ref, read_only=True)
+
+    def _open_writable(self: Repo, key: str) -> Handle:
+        """`open(key, read_only=False)` once the checkout lock has refreshed
+        the workspace and the manifests (see `open`)."""
+        m = self.objects.get(key)
+        if m is None:
+            raise ConfigError(f"no such object: {key}")
+        backend = self.backend_for(m.kind)
+        stale = self.stale_keys()
+        if stale:
+            raise StaleWorkingCopyError(
+                f"working copy is stale: the committed state of {', '.join(stale)} "
+                "changed since this workspace forked; run `tether new` to refork "
+                "before writing"
+            )
+        working_ref = self._working_ref(key)
+        if working_ref is None and key in self.workspace.pending_forks:
+            working_ref = self.materialize_fork(key)  # lazy fork: first write
+        if working_ref is None:
+            if self.workspace.bookmark is None:
+                raise StaleWorkingCopyError(
+                    f"no working ref for {key!r}: this working copy is on no "
+                    "bookmark and is read-only; `tether new -b NAME` to write"
+                )
+            raise StaleWorkingCopyError(
+                f"no working ref for {key!r}; run `tether new` first"
+            )
+        return backend.open(m.locator, working_ref, read_only=False)
 
     def _pinned_source(
         self, m: ObjectManifest, backend: ObjectBackend, eff: Capability

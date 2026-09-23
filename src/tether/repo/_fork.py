@@ -541,6 +541,19 @@ class ForkOps(RepoCore):
                     interim_pending[a.key] = interim_pending[first]
                     if first in interim_resets:
                         interim_resets[a.key] = interim_resets[first]
+            # What the snapshot cache says about a branch this `new` leaves,
+            # resets or creates is the previous bookmark's head (or one about
+            # to be reset): `status` without a snapshot would report it under
+            # the new bookmark's name, and `commit --no-snapshot` would pin it
+            # as the new bookmark's state. Objects with no working branch keep
+            # their entry; `new` does not move them.
+            for key in (
+                set(self.workspace.working_refs)
+                | set(self.workspace.pending_forks)
+                | set(working_refs)
+                | set(interim_pending)
+            ):
+                self.workspace.last_snapshot.pop(key, None)
             self.workspace.working_refs = {**leftovers, **working_refs}
             self.workspace.pending_forks = interim_pending
             self.workspace.pending_resets = interim_resets
