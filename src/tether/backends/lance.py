@@ -39,7 +39,7 @@ from tether.backends.base import (
     iso_utc,
     register_backend,
 )
-from tether.errors import BackendError
+from tether.errors import BackendError, RefMovedError
 from tether.handles import Handle, LanceHandle
 from tether.manifest import WORKING_REF_PREFIX, Locator, Pin, State, ref_for_pin
 
@@ -277,7 +277,6 @@ class LanceBackend(ObjectBackend):
         *,
         expected: State | None = None,
     ) -> str:
-        check_expected(self, locator, expected, ref=name)
         ds = self._dataset(locator)
         # A tag name, or the recorded (branch, version) for pin-less forks.
         origin: str | Ref = (
@@ -285,21 +284,38 @@ class LanceBackend(ObjectBackend):
         )
         if not isinstance(source, Pin):
             self._check_branch_life(ds, source)
-        existing = ds.branches.list()
         target = name
-        if name in existing:
-            try:
-                ds.branches.delete(name)  # reset semantics, like icechunk
-            except _LANCE_ERRORS:
-                # Tags reference the old working branch; leave it and pick a
-                # sibling name rather than fail the fork.
-                n = 2
-                while f"{name}.{n}" in existing:
-                    n += 1
-                target = f"{name}.{n}"
+        # ABSENT: `create_branch` refuses a name that exists, so creating is
+        # the whole check and nothing is ever deleted.
+        if expected is None or expected:
+            existing = ds.branches.list()
+            if expected is not None:
+                # Lance has no conditional delete: the head is compared as
+                # late as it can be, right before the branch is dropped.
+                check_expected(self, locator, expected, ref=name)
+            if name in existing:
+                try:
+                    ds.branches.delete(name)  # reset semantics, like icechunk
+                except _LANCE_ERRORS:
+                    # Tags reference the old working branch; leave it and pick
+                    # a sibling name rather than fail the fork.
+                    n = 2
+                    while f"{name}.{n}" in existing:
+                        n += 1
+                    target = f"{name}.{n}"
         try:
             ds.create_branch(target, origin)
         except _LANCE_ERRORS as exc:
+            # A racing creator that has committed the branch's first manifest
+            # but not yet its ref is refused as "already exists".
+            if expected is not None and (
+                "already exists" in str(exc)
+                or target in self._dataset(locator).branches.list()
+            ):
+                raise RefMovedError(
+                    f"fork: {target} was created by someone else meanwhile",
+                    kind="lance",
+                ) from exc
             raise BackendError(
                 f"cannot create lance branch {target} from {origin!r}: {exc}",
                 kind="lance",

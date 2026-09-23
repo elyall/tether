@@ -123,6 +123,141 @@ def test_lance_fork_lifecycle(tmp_path: Path) -> None:
         b.fingerprint({"uri": str(tmp_path / "absent.lance")}, None)
 
 
+def _rows(uri: str, branch: str) -> list[int]:
+    return (
+        lance.dataset(uri).checkout_version((branch, None)).to_table()["a"].to_pylist()
+    )
+
+
+def test_lance_racing_absent_forks_create_the_branch_once(tmp_path: Path) -> None:
+    """Port of the review's D4: a fork that found the branch absent listed,
+    deleted and re-created a branch of that name, so a peer's branch made in
+    between was replaced. `create_branch` refuses a name that exists, which
+    makes it the whole check: of racing forks one creates the branch, the
+    others are refused, and what the winner writes stays."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tether.backends.base import ABSENT
+    from tether.errors import RefMovedError
+
+    uri = str(tmp_path / "d.lance")
+    lance.write_dataset(pa.table({"a": [1]}), uri)
+    loc = {"uri": uri}
+    source = LanceBackend().fingerprint(loc, None)
+    name = working_ref_name("d5d5d5d5", "shared")
+    racers = 8
+    barrier = threading.Barrier(racers, timeout=60)
+
+    def fork_once(_: int) -> str:
+        b = LanceBackend()
+        barrier.wait()
+        try:
+            ref = b.fork(loc, source, name, expected=ABSENT)
+        except RefMovedError:
+            return "refused"
+        _append(lance.dataset(uri).checkout_version((ref, None)), 2)
+        return "won"
+
+    with ThreadPoolExecutor(max_workers=racers) as pool:
+        outcomes = list(pool.map(fork_once, range(racers)))
+    assert outcomes.count("won") == 1 and outcomes.count("refused") == racers - 1
+    assert list(lance.dataset(uri).branches.list()) == [name]
+    assert _rows(uri, name) == [1, 2]  # the winner's write survived the losers
+
+
+@pytest.mark.parametrize("after", range(1, 5))
+@pytest.mark.parametrize("read", ["open", "list"])
+@pytest.mark.parametrize("peer", ["writes", "recreates", "creates"])
+def test_lance_conditional_fork_never_replaces_a_branch_it_did_not_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, peer: str, read: str, after: int
+) -> None:
+    """A peer acts on the branch at every point of a conditional fork -- right
+    after its `after`-th dataset open or branch listing, or once it returned
+    -- and its write is never lost: the fork either refuses (`RefMovedError`)
+    or ran before the peer. The old fork checked the head first and then
+    opened, listed and deleted, so a peer landing after the check was
+    replaced. Lance has no conditional delete, so the head check itself is
+    the one place left: it is the last read before the delete (a peer inside
+    it is not injected here). `creates`: the branch was absent when reviewed
+    (`ABSENT`), and creating is the check; `recreates`: deleted and made
+    anew, so its version number matches and only the branch id differs."""
+    import contextlib
+
+    from tether.backends import lance as lance_module
+    from tether.backends.base import ABSENT
+    from tether.errors import RefMovedError
+
+    uri = str(tmp_path / "d.lance")
+    lance.write_dataset(pa.table({"a": [1]}), uri)
+    loc = {"uri": uri}
+    b = LanceBackend()
+    source = b.fingerprint(loc, None)
+    name = working_ref_name("d5d5d5d5", "feat")
+    if peer == "creates":
+        expected = ABSENT
+    else:
+        b.fork(loc, source, name)
+        _append(lance.dataset(uri).checkout_version((name, None)), 2)
+        expected = b.fingerprint(loc, name)
+
+    def act() -> None:
+        ds = lance.dataset(uri)
+        if peer == "recreates":
+            ds.branches.delete(name)
+        with contextlib.suppress(OSError):  # a branch the fork made first
+            if peer in ("creates", "recreates"):
+                ds.create_branch(name, (None, None))
+        _append(ds.checkout_version((name, None)), 99)
+
+    calls: list[None] = []
+    checking: list[bool] = []
+
+    def maybe_act() -> None:
+        if checking:
+            return
+        calls.append(None)
+        if len(calls) == after:
+            act()
+
+    real_check = lance_module.check_expected
+
+    def head_check(*args, **kwargs):
+        checking.append(True)
+        try:
+            return real_check(*args, **kwargs)
+        finally:
+            checking.clear()
+
+    monkeypatch.setattr(lance_module, "check_expected", head_check)
+    if read == "open":
+        real_dataset = LanceBackend._dataset
+
+        def dataset_then_peer(self, locator):
+            ds = real_dataset(self, locator)
+            maybe_act()
+            return ds
+
+        monkeypatch.setattr(LanceBackend, "_dataset", dataset_then_peer)
+    else:
+        branches_type = type(lance.dataset(uri).branches)
+        real_list = branches_type.list
+
+        def list_then_peer(self):
+            listed = real_list(self)
+            maybe_act()
+            return listed
+
+        monkeypatch.setattr(branches_type, "list", list_then_peer)
+    with contextlib.suppress(RefMovedError):
+        b.fork(loc, source, name, expected=expected)
+    fired = len(calls) >= after
+    monkeypatch.undo()
+    if not fired:
+        act()  # the peer comes after the fork
+    assert _rows(uri, name)[-1] == 99
+
+
 def test_lance_recreated_branch_is_a_new_state(tmp_path: Path) -> None:
     # A branch deleted and forked again under its name restarts its version
     # numbers, so (branch, version) alone names two contents.
