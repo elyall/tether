@@ -102,7 +102,7 @@ class UndoOps(RepoCore):
           them again.
         - `import` / `add` / `remove`: manifests and workspace restored.
         - `promote`: refused; the base heads before the move are printed
-          for a manual reset (backends only fast-forward).
+          for a manual reset (tether never moves a base branch backwards).
 
         The undo is logged and the target marked `undone_by`. If nothing
         could be reversed the call raises instead.
@@ -539,11 +539,13 @@ class UndoOps(RepoCore):
             **(entry.result.get("fast_forwarded") or {}),
             **(entry.result.get("merged") or {}),
         }
+        merged = entry.result.get("merged") or {}
         for key in sorted(moved):
             report.irreversible.append(
-                f"{key}: base branch moved {short_state(before.get(key))} -> "
-                f"{short_state(moved[key])}; tether only fast-forwards base "
-                "branches, reset it in the store yourself"
+                f"{key}: base branch {'merged' if key in merged else 'fast-forwarded'}"
+                f" {short_state(before.get(key))} -> {short_state(moved[key])}; tether "
+                "never moves a base branch backwards (readers of it may have built on "
+                "it), reset it in the store yourself"
             )
         if not moved:
             report.skipped.append("promote moved nothing")

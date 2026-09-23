@@ -6,7 +6,7 @@ try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from tether.backends.base import (
@@ -28,6 +28,7 @@ from tether.errors import (
 from tether.manifest import (
     ObjectManifest,
     Pin,
+    Policy,
     State,
     manifest_hash,
     write_workspace,
@@ -103,6 +104,13 @@ class PromoteOps(RepoCore):
         message = message or f"tether promote {rev or self.workspace.workspace_id[:8]}"
         bookmark = self.workspace.bookmark
         marks = self.vcs.bookmarks()
+        bookmark_commit = marks.get(bookmark) if bookmark else None
+        # What the bookmark's commit records -- where a full promotion moves
+        # the trunk -- not the working tree, which also holds manifests no
+        # commit has (an undone commit, `commit --no-vcs`).
+        committed = (
+            self._objects_at(bookmark_commit) if bookmark_commit and not rev else {}
+        )
         plan = Plan(
             command="promote",
             context={
@@ -116,7 +124,7 @@ class PromoteOps(RepoCore):
                 # The commit a full promotion moves the trunk to: this
                 # bookmark's, as reviewed -- never whatever the checkout is on
                 # by the time the plan is applied.
-                "bookmark_commit": marks.get(bookmark) if bookmark else None,
+                "bookmark_commit": bookmark_commit,
             },
         )
         plan.require(
@@ -225,7 +233,8 @@ class PromoteOps(RepoCore):
                         f"{key}: no working branch yet; nothing to promote"
                     )
                     continue
-                if m.state is None:
+                recorded = committed.get(key)
+                if recorded is None or recorded.state is None:
                     plan.notes.append(
                         f"{key}: nothing committed on this bookmark yet; commit first"
                     )
@@ -233,11 +242,18 @@ class PromoteOps(RepoCore):
                 target_state = probed_target
                 source = {"ref": working_ref}
                 fork_point = self.workspace.fork_points.get(key)
-                if not self._same(m.kind, target_state, m.state):
+                if not self._same(m.kind, target_state, recorded.state):
                     # The trunk moves to this bookmark's commit, whose manifest
                     # must describe what landed: a write the commit does not
                     # record would reach the base under a commit that says
                     # something else.
+                    where = (
+                        f"; the working tree's manifest records it but {bookmark}'s "
+                        f"commit ({str(bookmark_commit)[:12]}) does not -- an undone "
+                        "commit, or `commit --no-vcs`"
+                        if self._same(m.kind, target_state, m.state)
+                        else ""
+                    )
                     plan.actions.append(
                         Action(
                             "refuse",
@@ -245,9 +261,9 @@ class PromoteOps(RepoCore):
                             m.kind,
                             target=base_txt,
                             detail=f"{working_ref} has writes since the last commit "
-                            f"({short_state(m.state)} committed, "
-                            f"{short_state(target_state)} on the branch); `tether "
-                            "commit` them first",
+                            f"({short_state(recorded.state)} committed, "
+                            f"{short_state(target_state)} on the branch{where}); "
+                            "`tether commit` them first",
                             params={"locator": dict(m.locator)},
                         )
                     )
@@ -397,7 +413,7 @@ class PromoteOps(RepoCore):
                 locator=locator,
                 detail=f"{a.key!r}: base branch moved since the plan was made "
                 f"({short_state(a.params['base_state'])} -> {{observed}}); "
-                "re-run the plan",
+                + self._after_base_moved(a.key, a.kind, locator),
             )
             source = a.params.get("source") or {}
             target_state = a.params.get("target_state")
@@ -420,9 +436,28 @@ class PromoteOps(RepoCore):
                     locator=locator,
                     pin=dict(source["pin"]),
                     detail=f"promote {a.key}: pin {source['pin'].get('ref')} no "
-                    "longer names the reviewed state ({observed}); re-run the plan",
+                    "longer names the reviewed state ({observed}); `tether repair` "
+                    "recreates a missing pin, a drifted one needs a look (`tether "
+                    "verify`) -- re-running the plan refuses it until then",
                 )
         return plan
+
+    def _after_base_moved(self, key: str, kind: str, locator: Mapping[str, Any]) -> str:
+        """What to do once `key`'s base branch moved under a plan: a new plan
+        merges onto it where the backend can; where it cannot, the new plan
+        refuses it too unless the base only moved along the fork."""
+        backend = self.backend_for(kind)
+        m = self.objects.get(key)
+        eff = effective_capabilities(
+            backend, dict(locator), m.policy if m is not None else Policy()
+        )
+        if Capability.MERGE in eff:
+            return "re-run the plan (it merges onto the moved base)"
+        hint = f"; {backend.PROMOTE_HINT}" if backend.PROMOTE_HINT else ""
+        return (
+            "re-running the plan refuses it too unless the base only moved along "
+            f"the fork: the {kind} backend cannot merge{hint}"
+        )
 
     def _refuse_trunk_regression(
         self,
@@ -635,6 +670,13 @@ class PromoteOps(RepoCore):
             # held rather than landed beside a system that did not move.
             merges = [k for k, a in by_key.items() if a.op == "merge"]
             ffs = [k for k in by_key if k not in merges]
+
+            def moved(key: str, exc: Exception) -> str:
+                a = by_key[key]
+                return f"{exc}; " + self._after_base_moved(
+                    key, a.kind, a.params["locator"]
+                )
+
             results, errors = self._fanout_collect(run_one, merges)
             for key, exc in list(errors.items()):
                 if isinstance(exc, MergeConflict):
@@ -642,21 +684,25 @@ class PromoteOps(RepoCore):
                     report.refused[key] = str(exc)
                     errors.pop(key)
                 elif isinstance(exc, RefMovedError):
-                    report.refused[key] = f"{exc}; re-run the plan"
+                    report.refused[key] = moved(key, exc)
                     errors.pop(key)
-            if ffs and (report.refused or errors) and merges:
-                stopped = ", ".join(sorted(set(report.refused) | set(errors)))
+            # Only a merge that stopped here holds the fast-forwards: what the
+            # plan itself refused (a subset naming a key that cannot move)
+            # was never going to land with them.
+            stopped = sorted(k for k in merges if k not in results)
+            if ffs and stopped:
                 for key in ffs:
                     report.held[key] = (
-                        f"would fast-forward: held because the merge of {stopped} "
-                        "did not land, and a bookmark lands whole or not at all"
+                        f"would fast-forward: held because the merge of "
+                        f"{', '.join(stopped)} did not land, and a bookmark lands "
+                        "whole or not at all"
                     )
             elif ffs:
                 more, more_errors = self._fanout_collect(run_one, ffs)
                 results.update(more)
                 for key, exc in more_errors.items():
                     if isinstance(exc, RefMovedError):
-                        report.refused[key] = f"{exc}; re-run the plan"
+                        report.refused[key] = moved(key, exc)
                     else:
                         errors[key] = exc
 

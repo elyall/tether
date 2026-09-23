@@ -2661,9 +2661,9 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
     store.write(system, wref, {"v": 2})
     repo.commit("work")
     repo.promote(["db"])
-    with pytest.raises(TetherError, match="only fast-forwards") as exc:
+    with pytest.raises(TetherError, match="never moves a base branch back") as exc:
         repo.undo()
-    assert "db: base branch moved" in str(exc.value)
+    assert "db: base branch fast-forwarded" in str(exc.value)
     # The attempt is journaled (it began before it could know), marked failed;
     # the promote itself is not marked undone.
     attempt, promoted = repo.ops()[:2]
@@ -2681,7 +2681,7 @@ def test_undo_manifest_edits_and_promote(vcs_root: Path) -> None:
                 assert "no longer the working copy's parent" in str(exc)
                 break
     with pytest.raises(
-        TetherError, match=r"nothing to undo|only fast-forwards|no longer the"
+        TetherError, match=r"nothing to undo|never moves a base|no longer the"
     ):
         repo.undo()
 

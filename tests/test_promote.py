@@ -205,6 +205,158 @@ def test_promote_lands_only_committed_states(vcs_root: Path) -> None:
     assert report.trunk_moved == later
 
 
+@pytest.mark.parametrize("how", ["undo", "no-vcs"])
+@pytest.mark.parametrize("keys", [None, ["db"]])
+def test_promote_checks_the_bookmark_commit_not_the_working_tree(
+    vcs_root: Path, how: str, keys: list[str] | None
+) -> None:
+    """Port of the review's D2: the committed-state check compared the fork's
+    head with the *working tree's* manifest, while the trunk moves to the
+    bookmark's commit. Commit s2, write s3 and commit it, then `tether undo`
+    (or record s3 with `commit --no-vcs`): the working tree says s3, the
+    bookmark's commit says s2, and promote landed s3 under a trunk that
+    records s2. Refused now, whole or as a subset, and nothing moves."""
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    store.write(system, wref, {"s": 2})
+    s2 = repo.commit("s2").vcs_commit
+    store.write(system, wref, {"s": 3})
+    if how == "undo":
+        repo.commit("s3")
+        assert repo.undo().op.command == "commit"
+    else:
+        repo.commit("s3", vcs=False)
+    assert repo.vcs.bookmarks()["work"] == s2
+    assert repo.objects["db"].state == {"snapshot_id": store.resolve(system, wref)}
+    main_head, trunk = store.resolve(system, "main"), repo.vcs.bookmarks()["main"]
+
+    plan = repo.plan_promote(keys)
+    (a,) = plan.actions
+    assert a.op == "refuse" and "writes since the last commit" in a.detail
+    assert "working tree's manifest records it" in a.detail and s2[:12] in a.detail
+    report = repo.apply_promote(plan)
+    assert not report.fast_forwarded and report.trunk_moved is None
+    assert store.resolve(system, "main") == main_head
+    assert repo.vcs.bookmarks()["main"] == trunk
+    # Committed to the VCS, it lands and the trunk records it.
+    s3 = repo.commit("s3 again").vcs_commit
+    report = repo.promote(keys)
+    assert store.read(system, "main") == {"s": 3}
+    assert report.trunk_moved == (None if keys else s3)
+
+
+def test_one_object_the_bookmark_commit_does_not_record_holds_the_bookmark(
+    vcs_root: Path,
+) -> None:
+    """The neighbours: of two objects, one committed and one whose last write
+    only the working tree records (`commit --no-vcs`) -- the bookmark is
+    held whole; an object added since the bookmark's commit has nothing
+    committed there; naming the committed one lands it alone."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    db, db2 = _mem(repo, "db"), _mem(repo, "db2")
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    refs = dict(repo.workspace.working_refs)
+    store.write(db, refs["db"], {"db": 1})
+    store.write(db2, refs["db2"], {"db2": 1})
+    repo.commit("both")
+    store.write(db2, refs["db2"], {"db2": 2})
+    repo.commit("db2 again, manifests only", vcs=False)
+    _mem(repo, "late")
+    repo.commit("late, manifests only", vcs=False)
+    repo.new(eager=True)  # forks `late` from its working-tree pin
+    assert "late" in repo.workspace.working_refs
+
+    plan = repo.plan_promote()
+    ops = {a.key: a.op for a in plan.actions}
+    assert ops == {"db": "hold", "db2": "refuse"}
+    assert "late: nothing committed on this bookmark yet; commit first" in plan.notes
+    report = repo.promote(["db"])
+    assert set(report.fast_forwarded) == {"db"} and report.trunk_moved is None
+    assert store.read(db2, "main") == {"a": 1}
+
+
+def test_a_refusal_in_the_plan_holds_no_fast_forward_at_apply(vcs_root: Path) -> None:
+    """Holding the fast-forwards is for a merge that stops at apply. A key the
+    plan itself refused (a subset naming an object with uncommitted writes)
+    was counted as a failed merge, and held an unrelated fast-forward and
+    merge that both land now."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    systems = {k: _mem(repo, k) for k in ("ff", "mg", "dirty")}
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    refs = dict(repo.workspace.working_refs)
+    for key, system in systems.items():
+        store.write(system, refs[key], {"a": 1, key: "feat"})
+    repo.commit("feat")
+    store.write(systems["mg"], "main", {"a": 1, "trunk": 1})
+    store.write(systems["dirty"], refs["dirty"], {"a": 1, "dirty": "uncommitted"})
+
+    plan = repo.plan_promote(["ff", "mg", "dirty"])
+    assert {a.key: a.op for a in plan.actions} == {
+        "ff": "fast-forward",
+        "mg": "merge",
+        "dirty": "refuse",
+    }
+    report = repo.apply_promote(plan)
+    assert set(report.fast_forwarded) == {"ff"} and set(report.merged) == {"mg"}
+    assert set(report.refused) == {"dirty"} and not report.held
+
+
+@pytest.mark.parametrize("can_merge", [True, False])
+@pytest.mark.parametrize("when", ["plan check", "apply"])
+def test_a_moved_base_is_re_planned_only_where_a_re_plan_can_land(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, can_merge: bool, when: str
+) -> None:
+    """ "Re-run the plan" after the base moved is advice only a backend that
+    merges can follow: for one that cannot, the new plan refuses as well,
+    and the refusal says so (with the backend's recipe) instead."""
+    from tether.backends.memory import MemoryBackend
+
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    backend = repo.backend_for("memory")
+    if not can_merge:
+        monkeypatch.setattr(
+            backend, "capabilities", backend.capabilities & ~Capability.MERGE
+        )
+        monkeypatch.setattr(backend, "PROMOTE_HINT", "copy it by hand")
+    store.write(system, wref, {"a": 1, "b": 2})
+    repo.commit("b")
+    plan = repo.plan_promote()
+    assert [a.op for a in plan.actions] == ["fast-forward"]
+
+    def move_base() -> None:
+        store.write(system, "main", {"a": 1, "other": True})
+
+    if when == "plan check":
+        move_base()
+        with pytest.raises(StalePlanError) as exc:
+            repo.apply_promote(plan)
+        text = str(exc.value)
+    else:
+        real = MemoryBackend.promote
+
+        def promote_after_a_commit(self, locator, source, **kw):
+            move_base()
+            return real(self, locator, source, **kw)
+
+        monkeypatch.setattr(MemoryBackend, "promote", promote_after_a_commit)
+        text = repo.apply_promote(plan).refused["db"]
+    if can_merge:
+        assert "re-run the plan (it merges onto the moved base)" in text
+    else:
+        assert "re-running the plan refuses it too" in text
+        assert "cannot merge; copy it by hand" in text
+        assert not text.endswith("; re-run the plan")
+
+
 def test_merges_run_before_fast_forwards(vcs_root: Path) -> None:
     """A merge is what can still stop at apply (a conflict); a fast-forward
     that has landed cannot be taken back. Merges go first, and when one
