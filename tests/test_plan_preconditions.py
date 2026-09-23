@@ -16,7 +16,7 @@ import pytest
 
 from tether.backends.memory import default_store
 from tether.errors import ConfigError, StalePlanError
-from tether.manifest import Pin, compute_pin_id
+from tether.manifest import CONFIG_VERSION, Pin, compute_pin_id
 from tether.plan import (
     PLAN_FORMAT,
     PRECONDITION_KINDS,
@@ -166,7 +166,9 @@ def test_verify_plan_checks_each_kind(vcs_root: Path) -> None:
     with pytest.raises(StalePlanError, match="history_digest drifted"):
         repo._verify_plan(plan_with("history_digest", "x"), cmd)
     repo._verify_plan(plan_with("config_version", repo.config.version), cmd)
-    with pytest.raises(StalePlanError, match=r"config_version drifted \(4\)"):
+    with pytest.raises(
+        StalePlanError, match=rf"config_version drifted \({CONFIG_VERSION}\)"
+    ):
         repo._verify_plan(plan_with("config_version", 1), cmd)
 
     # ref_absent / ref_head against a real branch.

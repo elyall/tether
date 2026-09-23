@@ -38,9 +38,11 @@ WORKSPACE_FILENAME = "workspace.toml"
 GITIGNORE_FILENAME = ".gitignore"
 
 REF_PREFIX = "tether."
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 """The `[tether] version` this code writes and expects. `tether upgrade` brings
-older datasets forward (see `tether.upgrade`; removed at 0.1.0)."""
+older datasets forward (see `tether.upgrade`; removed at 0.1.0). 5 is
+0.1.0b4's: what 0.1.0b3 recorded under identities and states that changed is
+carried forward, and a 0.1.0b3 refuses the dataset from then on."""
 
 FileMode = Literal["immutable", "versioned"]
 PinMode = Literal["native", "record"]

@@ -17,13 +17,19 @@ clone has to re-sync afterwards.
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from tether.backends.base import Capability, content_state, effective_capabilities
+from tether.backends.base import (
+    Capability,
+    content_state,
+    effective_capabilities,
+    local_path,
+)
 from tether.errors import TetherError
 from tether.manifest import (
     CONFIG_VERSION,
@@ -58,7 +64,13 @@ class UpgradeReport:
         renamed_branches: Old working branch -> new working branch.
         rewritten_commits: Old commit id -> new commit id (history rewrite).
         refingerprinted: Objects whose manifest state was recomputed (v3).
-        rewritten_manifests: Objects whose manifest lost its write policy (v3).
+        rewritten_manifests: Objects whose manifest lost its write policy
+            (v3), moved or got an absolute path (v4), or had its state
+            carried into the current form (v5).
+        rewritten_indexes: Index file beside the repository lock -> records
+            given the identity their store has now (v5).
+        copied_listings: Listings stored again under the name their
+            object's identity gives them now (v5).
         failed: Target -> why a step did not happen.
         vcs_commit: The commit that records the upgraded working tree.
         plan: The plan that was applied.
@@ -71,6 +83,8 @@ class UpgradeReport:
     rewritten_commits: dict[str, str] = field(default_factory=dict)
     refingerprinted: list[str] = field(default_factory=list)
     rewritten_manifests: list[str] = field(default_factory=list)
+    rewritten_indexes: dict[str, int] = field(default_factory=dict)
+    copied_listings: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     vcs_commit: str | None = None
     plan: Plan | None = None
@@ -89,9 +103,10 @@ class Migration:
 def pending(version: int) -> list[Migration]:
     """Migrations a dataset at `version` still needs, oldest first.
 
-    Every alpha format is brought to the current one by a single migration
+    Every older format is brought to the current one by a single migration
     whose parts run on what the dataset *shows* (old-format pins, mtime file
-    states, misplaced manifests), not on its recorded version.
+    states, misplaced manifests, 0.1.0b3 identities), among the parts meant
+    for datasets as old as it records.
     """
     return [m for m in MIGRATIONS if m.version > version]
 
@@ -550,12 +565,15 @@ def _misplaced_manifests(repo: Repo) -> list[tuple[Path, Path, str]]:
 
 
 def _relative_locators(repo: Repo) -> list[tuple[str, dict, dict]]:
-    """Objects whose locator holds a relative local path: `(key, old, new)`.
+    """Objects whose locator holds a relative local path, or one starting
+    with `~`: `(key, old, new)`.
 
     Before v4 a relative path was stored as typed and resolved against
     whatever directory each later command ran in. The only directory the
     committed manifest can be said to mean is the dataset root, so that is
-    what the path is resolved against here.
+    what the path is resolved against here. 0.1.0b3 also stored DuckLake's
+    `metadata` as typed (`ducklake:rel.ducklake`, `ducklake:~/lake.ducklake`,
+    `sqlite:cat.db`), and a `~` for DuckDB to expand.
     """
     from tether.backends.base import absolutize_locator
 
@@ -581,9 +599,9 @@ def _plan_v4(repo: Repo, plan: Plan) -> None:
             Action(
                 "rewrite-locator",
                 key,
-                detail=f"resolve the relative path against the dataset root "
-                f"({changed}); a locator used to mean a different path from each "
-                "directory",
+                detail=f"make the local path absolute ({changed}): a relative "
+                "one against the dataset root, `~` from the home directory; the "
+                "locator meant a different path from each directory",
                 params={"migration": 4, "locator": new},
             )
         )
@@ -650,7 +668,308 @@ def _apply_v4(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The one migration: every alpha format -> CONFIG_VERSION
+# v5: what 0.1.0b3 recorded under identities and states that have changed
+# --------------------------------------------------------------------------- #
+_INDEXES = ("tether-touched.jsonl", "tether-created.jsonl")
+"""The indexes beside the repository lock that record store identities.
+`tether-pinned.jsonl` records pin ids only, which no identity change moves."""
+
+
+def _index_rewrites(repo: Repo) -> dict[str, tuple[list[dict], int]]:
+    """Index file -> (its records with today's identities, records changed).
+
+    0.1.0b3 recorded `file:///p` and the path as written (a trailing slash, a
+    symlinked parent); a store's identity is now its resolved path. A record
+    whose identity collapses onto an earlier one's is dropped: one store.
+    """
+    from tether.oplog import read_jsonl
+
+    shared = repo.vcs.shared_dir()
+    out: dict[str, tuple[list[dict], int]] = {}
+    for name in _INDEXES:
+        records = read_jsonl(shared / name)
+        kept: list[dict] = []
+        seen: set[str] = set()
+        changed = 0
+        for record in records:
+            new = dict(record)
+            kind = str(record.get("kind", ""))
+            if record.get("dataset_id") == repo.config.dataset_id and not (
+                repo._kind_gone(kind)
+            ):
+                try:
+                    backend = repo.backend_for(kind)
+                    new["identity"] = dict(
+                        backend.identity(dict(record.get("locator") or {}))
+                    )
+                except TetherError:
+                    pass  # an uninstalled extra: the record stays as it is
+            tag = canonical_bytes(
+                [new.get("dataset_id"), kind, new.get("identity")]
+            ).decode()
+            if tag in seen:
+                changed += 1
+                continue
+            seen.add(tag)
+            changed += new != record
+            kept.append(new)
+        if changed:
+            out[name] = (kept, changed)
+    return out
+
+
+def _old_file_identities(locator: dict) -> list[dict]:
+    """The identities earlier releases gave a `file` object: the URI as
+    written (0.1.0b3), and with only `file://` folded (before 0.1.0b4's
+    path normalization)."""
+    uri = str(locator.get("uri") or locator.get("path") or "")
+    out = [{"uri": uri}]
+    for prefix in ("file://localhost", "file://", "file:"):
+        if uri.startswith(prefix):
+            out.append({"uri": uri[len(prefix) :]})
+            break
+    return out
+
+
+def _listing_copies(repo: Repo) -> dict[str, tuple[str, str]]:
+    """New listing name -> (old name, text) for every recorded state whose
+    listing is stored under the name an earlier identity gave it.
+
+    A listing is named from `(kind, identity, state)`, so a `file` object's
+    identity change renamed every listing it has, in history too. The old
+    files stay put (history names them); a copy under the new name, in the
+    working tree, is what `diff` and `gc` look for now.
+    """
+    from tether.manifest import listing_name, listings_dir
+
+    rel = (repo._dataset_rel() / ".tether" / "listings").as_posix()
+    stored: dict[str, str] = {}
+    for _rev, files in repo.vcs.iter_history_files(rel):
+        for path, text in files.items():
+            stored.setdefault(path.rsplit("/", 1)[-1], text)
+    for path in listings_dir(repo.root).glob("*.jsonl"):
+        stored[path.name] = path.read_text(encoding="utf-8")
+    manifests = [
+        m for _rev, objects in repo._iter_history_objects() for m in objects.values()
+    ]
+    manifests += list(repo.objects.values())
+    out: dict[str, tuple[str, str]] = {}
+    for m in manifests:
+        if m.kind != "file" or m.state is None:
+            continue
+        backend = repo.backend_for(m.kind)
+        content = content_state(backend, m.state)
+        assert content is not None
+        new = listing_name(m.kind, backend.identity(m.locator), content)
+        if new in stored or new in out:
+            continue
+        for identity in _old_file_identities(m.locator):
+            old = listing_name(m.kind, identity, content)
+            if old in stored:
+                out[new] = (old, stored[old])
+                break
+    return out
+
+
+def _b3_dir_state(backend: Any, locator: dict, state: dict) -> dict | None:
+    """The state 0.1.0b4 gives a local directory 0.1.0b3 recorded, when its
+    files are as recorded and only the symlinks b3 left out tell the two
+    apart; else `None`.
+
+    0.1.0b3 skipped symlinks to directories and dangling ones; they are now
+    entries of their own (their targets), which changes the digest and count
+    of a directory holding any -- and an immutable one read as modified.
+    """
+    from tether.backends.file import _digest_pairs, _load_listing
+
+    now = backend.fingerprint(locator, None)
+    if now == state or now.get("type") != "dir":
+        return None
+    text = backend.listing(locator, now)
+    if text is None:
+        return None
+    files = {
+        p: row
+        for p, row in _load_listing(text).items()
+        if not row[0].startswith("symlink:")
+    }
+    if len(files) == int(now.get("count", 0)):
+        return None  # no symlinks: the directory changed
+    b3 = {
+        "type": "dir",
+        "count": len(files),
+        "size": now.get("size"),
+        "digest": _digest_pairs([(p, tok) for p, (tok, _) in files.items()]),
+    }
+    return dict(now) if b3 == state else None
+
+
+def _neon_xid_unchanged(recorded: str, now: str) -> bool:
+    """Whether a Neon branch that recorded `next_xid = recorded` (0.1.0b3)
+    has committed nothing since, given its `commit_xid` now: a later commit
+    took an xid at or above `recorded`. `<n` means no commit in the window
+    below `n`, which says nothing about an older `recorded`."""
+    from tether.experimental.backends.neon import _XID_WINDOW
+
+    if now.startswith("<"):
+        return int(recorded) >= int(now[1:]) - _XID_WINDOW
+    return int(now) < int(recorded)
+
+
+def _state_rewrites(repo: Repo, notes: list[str]) -> dict[str, tuple[dict, dict, str]]:
+    """Key -> (old state, new state, why) for working-tree states 0.1.0b3
+    recorded in a form 0.1.0b4 no longer produces, whose data is unchanged.
+
+    Each is read now, and rewritten only when what 0.1.0b3 would read now is
+    what it recorded; otherwise the object changed and commits as changed.
+    Unreadable stores are noted and left.
+    """
+    out: dict[str, tuple[dict, dict, str]] = {}
+    for key in sorted(repo.objects):
+        m = repo.objects[key]
+        state = m.state
+        if state is None or repo._kind_gone(m.kind):
+            continue
+        try:
+            if m.kind == "file" and state.get("type") == "dir":
+                backend = repo.backend_for(m.kind)
+                if (
+                    local_path(str(m.locator.get("uri") or m.locator.get("path")))
+                    is None
+                ):
+                    continue
+                new = _b3_dir_state(backend, m.locator, state)
+                if new is not None:
+                    out[key] = (state, new, "symlinks are entries now")
+            elif (
+                m.kind == "lance"
+                and state.get("branch") not in (None, "main")
+                and "branch_id" not in state
+            ):
+                backend = repo.backend_for(m.kind)
+                now = backend.fingerprint(m.locator, str(state["branch"]))
+                bare = {k: v for k, v in now.items() if k != "branch_id"}
+                if "branch_id" in now and bare == state:
+                    out[key] = (state, dict(now), "states off main carry the branch id")
+            elif m.kind == "neon" and "next_xid" in state and "commit_xid" not in state:
+                backend = repo.backend_for(m.kind)
+                timeline = str(state.get("timeline") or state.get("branch") or "")
+                source = str(m.locator.get("branch", "main"))
+                now = backend.fingerprint(
+                    m.locator, None if timeline == source else timeline
+                )
+                if now.get("branch") == state.get("branch") and _neon_xid_unchanged(
+                    str(state["next_xid"]), str(now["commit_xid"])
+                ):
+                    new = {k: v for k, v in state.items() if k != "next_xid"}
+                    new["commit_xid"] = now["commit_xid"]
+                    out[key] = (state, new, "next_xid became commit_xid")
+        except (TetherError, ValueError) as exc:  # ValueError: an xid that is no number
+            notes.append(
+                f"{key}: could not read it to carry its {m.kind} state forward "
+                f"({exc}); it reads as changed once, and its next commit pins it anew"
+            )
+    return out
+
+
+def _plan_v5(repo: Repo, plan: Plan) -> None:
+    for name, (_records, changed) in sorted(_index_rewrites(repo).items()):
+        plan.actions.append(
+            Action(
+                "rewrite-index",
+                target=name,
+                detail=f"{changed} record(s) take the identity their store has now "
+                "(one spelling per local path: `file://`, trailing slashes and "
+                "symlinks resolved), so `gc --delete-stores` sees the stores "
+                "manifests name as in use",
+                params={"migration": 5},
+            )
+        )
+    for new, (old, _text) in sorted(_listing_copies(repo).items()):
+        plan.actions.append(
+            Action(
+                "copy-listing",
+                target=new,
+                detail=f"listing {old} under the name its object's identity gives "
+                "it now, so `diff` finds it and `gc` keeps it",
+                params={"migration": 5, "old": old},
+            )
+        )
+    notes: list[str] = []
+    for key, (old, new, why) in _state_rewrites(repo, notes).items():
+        plan.actions.append(
+            Action(
+                "rewrite-state",
+                key,
+                repo.objects[key].kind,
+                detail=f"{why}; the data is unchanged, so the state it would read "
+                "now is recorded in place of the old form (and in workspace.toml)",
+                params={"migration": 5, "old": old, "new": new},
+            )
+        )
+    plan.notes.extend(notes)
+    if not any(a.params.get("migration") == 5 for a in plan.actions):
+        plan.notes.append(
+            "0.1.0b3 left nothing under an old identity or state: only the version "
+            "changes (which also stops a 0.1.0b3 from opening the dataset)"
+        )
+
+
+def _apply_v5(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
+    from tether.manifest import (
+        listing_name,
+        write_listing,
+        write_object,
+        write_workspace,
+    )
+
+    mine = [a for a in plan.actions if a.params.get("migration") == 5]
+    shared = repo.vcs.shared_dir()
+    rewrites = _index_rewrites(repo)
+    for a in mine:
+        if a.op == "rewrite-index" and a.target in rewrites:
+            records, changed = rewrites[a.target]
+            path = shared / a.target
+            tmp = path.with_suffix(".upgrade.tmp")
+            tmp.write_text(
+                "".join(json.dumps(r, default=str) + "\n" for r in records),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+            report.rewritten_indexes[a.target] = changed
+    copies = _listing_copies(repo)
+    for a in mine:
+        if a.op == "copy-listing" and a.target in copies:
+            write_listing(repo.root, a.target, copies[a.target][1])
+            report.copied_listings.append(a.target)
+    tables = ("base_states", "fork_points", "pending_resets", "last_snapshot")
+    for a in mine:
+        if a.op != "rewrite-state":
+            continue
+        m = repo.objects.get(a.key)
+        old, new = dict(a.params["old"]), dict(a.params["new"])
+        if m is None or m.state != old:
+            continue  # changed since the plan: it commits as changed
+        backend = repo.backend_for(m.kind)
+        updated = dataclasses.replace(m, state=new)
+        write_object(repo.root, updated)
+        repo.objects[a.key] = updated
+        text = backend.listing(m.locator, new)
+        if text is not None:
+            content = content_state(backend, new)
+            assert content is not None
+            name = listing_name(m.kind, backend.identity(m.locator), content)
+            write_listing(repo.root, name, text)
+        for table in tables:
+            states: dict[str, dict] = getattr(repo.workspace, table)
+            if states.get(a.key) == old:
+                states[a.key] = new
+        report.rewritten_manifests.append(a.key)
+    write_workspace(repo.root, repo.workspace)
+
+
+# --------------------------------------------------------------------------- #
+# The one migration: every older format -> CONFIG_VERSION
 # --------------------------------------------------------------------------- #
 def _needs_namespacing(repo: Repo) -> bool:
     """Pins or working branches in the pre-dataset-id format, or no id at all."""
@@ -685,34 +1004,53 @@ def _needs_manifest_layout(repo: Repo) -> bool:
     return bool(_misplaced_manifests(repo) or _relative_locators(repo))
 
 
-_PARTS: list[
-    tuple[
-        str,
-        Callable[[Repo], bool],
-        Callable[[Repo, Plan], None],
-        Callable[[Repo, Plan, UpgradeReport], None],
-    ]
-] = [
-    ("dataset-namespaced refs", _needs_namespacing, _plan_v2, _apply_v2),
-    (
+@dataclass(frozen=True)
+class _Part:
+    title: str
+    before: int
+    """Only a dataset recorded below this version is considered: the
+    conditions an alpha part tests for (a directory state, say) are also
+    what a later format looks like."""
+    needs: Callable[[Repo], bool]
+    plan: Callable[[Repo, Plan], None]
+    apply: Callable[[Repo, Plan, UpgradeReport], None]
+
+
+_PARTS: list[_Part] = [
+    _Part("dataset-namespaced refs", 4, _needs_namespacing, _plan_v2, _apply_v2),
+    _Part(
         "content-hashed file states; no write policy",
+        4,
         _needs_content_hashes,
         _plan_v3,
         _apply_v3,
     ),
-    (
+    _Part(
         "one manifest file per key; absolute local paths",
+        5,
         _needs_manifest_layout,
         _plan_v4,
         _apply_v4,
     ),
+    _Part(
+        "0.1.0b3 identities and states",
+        5,
+        lambda repo: True,
+        _plan_v5,
+        _apply_v5,
+    ),
 ]
-"""What an alpha dataset may need, oldest first; each part runs only when the
-dataset shows the condition. Append here when the format changes."""
+"""What an older dataset may need, oldest first; each part runs only when the
+dataset is older than its `before` and shows the condition. Append here when
+the format changes."""
 
 
 def _plan_all(repo: Repo, plan: Plan) -> None:
-    parts = [(title, planner) for title, needs, planner, _ in _PARTS if needs(repo)]
+    parts = [
+        (p.title, p.plan)
+        for p in _PARTS
+        if repo.config.version < p.before and p.needs(repo)
+    ]
     plan.context["parts"] = [title for title, _ in parts]
     for _title, planner in parts:
         planner(repo, plan)
@@ -739,9 +1077,9 @@ def _apply_all(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
     from tether.manifest import write_config
 
     chosen = set(plan.context.get("parts") or [])
-    for title, _needs, _planner, applier in _PARTS:
-        if title in chosen:
-            applier(repo, plan, report)
+    for part in _PARTS:
+        if part.title in chosen:
+            part.apply(repo, plan, report)
     repo.config.version = CONFIG_VERSION
     write_config(repo.root, repo.config)
 
@@ -749,10 +1087,11 @@ def _apply_all(repo: Repo, plan: Plan, report: UpgradeReport) -> None:
 MIGRATIONS: list[Migration] = [
     Migration(
         version=CONFIG_VERSION,
-        title="Bring an alpha dataset to the current format",
+        title="Bring an older dataset to the current format",
         plan=_plan_all,
         apply=_apply_all,
     ),
 ]
-"""Every migration, oldest first. One step covers every alpha format; when the
-format changes again, add a part to `_PARTS` (and bump `CONFIG_VERSION`)."""
+"""Every migration, oldest first. One step covers every alpha and beta
+format; when the format changes again, add a part to `_PARTS` (and bump
+`CONFIG_VERSION`)."""

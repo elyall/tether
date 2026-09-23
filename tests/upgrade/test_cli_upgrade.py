@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from tether.backends.memory import default_store
 from tether.cli import app
+from tether.manifest import CONFIG_VERSION
 
 runner = CliRunner()
 
@@ -32,9 +33,9 @@ def test_cli_upgrade(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = runner.invoke(app, ["upgrade", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
-    assert payload["from_version"] == 1 and payload["to_version"] == 4
+    assert payload["from_version"] == 1 and payload["to_version"] == CONFIG_VERSION
     assert f"tether.{pin1}" in payload["renamed_pins"] and payload["vcs_commit"]
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["upgrade"])
-    assert r.exit_code == 0 and "already at version 4" in r.output
+    assert r.exit_code == 0 and f"already at version {CONFIG_VERSION}" in r.output

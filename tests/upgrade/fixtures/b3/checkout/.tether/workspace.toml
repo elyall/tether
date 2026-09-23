@@ -1,0 +1,53 @@
+workspace_id = "3fec070c993d4d7da13f88817d4362c1"
+bookmark = "feat"
+last_snapshot_at = "2026-09-23T22:31:27.228892+00:00"
+
+[working_refs]
+cells = "tether.ws.22620a34.feat"
+
+[pending_forks]
+ice = "tether.ws.22620a34.feat"
+
+[fork_points.cells]
+branch = "main"
+version = 1
+
+[base_states.cells]
+branch = "tether.ws.22620a34.feat"
+version = 2
+
+[base_states.ice]
+snapshot_id = "EE99Y3JVR4R7TNCR8Y7G"
+
+[last_snapshot.cells]
+branch = "tether.ws.22620a34.feat"
+version = 2
+
+[last_snapshot.ice]
+snapshot_id = "EE99Y3JVR4R7TNCR8Y7G"
+
+[last_snapshot.lake]
+snapshot_id = 1
+snapshot_time_us = 1790202686851181
+
+[last_snapshot.lake_rel]
+snapshot_id = 1
+snapshot_time_us = 1790202686889911
+
+[last_snapshot.made]
+type = "dir"
+count = 0
+size = 0
+digest = "cae66941d9efbd404e4d88758ea67670"
+
+[last_snapshot.plates]
+type = "dir"
+count = 2
+size = 4
+digest = "2cf0d62d6c7722a06b84137165a90ad4"
+
+[last_snapshot.raw]
+type = "dir"
+count = 1
+size = 1
+digest = "192e1d9bf8e70ba76ee9515fe04f1019"

@@ -1,0 +1,276 @@
+blob
+mark :1
+data 54
+/workspace.toml
+/ops.jsonl
+/cache
+/lock
+/secrets.toml
+
+blob
+mark :2
+data 0
+
+blob
+mark :3
+data 91
+{"p":"x.bin","k":"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881","s":1}
+
+blob
+mark :4
+data 186
+{"p":"a.csv","k":"87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7","s":2}
+{"p":"sub/c.csv","k":"a3a5e715f0cc574a73c3f9bebb6bc24f32ffd5b67b387244c2c909da779a1478","s":2}
+
+blob
+mark :5
+data 377
+key = "cells"
+kind = "lance"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.029595+00:00"
+
+[locator]
+uri = "/private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores-link/cells.lance/"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+branch = "main"
+version = 1
+
+[pin]
+id = "22620a34.f2af7772243443fb"
+ref = "tether.22620a34.f2af7772243443fb"
+
+blob
+mark :6
+data 389
+key = "ice"
+kind = "icechunk"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.030187+00:00"
+
+[locator]
+uri = "file:///private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores/ice.icechunk"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+snapshot_id = "MBFT7AA7BPWF3J7W0KT0"
+
+[pin]
+id = "22620a34.9d63c47ebcdce8e8"
+ref = "tether.22620a34.9d63c47ebcdce8e8"
+
+blob
+mark :7
+data 253
+key = "lake"
+kind = "ducklake"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.030586+00:00"
+
+[locator]
+metadata = "ducklake:~/lake.ducklake"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+snapshot_id = 1
+snapshot_time_us = 1790202686851181
+
+blob
+mark :8
+data 254
+key = "lake_rel"
+kind = "ducklake"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.030927+00:00"
+
+[locator]
+metadata = "ducklake:rel.ducklake"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+snapshot_id = 1
+snapshot_time_us = 1790202686889911
+
+blob
+mark :9
+data 350
+key = "made"
+kind = "file"
+recoverable = false
+origin = "created"
+captured_at = "2026-09-23T22:31:27.031248+00:00"
+
+[locator]
+uri = "/private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores/made/"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+type = "dir"
+count = 0
+size = 0
+digest = "cae66941d9efbd404e4d88758ea67670"
+
+blob
+mark :10
+data 334
+key = "plates"
+kind = "file"
+recoverable = false
+captured_at = "2026-09-23T22:31:27.031822+00:00"
+
+[locator]
+uri = "/private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores/plates"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+type = "dir"
+count = 2
+size = 4
+digest = "2cf0d62d6c7722a06b84137165a90ad4"
+
+blob
+mark :11
+data 336
+key = "raw"
+kind = "file"
+recoverable = false
+captured_at = "2026-09-23T22:31:27.032323+00:00"
+
+[locator]
+uri = "file:///private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores/raw/"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+type = "dir"
+count = 1
+size = 1
+digest = "192e1d9bf8e70ba76ee9515fe04f1019"
+
+blob
+mark :12
+data 168
+[tether]
+version = 4
+
+[dataset]
+id = "22620a34"
+
+[snapshot]
+auto = false
+
+[verify]
+on_status = false
+
+[new]
+fork = "lazy"
+
+[defaults]
+file = "immutable"
+pin = "native"
+
+reset refs/heads/main
+commit refs/heads/main
+mark :13
+author tether b3 <b3@tether.dev> 1789732800 +0000
+committer tether b3 <b3@tether.dev> 1789732800 +0000
+data 9
+baseline
+M 100644 :1 .tether/.gitignore
+M 100644 :2 .tether/listings/3f7fa80312b8aba07403.jsonl
+M 100644 :3 .tether/listings/90cd7729729dc7c62671.jsonl
+M 100644 :4 .tether/listings/c7d2c6d4226e5e0e95a0.jsonl
+M 100644 :5 .tether/objects/cells.toml
+M 100644 :6 .tether/objects/ice.toml
+M 100644 :7 .tether/objects/lake.toml
+M 100644 :8 .tether/objects/lake_rel.toml
+M 100644 :9 .tether/objects/made.toml
+M 100644 :10 .tether/objects/plates.toml
+M 100644 :11 .tether/objects/raw.toml
+M 100644 :12 tether.toml
+
+blob
+mark :14
+data 389
+key = "ice"
+kind = "icechunk"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.113007+00:00"
+
+[locator]
+uri = "file:///private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores/ice.icechunk"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+snapshot_id = "EE99Y3JVR4R7TNCR8Y7G"
+
+[pin]
+id = "22620a34.c074154c6423cc1a"
+ref = "tether.22620a34.c074154c6423cc1a"
+
+commit refs/heads/main
+mark :15
+author tether b3 <b3@tether.dev> 1789732800 +0000
+committer tether b3 <b3@tether.dev> 1789732800 +0000
+data 7
+ice v1
+from :13
+M 100644 :14 .tether/objects/ice.toml
+
+blob
+mark :16
+data 396
+key = "cells"
+kind = "lance"
+recoverable = true
+captured_at = "2026-09-23T22:31:27.259030+00:00"
+
+[locator]
+uri = "/private/var/folders/vs/9qn7_s453s1f0byn9jflwsr80000gn/T/tmpiqb6ogih/root/stores-link/cells.lance/"
+
+[policy]
+file = "immutable"
+pin = "native"
+
+[state]
+branch = "tether.ws.22620a34.feat"
+version = 2
+
+[pin]
+id = "22620a34.44cbe5e3ec2f89ce"
+ref = "tether.22620a34.44cbe5e3ec2f89ce"
+
+commit refs/heads/feat
+mark :17
+author tether b3 <b3@tether.dev> 1789732800 +0000
+committer tether b3 <b3@tether.dev> 1789732800 +0000
+data 14
+cells on feat
+from :15
+M 100644 :16 .tether/objects/cells.toml
+

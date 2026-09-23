@@ -11,6 +11,7 @@ from tether.backends.base import VerifyStatus
 from tether.backends.memory import default_store
 from tether.errors import ConfigError, StalePlanError, TetherError
 from tether.manifest import (
+    CONFIG_VERSION,
     ObjectManifest,
     Pin,
     Policy,
@@ -120,7 +121,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     plan = repo.plan_upgrade()
     ops = sorted((a.op, a.target) for a in plan.actions)
     ds = plan.context["dataset_id"]
-    assert plan.context["from"] == 1 and plan.context["to"] == 4
+    assert plan.context["from"] == 1 and plan.context["to"] == CONFIG_VERSION
     assert [a.op for a in plan.actions].count("rename-pin") == 2
     assert [a.op for a in plan.actions].count("rename-branch") == 2
     # jj's working-copy commit carries the manifests too (rewritten in place).
@@ -141,7 +142,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     report = repo.apply_upgrade(plan)
     assert not report.failed, report.failed
-    assert report.from_version == 1 and report.to_version == 4
+    assert report.from_version == 1 and report.to_version == CONFIG_VERSION
     assert report.vcs_commit
     assert len(report.rewritten_commits) == 2  # the working copy is not "rewritten"
     assert set(report.renamed_pins) == {f"tether.{pin1}", f"tether.{pin2}"}
@@ -167,7 +168,7 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
 
     # The dataset opens normally now, at version 2 with the planned id.
     repo = Repo.find(vcs_root)
-    assert repo.config.version == 4 and repo.config.dataset_id == ds
+    assert repo.config.version == CONFIG_VERSION and repo.config.dataset_id == ds
     assert read_config(vcs_root).dataset_id == ds
     assert repo.objects["db"].pin is not None
     assert repo.objects["db"].pin.ref == new2
@@ -200,7 +201,9 @@ def test_upgrade_v1_to_v2_renames_refs_and_rewrites_history(vcs_root: Path) -> N
     # Logged, not undoable, and a second upgrade has nothing to do.
     assert repo.ops()[0].command == "upgrade" and not repo.ops()[0].undoable
     again = repo.plan_upgrade()
-    assert again.is_empty and any("already at version 4" in n for n in again.notes)
+    assert again.is_empty and any(
+        f"already at version {CONFIG_VERSION}" in n for n in again.notes
+    )
     with pytest.raises(StalePlanError):
         repo.apply_upgrade(plan)  # made for version 1
 
@@ -259,7 +262,7 @@ def test_upgrade_stops_before_rewriting_history_when_a_rename_fails(
     assert plan2.context["dataset_id"] == plan.context["dataset_id"]  # same namespace
     assert any(f"pin tether.{pin1} is not in the store" in n for n in plan2.notes)
     report = repo.apply_upgrade(plan2)
-    assert not report.failed and report.to_version == 4
+    assert not report.failed and report.to_version == CONFIG_VERSION
     assert f"tether.{pin2}" not in sys_.tags
     assert set(report.renamed_pins) == {f"tether.{pin2}"}  # pin1 was done last time
     repo = Repo.find(vcs_root)
@@ -365,7 +368,7 @@ def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
         Repo.find(vcs_root)
     repo = Repo.find(vcs_root, allow_outdated=True)
     plan = repo.plan_upgrade()
-    assert plan.context["from"] == 2 and plan.context["to"] == 4
+    assert plan.context["from"] == 2 and plan.context["to"] == CONFIG_VERSION
     ops = [(a.op, a.key) for a in plan.actions]
     assert ("refingerprint", "raw/single") in ops and (
         "refingerprint",
@@ -377,7 +380,7 @@ def test_upgrade_v2_to_v3_rehashes_local_file_states(vcs_root: Path) -> None:
     )
 
     report = repo.apply_upgrade(plan)
-    assert not report.failed and report.to_version == 4
+    assert not report.failed and report.to_version == CONFIG_VERSION
     assert sorted(report.refingerprinted) == ["raw/dir", "raw/single"]
     assert report.vcs_commit
 
@@ -440,7 +443,10 @@ def test_upgrade_v3_drops_the_write_policy(vcs_root: Path) -> None:
     assert repo.workspace.bookmark is None
     assert any("trunk bookmark" in n for n in plan.notes)
     report = repo.apply_upgrade(plan)
-    assert report.rewritten_manifests == ["db/prod"] and report.to_version == 4
+    assert (
+        report.rewritten_manifests == ["db/prod"]
+        and report.to_version == CONFIG_VERSION
+    )
     repo = Repo.find(vcs_root)
     assert "write" not in (vcs_root / ".tether/objects/db/prod.toml").read_text()
     assert repo.objects["db/prod"].policy == Policy()
@@ -454,6 +460,129 @@ def test_upgrade_v3_drops_the_write_policy(vcs_root: Path) -> None:
 V3_CONFIG = (
     V2_CONFIG.replace("version = 2", "version = 3") + '\n[vcs]\ntrunk = "main"\n'
 )
+
+
+def test_upgrade_carries_b3_states_forward_only_while_the_data_is_unchanged(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0.1.0b3 recorded directories without their directory and dangling
+    symlinks, Lance states off `main` without `branch_id`, and Neon's
+    `next_xid`; 0.1.0b4 reads each differently, so an untouched object read
+    as modified (an immutable directory refused `status`) and re-pinned. The
+    upgrade records the form 0.1.0b4 reads -- only where what 0.1.0b3 would
+    read now is what it recorded, so a real change still shows."""
+    import hashlib
+
+    import lance
+    import pyarrow as pa
+
+    from tether.backends.file import _digest_pairs
+    from tether.backends.lance import LanceBackend
+    from tether.experimental.backends.neon import NeonBackend
+    from tether.manifest import read_workspace, write_config
+
+    stores = tmp_path_factory.mktemp("stores")
+    repo = Repo.init(vcs_root)
+    objects: dict[str, tuple[str, dict, dict]] = {}
+
+    def b3_dir(path: Path) -> dict:
+        files = [p for p in path.rglob("*") if p.is_file() and not p.is_symlink()]
+        files = [p for p in files if not any(q.is_symlink() for q in p.parents)]
+        pairs = [
+            (p.relative_to(path).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in files
+        ]
+        size = sum(p.stat().st_size for p in files)
+        return {
+            "type": "dir",
+            "count": len(pairs),
+            "size": size,
+            "digest": _digest_pairs(pairs),
+        }
+
+    for name, links in (("same", True), ("edited", True), ("plain", False)):
+        d = stores / name
+        (d / "sub").mkdir(parents=True)
+        (d / "a.csv").write_text("a\n")
+        (d / "sub" / "c.csv").write_text("c\n")
+        if links:
+            (d / "latest").symlink_to("sub")
+            (d / "gone").symlink_to("missing.csv")
+        objects[name] = ("file", {"uri": str(d)}, b3_dir(d))
+    (stores / "edited" / "a.csv").write_text("edited\n")  # after 0.1.0b3 read it
+
+    lb = LanceBackend()
+    for name, moved in (("lance_same", False), ("lance_moved", True)):
+        uri = str(stores / f"{name}.lance")
+        lance.write_dataset(pa.table({"a": [0]}), uri)
+        loc = {"uri": uri}
+        branch = lb.fork(loc, lb.fingerprint(loc, None), "tether.ws.0a1b2c3d.feat")
+        lance.write_dataset(
+            pa.table({"a": [1]}),
+            lance.dataset(uri).checkout_version((branch, None)),
+            mode="append",
+        )
+        state = {
+            k: v for k, v in lb.fingerprint(loc, branch).items() if k != "branch_id"
+        }
+        if moved:  # a write after the commit
+            lance.write_dataset(
+                pa.table({"a": [2]}),
+                lance.dataset(uri).checkout_version((branch, None)),
+                mode="append",
+            )
+        objects[name] = ("lance", loc, state)
+
+    neon_now = {
+        "neon_same": {"lsn": "0/2", "commit_xid": "742", "branch": "main"},
+        "neon_moved": {"lsn": "0/3", "commit_xid": "751", "branch": "main"},
+        "neon_window": {"lsn": "0/2", "commit_xid": "<1000", "branch": "main"},
+        "neon_elsewhere": {"lsn": "0/2", "commit_xid": "742", "branch": "other"},
+    }
+    for name in neon_now:
+        loc = {"project_id": name, "database": "db", "role": "r", "branch": "main"}
+        objects[name] = (
+            "neon",
+            loc,
+            {"lsn": "0/1", "next_xid": "750", "branch": "main"},
+        )
+    monkeypatch.setattr(
+        NeonBackend,
+        "fingerprint",
+        lambda self, locator, ref: dict(neon_now[locator["project_id"]]),
+    )
+
+    ws = repo.workspace
+    for key, (kind, loc, state) in objects.items():
+        write_object(
+            vcs_root, ObjectManifest(key=key, kind=kind, locator=loc, state=state)
+        )
+        ws.base_states[key] = dict(state)
+    write_workspace(vcs_root, ws)
+    config = read_config(vcs_root)
+    config.version = 4
+    write_config(vcs_root, config)
+    repo.vcs.commit(repo._vcs_paths(), "as 0.1.0b3 recorded them")
+
+    repo = Repo.find(vcs_root, allow_outdated=True)
+    plan = repo.plan_upgrade()
+    carried = {a.key: a.params["new"] for a in plan.actions if a.op == "rewrite-state"}
+    assert set(carried) == {"same", "lance_same", "neon_same", "neon_window"}
+    report = repo.apply_upgrade(plan)
+    assert not report.failed
+    repo = Repo.find(vcs_root)
+    ws = read_workspace(vcs_root)
+    for key, (_kind, _loc, recorded) in objects.items():
+        state = repo.objects[key].state
+        assert state == carried.get(key, recorded), key
+        assert ws.base_states[key] == state, key
+    fb = repo.backend_for("file")
+    assert repo.objects["same"].state == fb.fingerprint(objects["same"][1], None)
+    assert carried["same"]["count"] == 4  # the two files and the two links
+    assert carried["neon_same"] == {"lsn": "0/1", "commit_xid": "742", "branch": "main"}
+    assert "branch_id" in carried["lance_same"]
 
 
 def test_upgrade_v4_moves_dotted_keys_to_their_own_manifest_file(
@@ -494,7 +623,9 @@ def test_upgrade_v4_moves_dotted_keys_to_their_own_manifest_file(
     assert (vcs_root / ".tether" / "objects" / "features.v2.toml").exists()
 
     repo = Repo.find(vcs_root)
-    assert repo.config.version == 4 and set(repo.objects) == {"features.v2"}
+    assert repo.config.version == CONFIG_VERSION and set(repo.objects) == {
+        "features.v2"
+    }
     # History at the old path still reads as the same key.
     assert set(repo._objects_at(old_commit)) == {"features.v2"}
     # And `features` is now a different object with its own file.
@@ -631,7 +762,6 @@ def test_any_alpha_version_upgrades_in_one_step(vcs_root: Path, start: int) -> N
     CONFIG_VERSION (no intermediate `version = 2/3`), one VCS commit. The
     parts run on what the dataset shows, so a dataset whose manifests already
     have the current shape gets only the version change."""
-    from tether.manifest import CONFIG_VERSION
     from tether.upgrade import pending
 
     if start == 1:

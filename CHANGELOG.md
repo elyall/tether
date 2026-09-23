@@ -51,8 +51,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could not do everything) exits 3; 2 is Click's usage error.
 - `--help` keeps bracketed text such as `[experimental]`; `add --kind` lists
   each kind with its maturity.
-- Lance objects on a working branch and every Neon object read as changed
-  once after upgrading: their state keys changed. No migration.
 
 - A plan must carry the preconditions its command requires; one saved by an
   older tether, or edited, is refused as stale. Every plan binds to the
@@ -85,11 +83,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or shrunk the history `gc` walks.
 - `file`, `icechunk`, `lance`, `delta`: every spelling of a local path --
   `/p`, `/p/`, `file:///p`, a path through a symlinked parent such as macOS's
-  `/tmp` -- is one store to pin ids, listings and `gc`. No migration: pin ids
-  of objects registered under another spelling change.
+  `/tmp` -- is one store to pin ids, listings and `gc`. New pins of an
+  object registered under another spelling get new ids.
 
 - `neon`: pins are unprotected unless `protected_pins = true`; Free has no
   protected branches, and paid plans allow a few.
+- The dataset format is version 5: run `tether upgrade` once on a 0.1.0b3
+  dataset. It gives the stores in `tether-touched.jsonl` and
+  `tether-created.jsonl` their new identities, stores listings again under
+  their new names, records Lance (`branch_id`), Neon (`commit_xid`) and
+  directory (symlinks) states in the new form where the data is unchanged,
+  and makes DuckLake paths absolute. 0.1.0b3 refuses a version 5 dataset,
+  so clones on the two releases cannot take turns.
 
 ### Removed
 

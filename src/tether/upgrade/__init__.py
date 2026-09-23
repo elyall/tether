@@ -1,7 +1,8 @@
-"""Bring an alpha-format dataset to the current `tether.toml` version.
+"""Bring an older dataset to the current `tether.toml` version.
 
 **Removed at 0.1.0.** Every dataset made by a 0.1.0aN release can be brought
-to the 0.1.0b1 format by `tether upgrade` from any 0.1.0 beta. The first
+to the 0.1.0b1 format by `tether upgrade` from any 0.1.0 beta, and one made by
+0.1.0b1-b3 (version 4) to 0.1.0b4's (version 5) from 0.1.0b4 on. The first
 non-pre-release drops this package: `CONFIG_VERSION` stays where the last
 beta left it, and a dataset whose `[tether] version` is older fails at open
 with :func:`outdated_message` pointing at the last beta. A user on an alpha
@@ -84,7 +85,9 @@ def plan_upgrade(repo: Repo, *, ignore_immutable: bool = False) -> Plan:
     Runs the plan step of every pending `tether.upgrade.migrations.Migration`, in
     order. Actions: `rename-pin` / `rename-branch` (native refs in the
     stores), `rewrite-history` (historical manifests get the new names),
-    `vcs-commit`. Nothing is written.
+    `rewrite-index` / `copy-listing` / `rewrite-state` (what 0.1.0b3 recorded
+    under an identity or state that changed), `vcs-commit`. Nothing is
+    written.
 
     Args:
         ignore_immutable: Let the history rewrite touch commits jj marks
@@ -117,7 +120,7 @@ def plan_upgrade(repo: Repo, *, ignore_immutable: bool = False) -> Plan:
 def apply_upgrade(repo: Repo, plan: Plan) -> UpgradeReport:
     """Execute a plan from `plan_upgrade`.
 
-    One migration brings any alpha format to the current version; its
+    One migration brings any older format to the current version; its
     parts run on what the dataset shows, `tether.toml` records the version
     once at the end, and one VCS commit lands it. A part that renames
     native refs fails *closed*: if any store rename fails, it stops before
@@ -167,6 +170,7 @@ def apply_upgrade(repo: Repo, plan: Plan) -> UpgradeReport:
             report.vcs_commit = repo.vcs.commit(
                 repo._vcs_paths(),
                 f"tether upgrade: v{report.from_version} -> v{report.to_version}",
+                advance=repo.workspace.bookmark,
             )
         repo._log_op("upgrade", plan=plan, result=report_dict(report))
         return report

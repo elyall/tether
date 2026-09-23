@@ -1550,6 +1550,8 @@ def upgrade(
                 "rewritten_commits": report.rewritten_commits,
                 "refingerprinted": report.refingerprinted,
                 "rewritten_manifests": report.rewritten_manifests,
+                "rewritten_indexes": report.rewritten_indexes,
+                "copied_listings": report.copied_listings,
                 "failed": report.failed,
                 "vcs_commit": report.vcs_commit,
             },
@@ -1573,6 +1575,12 @@ def upgrade(
             typer.echo(f"  rehashed {key}")
         for key in report.rewritten_manifests:
             typer.echo(f"  rewrote  {key}")
+        for name, n in sorted(report.rewritten_indexes.items()):
+            typer.echo(f"  index   {name}: {n} record(s)")
+        if report.copied_listings:
+            typer.echo(
+                f"  listings {len(report.copied_listings)} stored under new names"
+            )
         if report.vcs_commit:
             typer.echo(f"  commit  {report.vcs_commit[:12]}")
         for target, why in sorted(report.failed.items()):
