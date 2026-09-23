@@ -88,6 +88,7 @@ REQUIRED_ACTION_PRECONDITIONS: dict[str, dict[str, tuple[frozenset[str], ...]]] 
     "new": {
         "fork": (frozenset({"ref_head", "ref_absent"}),),
         "reuse": (frozenset({"ref_head"}),),
+        "adopt": (frozenset({"ref_head"}),),
     },
     "restore": {"fork": (frozenset({"ref_head", "ref_absent"}),)},
     "promote": {
@@ -157,8 +158,8 @@ class Action:
     """One store-writing step in a `Plan`."""
 
     op: str
-    """`pin`, `record`, `fork`, `defer-fork`, `reuse`, `trunk`, `refuse`, `unpin`,
-    `keep-pin`, `delete-branch`, `keep-branch`, `forget-working-ref`,
+    """`pin`, `record`, `fork`, `defer-fork`, `reuse`, `adopt`, `trunk`, `refuse`,
+    `unpin`, `keep-pin`, `delete-branch`, `keep-branch`, `forget-working-ref`,
     `delete-listing`, `fast-forward`, `merge`, `add`, `update`, `remove`,
     `upsert`, `repin`, `refork`, or `vcs-commit`."""
     key: str = ""
@@ -226,6 +227,7 @@ class Plan:
             "defer-fork",
             "refuse",
             "reuse",
+            "adopt",
             "hold",
             "share",
         }

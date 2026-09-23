@@ -347,20 +347,13 @@ class ForkOps(RepoCore):
                     self._same(m.kind, head, k) for k in recorded if k is not None
                 )
                 if unpinned and not discard:
-                    plan.actions.append(
-                        Action(
-                            "refuse",
-                            key,
-                            m.kind,
-                            target=existing,
-                            detail=(
-                                f"{existing} has writes since this workspace last "
-                                f"committed ({short_state(head)}); commit them, or "
-                                "pass --discard to throw them away"
-                            ),
-                            params=params,
-                        )
+                    assert head is not None
+                    adopt = self._adopt_or_refuse(
+                        key, m, existing, head, bookmark, shared=shared
                     )
+                    if adopt.op == "refuse":
+                        adopt.params = params
+                    plan.actions.append(adopt)
                     continue
                 if unpinned:
                     detail += f", discarding its writes ({short_state(head)})"
@@ -384,6 +377,91 @@ class ForkOps(RepoCore):
                     )
                 )
         return self._with_new_preconditions(plan)
+
+    def _whose_writes(self, key: str, branch: str, bookmark: str) -> tuple[bool, str]:
+        """Whether writes on `branch` no commit pins can only be this
+        workspace's -- it writes through the branch and no other live
+        checkout works on the bookmark -- and a phrase saying whose they are.
+        A branch it never wrote through holds a peer's writes (a checkout
+        joining the bookmark, a clone that shares no lock)."""
+        ours = self.workspace.working_refs.get(key) == branch
+        holders = self.bookmark_holders(bookmark)
+        if ours and not holders:
+            return True, "this workspace's own"
+        if ours:
+            return (
+                False,
+                f"possibly {', '.join(holders)}'s, who also work on {bookmark}",
+            )
+        return False, "not this workspace's: another checkout or clone writes to it"
+
+    def _adopt_or_refuse(
+        self,
+        key: str,
+        m: ObjectManifest,
+        existing: str,
+        head: State,
+        bookmark: str,
+        *,
+        shared: bool,
+    ) -> Action:
+        """What `new` does with the bookmark's branch when it holds writes no
+        commit pins: whose they are decides the advice.
+
+        A branch this workspace never wrote through (not its working ref:
+        joining the bookmark, a fork still pending here) holds another
+        checkout's or clone's writes, and `--discard` would erase a peer's
+        work -- what a refused conditional move used to steer to. With
+        `shared` the branch is adopted as it is (`adopt`), whoever wrote it,
+        as long as it builds on what the bookmark's commit pins.
+        """
+        backend = self.backend_for(m.kind)
+        only_ours, writers = self._whose_writes(key, existing, bookmark)
+        ours = self.workspace.working_refs.get(key) == existing
+        builds = None
+        if m.state is not None:
+            try:
+                builds = backend.ancestor_of(m.locator, m.state, existing)
+            except TetherError:
+                builds = None
+        if shared and builds is not False:
+            return Action(
+                "adopt",
+                key,
+                m.kind,
+                target=existing,
+                detail=f"holds writes no commit pins ({short_state(head)}; "
+                f"{writers}); kept as it is and shared -- the next commit here "
+                "pins them too",
+                params={
+                    "head": head,
+                    "fork_point": (
+                        self.workspace.fork_points.get(key) if ours else None
+                    )
+                    or m.state,
+                },
+            )
+        if builds is False:
+            advice = (
+                f"they do not build on what {bookmark}'s commit pins "
+                f"({short_state(m.state)}), so it cannot be shared as it is; "
+                "--discard resets it onto the pin, throwing them away"
+            )
+        elif only_ours:
+            advice = "commit them, or pass --discard to throw them away"
+        else:
+            advice = (
+                "`--shared` works on the branch as it is, with them; --discard "
+                "would throw away work that is not yours"
+            )
+        return Action(
+            "refuse",
+            key,
+            m.kind,
+            target=existing,
+            detail=f"{existing} has writes since this workspace last committed "
+            f"({short_state(head)}; {writers}); {advice}",
+        )
 
     def _with_new_preconditions(self, plan: Plan) -> Plan:
         """What `apply_new` must find unchanged: the manifests at the target,
@@ -413,10 +491,10 @@ class ForkOps(RepoCore):
             if a.key not in self.objects:
                 continue
             locator = dict(self.objects[a.key].locator)
-            if a.op == "reuse":
+            if a.op in ("reuse", "adopt"):
                 plan.require(
                     "ref_head",
-                    a.params.get("then_state"),
+                    a.params.get("then_state" if a.op == "reuse" else "head"),
                     key=a.key,
                     backend=a.kind,
                     locator=locator,
@@ -517,6 +595,9 @@ class ForkOps(RepoCore):
                         if known is not None
                         else dict(a.params["then_state"])
                     )
+                elif a.op == "adopt":
+                    working_refs[a.key] = a.target
+                    reused[a.key] = dict(a.params["fork_point"])
 
             # The VCS has moved; before the first store write, make the
             # workspace agree with it. Every planned fork is recorded as
@@ -655,11 +736,26 @@ class ForkOps(RepoCore):
                 pre={"heads": {k: p.get("head") for k, p in reset.items()}},
             )
             if errors:
+                moved = sorted(
+                    k for k, e in errors.items() if isinstance(e, RefMovedError)
+                )
                 raise MultiObjectError(
                     f"could not fork working refs for {', '.join(sorted(errors))} "
-                    f"({len(forked)} of {len(forks)} forked and recorded; run `new` "
-                    "again -- it resets those branches too, so do not write to them "
-                    "first)",
+                    f"({len(forked)} of {len(forks)} forked and recorded"
+                    + (
+                        f"; {', '.join(moved)}'s branch moved since the plan -- "
+                        "another checkout or clone writes to it: `tether new "
+                        "--shared` works on it as it is, with those writes"
+                        if moved
+                        else ""
+                    )
+                    + (
+                        "; run `new` again for the rest -- it resets those "
+                        "branches too, so do not write to them first"
+                        if len(moved) < len(errors)
+                        else ""
+                    )
+                    + ")",
                     errors,
                 )
 
@@ -820,10 +916,9 @@ class ForkOps(RepoCore):
                     if agreed is None or not self._same(m.kind, head, agreed):
                         raise StaleWorkingCopyError(
                             f"branch {name} holds writes ({short_state(head)}) that "
-                            "`new` did not see; a writable open never resets a "
-                            "branch -- run `tether new` to decide (it refuses while "
-                            "the branch holds uncommitted writes; --discard throws "
-                            "them away)"
+                            "`new` did not see -- another checkout or clone writes to "
+                            "it; a writable open never resets a branch. `tether new "
+                            "--shared` works on it as it is, with those writes"
                         )
                     pre["heads"] = {key: head}
                     expected = head
@@ -837,8 +932,9 @@ class ForkOps(RepoCore):
                     self._end_op(op, result={"key": key, "failed": str(exc)})
                     raise StaleWorkingCopyError(
                         f"branch {name} was created by another checkout since it was "
-                        f"listed ({exc}); a writable open never resets a branch -- "
-                        "run `tether new` to decide"
+                        f"listed ({exc}), which may be writing to it; a writable open "
+                        "never resets a branch. `tether new --shared` works on it as "
+                        "it is, with those writes"
                     ) from exc
                 adopt(ref, [key, *siblings()])
                 write_workspace(self.root, self.workspace)
@@ -1034,6 +1130,9 @@ class ForkOps(RepoCore):
                     self._same(now.kind, head, k) for k in known if k is not None
                 )
                 if unpinned and not discard:
+                    only_ours, writers = self._whose_writes(
+                        key, name, str(self.workspace.bookmark)
+                    )
                     plan.actions.append(
                         Action(
                             "refuse",
@@ -1041,8 +1140,13 @@ class ForkOps(RepoCore):
                             now.kind,
                             target=name,
                             detail=f"{name} has writes since this workspace last "
-                            f"committed ({short_state(head)}); commit them, or pass "
-                            "--discard to throw them away",
+                            f"committed ({short_state(head)}; {writers}); "
+                            + (
+                                "commit them, or pass --discard to throw them away"
+                                if only_ours
+                                else "a restore throws them away: --discard only "
+                                "if that is meant for work that is not yours"
+                            ),
                             params=params,
                         )
                     )

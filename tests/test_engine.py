@@ -3224,6 +3224,12 @@ def test_restore_checks_the_branch_of_a_pending_fork_too(
     plan = b.plan_restore(["db"], base)
     (action,) = plan.actions
     assert action.op == "refuse" and "has writes since" in action.detail
+    # They are a's, and the refusal says so rather than offering --discard
+    # as the way forward.
+    assert "not this workspace's" in action.detail
+    assert "--discard only if that is meant for work that is not yours" in (
+        action.detail
+    )
     with pytest.raises(TetherError, match="cannot restore"):
         b.apply_restore(plan)
     assert store.system(system).branches[ref] == head  # a's write survived
@@ -3334,18 +3340,169 @@ def test_a_fork_moves_a_branch_only_from_the_head_it_listed(
         return out
 
     monkeypatch.setattr(b_backend, "list_working_refs", racing_list)
-    with pytest.raises(StaleWorkingCopyError, match="created by another checkout"):
+    with pytest.raises(StaleWorkingCopyError, match="created by another checkout") as e:
         b.open("db")
+    assert "`tether new --shared` works on it as it is" in str(e.value)
+    assert "--discard" not in str(e.value)
     (ref,) = fired
     assert store.read(system, ref) == {"a": "wrote this"}  # a's write survived
     assert "db" in b.workspace.pending_forks and not b.workspace.working_refs
     attempt = b.ops()[0]
     assert attempt.command == "fork" and not attempt.incomplete
     assert attempt.result.get("failed")
+    monkeypatch.undo()
+    # The advice keeps a's write: b works on the branch as it is.
+    b.new("feat", shared=True)
+    assert b.workspace.working_refs["db"] == ref
+    assert store.read(system, ref) == {"a": "wrote this"}
     # a has committed: the branch is at the pin again, and b joins it.
     a.commit("a's write")
     b.new("feat", shared=True)
     assert b.workspace.working_refs["db"] == ref
+
+
+def _clone(vcs_root: Path, other_root: Path, kind: str) -> Repo:
+    """A separate clone of the dataset's repository: it shares the stores and
+    no lock file."""
+    cmd = (
+        ["jj", "git", "clone", "--colocate", str(vcs_root), str(other_root)]
+        if kind == "jj"
+        else ["git", "clone", "-q", str(vcs_root), str(other_root)]
+    )
+    subprocess.run(cmd, check=True, capture_output=True)
+    if kind == "jj":
+        subprocess.run(
+            ["jj", "bookmark", "track", "main@origin"],
+            cwd=other_root,
+            check=True,
+            capture_output=True,
+        )
+    return Repo.find(other_root)
+
+
+@pytest.mark.parametrize("peer", ["separate clone", "second checkout"])
+def test_a_peers_writes_on_a_shared_bookmark_are_adopted_not_discarded(
+    vcs_root: Path, tmp_path: Path, peer: str
+) -> None:
+    """Port of the review's D6: a peer -- another clone, or another checkout
+    of this one -- writes to the bookmark's branch, uncommitted. Joining the
+    bookmark here was refused with "writes since this workspace last
+    committed; --discard", and following that advice erased the peer's work.
+    The refusal now says the writes are not this workspace's, and
+    `--shared` adopts the branch as it is: nothing is reset, and writes
+    from here land on top of the peer's."""
+    a = Repo.init(vcs_root)
+    system = _mem_object(a)
+    store = default_store()
+    store.write(system, "main", {"base": 1})
+    a.commit("baseline")
+    if peer == "separate clone":
+        b = _clone(vcs_root, tmp_path / "clone", a.vcs.kind)
+        a.new(bookmark="feat", eager=True)
+
+        def join(**kw: Any) -> None:
+            b.new(bookmark="feat", **kw)
+
+    else:
+        if a.vcs.kind == "git":
+            pytest.skip("git cannot check one branch out in two worktrees")
+        a.new(bookmark="feat", eager=True)
+        b = _second_checkout(a, vcs_root, tmp_path / "peer")
+
+        def join(**kw: Any) -> None:
+            b.new("feat", **kw)
+
+    ref = a.workspace.working_refs["db"]
+    handle = a.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"base": 1, "a": "uncommitted"})
+    head = store.resolve(system, ref)
+
+    with pytest.raises(TetherError) as exc:
+        join()
+    text = str(exc.value)
+    if peer == "second checkout":
+        assert "held by live workspace" in text and "--shared" in text
+    else:
+        assert "not this workspace's: another checkout or clone" in text
+        assert "`--shared` works on the branch as it is" in text
+        assert "would throw away work that is not yours" in text
+    assert store.resolve(system, ref) == head
+
+    join(shared=True)
+    assert b.workspace.working_refs["db"] == ref
+    assert store.resolve(system, ref) == head  # adopted, not reset
+    mine = b.open("db")
+    assert isinstance(mine, MemoryHandle)
+    mine.write({**mine.read(), "b": "on top"})
+    assert store.read(system, ref) == {"base": 1, "a": "uncommitted", "b": "on top"}
+    assert b.commit("both").pinned["db"] is not None
+
+
+def test_new_shared_refuses_a_branch_that_does_not_build_on_the_bookmark(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """Adopting is for writes on top of what the bookmark's commit pins. A
+    branch reset by hand onto something else would, adopted, drop that
+    state from the branch: refused even with `--shared`, and `--discard` is
+    named as what it is."""
+    a = Repo.init(vcs_root)
+    if a.vcs.kind == "git":
+        pytest.skip("git cannot check one branch out in two worktrees")
+    system = _mem_object(a)
+    store = default_store()
+    a.commit("baseline")
+    a.new(bookmark="feat", eager=True)
+    ref = a.workspace.working_refs["db"]
+    store.write(system, ref, {"feat": 1})
+    a.commit("feat 1")
+    store.system(system).branches[ref] = store.write(system, "main", {"elsewhere": 1})
+    b = _second_checkout(a, vcs_root, tmp_path / "peer")
+    with pytest.raises(TetherError, match="do not build on what feat's commit pins"):
+        b.new("feat", shared=True)
+    assert store.read(system, ref) == {"elsewhere": 1}
+
+
+def test_a_new_whose_fork_a_peer_beat_points_at_shared_not_at_a_reset(
+    vcs_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`new`'s fork expects the branch absent; a clone that created it (and
+    wrote) between the plan and the fork is refused -- and the error used to
+    say "run `new` again: it resets those branches too", which erases the
+    peer's writes. It points at `--shared` now, which keeps them."""
+    from tether.backends.memory import MemoryBackend
+
+    a = Repo.init(vcs_root)
+    system = _mem_object(a)
+    store = default_store()
+    a.commit("baseline")
+    b = _clone(vcs_root, tmp_path / "clone", a.vcs.kind)
+    plan = b.plan_new(bookmark="feat", eager=True)
+    real_fork = MemoryBackend.fork
+    peer: list[str] = []
+
+    def a_forks_first(self, locator, source, name, **kw):
+        if not peer:
+            peer.append("")  # a's own fork below goes straight through
+            a.new(bookmark="feat", eager=True)
+            handle = a.open("db")
+            assert isinstance(handle, MemoryHandle)
+            handle.write({"a": "uncommitted"})
+            peer[0] = handle.ref
+        return real_fork(self, locator, source, name, **kw)
+
+    monkeypatch.setattr(MemoryBackend, "fork", a_forks_first)
+    with pytest.raises(MultiObjectError) as exc:
+        b.apply_new(plan)
+    monkeypatch.undo()
+    text = str(exc.value)
+    assert "moved since the plan" in text and "`tether new --shared`" in text
+    assert "it resets those branches too" not in text
+    (ref,) = peer
+    assert store.read(system, ref) == {"a": "uncommitted"}
+    b.new(shared=True)
+    assert b.workspace.working_refs["db"] == ref
+    assert store.read(system, ref) == {"a": "uncommitted"}
 
 
 def test_restore_stops_at_a_branch_that_moved_under_it(
