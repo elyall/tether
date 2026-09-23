@@ -879,6 +879,22 @@ class ForkOps(RepoCore):
             },
         )
         plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this restore plan was made in another checkout; "
+            "re-run the plan here",
+        )
+        # The branches a restore resets are the bookmark's: a plan made on one
+        # bookmark applied after `new -b` at the same commit would reset the
+        # old bookmark's branch and record it as the new one's working ref.
+        plan.require(
+            "workspace_bookmark",
+            self.workspace.bookmark,
+            detail=f"this restore plan was made on "
+            f"{self.workspace.bookmark or 'no bookmark'}; the checkout is on "
+            "{observed} now; re-run the plan",
+        )
+        plan.require(
             "manifest_hash",
             plan.context["manifest_hash"],
             detail="manifests changed since the plan was made; re-run the plan",
@@ -936,6 +952,26 @@ class ForkOps(RepoCore):
             plan.actions.append(
                 Action("fork", key, now.kind, target=name, detail=detail, params=params)
             )
+            if existing is not None:
+                plan.require(
+                    "ref_head",
+                    params["head"],
+                    key=key,
+                    backend=now.kind,
+                    locator=dict(now.locator),
+                    ref=existing,
+                    what=f"restore {key}",
+                )
+            else:
+                plan.require(
+                    "ref_absent",
+                    key=key,
+                    backend=now.kind,
+                    locator=dict(now.locator),
+                    ref=name,
+                    detail=f"restore {key}: {name} exists since the plan was made; "
+                    "re-run the plan",
+                )
         self._close_restore_over_scopes(plan, set(keys), then, rev)
         return plan
 

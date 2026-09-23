@@ -613,6 +613,48 @@ class RepoCore:
                 "branches are untouched)"
             )
 
+    def _vcs_bookmarks_here(self) -> list[str]:
+        """The bookmarks the VCS has this working copy on: what a plan's
+        `workspace_bookmark` precondition observes.
+
+        `current_bookmarks` reads `@`, and `@-` only while `@` is empty. A jj
+        working copy with edits sits on its parent's bookmarks all the same --
+        it is where `commit` lands and the bookmark advances to -- so those
+        count too; without them a `jj new other` followed by a hand edit
+        looked like "no bookmark" and passed for the bookmark the workspace
+        file still named.
+        """
+        here = set(self.vcs.current_bookmarks())
+        if self.vcs.kind == "jj":
+            parent = self.vcs.position().get("parent")
+            if parent:
+                here.update(n for n, c in self.vcs.bookmarks().items() if c == parent)
+        return sorted(here)
+
+    def require_persisted_workspace(self) -> None:
+        """Make sure `workspace.toml` holds this checkout's id before a plan
+        that binds to it is saved (`--plan`).
+
+        Construction claims the file when it is missing and swallows a
+        failure, since a read-only checkout can still plan and read. A plan
+        saved there would name an id no later process finds, and every
+        `--from-plan` would be refused as made in another checkout; say so
+        now instead.
+
+        Raises:
+            ConfigError: The file is missing and cannot be written.
+        """
+        if workspace_path(self.root).is_file():
+            return
+        try:
+            self.workspace = claim_workspace(self.root, self.workspace)
+        except OSError as exc:
+            raise ConfigError(
+                f"cannot save a plan from this checkout: {workspace_path(self.root)} "
+                f"is not writable ({exc}), so the workspace id the plan binds to "
+                "would not outlive this process"
+            ) from exc
+
     def _pick_bookmark(self, candidates: list[str]) -> str | None:
         """Which of the bookmarks on a commit to work on: the one this
         workspace already has, else the trunk, else the only one, else none."""
@@ -1203,11 +1245,29 @@ class RepoCore:
 
         Raises:
             ConfigError: The plan is for another command.
-            StalePlanError: A precondition failed.
+            StalePlanError: A precondition failed, or the plan lacks one its
+                command requires (:data:`~tether.plan.REQUIRED_PRECONDITIONS`).
         """
         self._require_command(plan, command)
         if not verify:
             return
+        # A plan supplies its own preconditions. Before trusting the list,
+        # hold it to what the command requires -- and check the checkout the
+        # plan's context names even when the list omits it (plans saved by
+        # 0.1.0b3 record the id without requiring it).
+        if plan.context.get("workspace_id") not in (None, self.workspace.workspace_id):
+            raise StalePlanError(
+                f"this {command} plan was made in another checkout; re-run the "
+                "plan here"
+            )
+        missing = plan.missing_preconditions()
+        if missing:
+            raise StalePlanError(
+                f"this {command} plan predates the {', '.join(missing)} "
+                "precondition(s) tether now requires (it was saved by an older "
+                "tether, or edited) and cannot be trusted to apply where it was "
+                "reviewed; re-run the plan"
+            )
         for pre in plan.preconditions:
             self._check_precondition(pre)
 
@@ -1243,6 +1303,15 @@ class RepoCore:
         elif kind == "workspace_id":
             if pre.expected not in (None, self.workspace.workspace_id):
                 fail(self.workspace.workspace_id)
+        elif kind == "workspace_bookmark":
+            # Both sides must still agree: the workspace file (a `new` since
+            # moved it) and the VCS (a `jj new` / `git switch` by hand).
+            if self.workspace.bookmark != pre.expected:
+                fail(self.workspace.bookmark or "no bookmark")
+            if pre.expected is not None:
+                here = self._vcs_bookmarks_here()
+                if pre.expected not in here:
+                    fail(", ".join(here) or "no bookmark")
         elif kind == "vcs_head":
             observed = self._vcs_head_or_none()
             if observed != pre.expected:
@@ -1286,7 +1355,14 @@ class RepoCore:
             if holders:
                 fail(", ".join(holders))
         elif kind == "bookmark_head":
-            observed = self.vcs.bookmarks().get(str(params["bookmark"]))
+            # A checkout on no bookmark has no head to bind to: `None` both
+            # ways, so the kind can be required of every promote plan.
+            bookmark = params.get("bookmark")
+            observed = (
+                self.vcs.bookmarks().get(str(bookmark))
+                if bookmark is not None
+                else None
+            )
             if observed != pre.expected:
                 fail(observed or "gone")
         elif kind == "store_empty":

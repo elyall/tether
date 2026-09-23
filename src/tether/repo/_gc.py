@@ -245,18 +245,26 @@ class GcOps(RepoCore):
                 detail="history moved since the gc plan was made (a new commit may "
                 "reference a pin it would release); re-run the plan",
             )
-        if history_digest is not None:
-            plan.require(
-                "history_digest",
-                history_digest,
-                detail="history changed since the gc plan was made -- a commit in "
-                "this or another workspace may reference a pin it would release; "
-                "re-run the plan",
-            )
+        plan.require(
+            "history_digest",
+            history_digest,
+            detail="history changed since the gc plan was made -- a commit in "
+            "this or another workspace may reference a pin it would release; "
+            "re-run the plan",
+        )
         plan.require(
             "manifest_hash",
             plan.context["manifest_hash"],
             detail="manifests changed since the gc plan was made; re-run the plan",
+        )
+        # The plan counted this checkout's working tree and every other live
+        # one's as references; applied from another checkout it would count
+        # them from the wrong side, and `forget-working-ref` would forget
+        # another workspace's refs.
+        plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this gc plan was made in another checkout; re-run the plan here",
         )
 
         # Unpin native refs not referenced by any manifest.
@@ -867,12 +875,23 @@ class GcOps(RepoCore):
             self.workspace.workspace_id,
             detail="this drop plan was made in another checkout; re-run the plan here",
         )
-        if history_digest is not None:
-            plan.require(
-                "history_digest",
-                history_digest,
-                detail="history changed since the drop plan was made; re-run the plan",
-            )
+        # The workspace file and the VCS must agree on where this checkout
+        # is: `here` above was read from the VCS, and a working copy the VCS
+        # has elsewhere than the file says (a `jj new`, a `git switch` by
+        # hand) would be left, or rebased by the abandon, from the wrong place.
+        plan.require(
+            "workspace_bookmark",
+            self.workspace.bookmark,
+            detail=f"this checkout is on {{observed}} now, not "
+            f"{self.workspace.bookmark or 'no bookmark'} as when the drop plan was "
+            "made (or as its workspace file says); `tether new` to settle it, then "
+            "re-run the plan",
+        )
+        plan.require(
+            "history_digest",
+            history_digest,
+            detail="history changed since the drop plan was made; re-run the plan",
+        )
         plan.require(
             "bookmark_head",
             marks[bookmark],
@@ -888,13 +907,12 @@ class GcOps(RepoCore):
             detail=f"another checkout started working on {bookmark} ({{observed}}); "
             "re-run the plan",
         )
-        if vcs_head is not None:
-            plan.require(
-                "vcs_head",
-                vcs_head,
-                detail="the working copy moved since the drop plan was made; "
-                "re-run the plan",
-            )
+        plan.require(
+            "vcs_head",
+            vcs_head,
+            detail="the working copy moved since the drop plan was made; "
+            "re-run the plan",
+        )
         if here:
             plan.actions.append(
                 Action(
@@ -984,13 +1002,6 @@ class GcOps(RepoCore):
             self._verify_plan(plan, "drop")
             self._refuse_conflicts("drop")
             ctx = plan.context
-            # 0.1.0b3 plans record the id without requiring it.
-            if not any(p.kind == "workspace_id" for p in plan.preconditions) and (
-                ctx.get("workspace_id") not in (None, self.workspace.workspace_id)
-            ):
-                raise StalePlanError(
-                    "this drop plan was made in another checkout; re-run the plan here"
-                )
             bookmark = str(ctx["bookmark"])
             planned = [str(c) for c in ctx.get("commits") or []]
             # The plan promised these commits and no others. Which commits only

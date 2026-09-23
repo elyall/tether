@@ -644,8 +644,11 @@ def _show_plan(plan: Plan, *, as_json: bool) -> None:
         typer.echo(line)
 
 
-def _save_plan(plan: Plan, path: Path | None) -> None:
+def _save_plan(repo: Repo, plan: Plan, path: Path | None) -> None:
     if path is not None:
+        # The plan binds to the checkout's id; a later `--from-plan` finds it
+        # only if the file that holds it exists.
+        repo.require_persisted_workspace()
         path.write_text(plan.to_json())
         typer.secho(f"plan written to {path}", err=True)
 
@@ -734,7 +737,7 @@ def commit(
                 force=force,
                 do_snapshot=not no_snapshot,  # commit always sees the real state
             )
-            _save_plan(plan, plan_out)
+            _save_plan(repo, plan, plan_out)
             _show_plan(plan, as_json=json_out)
             return
         else:
@@ -845,7 +848,7 @@ def new(
                 discard=discard,
             )
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
             repo.apply_new(plan)
@@ -1145,7 +1148,7 @@ def repair(
         else:
             plan = repo.plan_repair(all_history=all_history)
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
         report = repo.apply_repair(plan)
@@ -1215,7 +1218,7 @@ def restore(
         else:
             plan = repo.plan_restore(keys, rev, discard=discard)
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
             done = repo.apply_restore(plan)
@@ -1264,7 +1267,7 @@ def forget_workspace(
         else:
             plan = repo.plan_forget_workspace(workspace_id)
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
         report = repo.apply_forget_workspace(plan)
@@ -1398,7 +1401,7 @@ def drop(
                 bookmark, to=to, delete_stores=delete_stores, force_prune=force_prune
             )
             if dry_run is not False or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 if not json_out:
                     typer.echo("(not applied; `--no-dry-run` drops it)")
@@ -1479,7 +1482,7 @@ def upgrade(
         else:
             plan = repo.plan_upgrade(ignore_immutable=ignore_immutable)
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
         report = repo.apply_upgrade(plan)
@@ -1627,7 +1630,7 @@ def gc(
                 release_foreign=release_foreign,
             )
             if dry_run is not False or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
             report = repo.apply_gc(plan)
@@ -1760,7 +1763,7 @@ def promote(
                 keys or None, rev=rev, strategy=strategy, message=message
             )
             if dry_run or plan_out is not None:
-                _save_plan(plan, plan_out)
+                _save_plan(repo, plan, plan_out)
                 _show_plan(plan, as_json=json_out)
                 return
             report = repo.apply_promote(plan)

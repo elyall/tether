@@ -279,11 +279,19 @@ def test_a_saved_drop_plan_applies_in_a_checkout_that_had_no_workspace_file(
     assert report.abandoned == [commit]
 
 
-def test_drop_leaves_the_bookmark_the_vcs_is_on(vcs_root: Path) -> None:
-    """Whether this checkout is on the bookmark comes from the VCS: after a
-    `git switch probe` (or `jj new probe`) by hand, `workspace.toml` still
-    says main. Decided from the file, git refused to delete the checked-out
-    branch half-way through the drop, with its journal entry left open."""
+@pytest.mark.parametrize("edits", [False, True])
+def test_drop_refuses_when_the_vcs_and_the_workspace_file_disagree(
+    vcs_root: Path, edits: bool
+) -> None:
+    """After a `git switch probe` (or `jj new probe`) by hand, `workspace.toml`
+    still says main. Whether to leave was decided from the VCS, and git
+    refused to delete the checked-out branch half-way through the drop; jj
+    saw no bookmark at all once the working copy had edits, planned no leave,
+    and the abandon rebased the working copy onto the trunk. Neither side is
+    trusted alone now: the plan's `workspace_bookmark` precondition wants
+    them to agree, and refuses before anything is journaled."""
+    if edits and not (vcs_root / ".jj").exists():
+        pytest.skip("only a jj working copy carries edits as a commit of its own")
     repo, system = _baseline(vcs_root)
     commit, fork, _pin = _probe(repo)
     repo.new("main")
@@ -293,14 +301,26 @@ def test_drop_leaves_the_bookmark_the_vcs_is_on(vcs_root: Path) -> None:
         else ["jj", "new", "probe"]
     )
     subprocess.run(cmd, cwd=vcs_root, check=True, capture_output=True)
+    if edits:
+        (vcs_root / "notes.txt").write_text("my uncommitted work\n")
     repo = Repo.find(vcs_root)
     assert repo.workspace.bookmark == "main"
+    assert repo._vcs_bookmarks_here() == ["probe"]
     plan = repo.plan_drop("probe")
-    assert plan.context["leave"] == "main"
-    report = repo.apply_drop(plan)
+    with pytest.raises(StalePlanError, match="this checkout is on probe now"):
+        repo.apply_drop(plan)
+    with pytest.raises(StalePlanError, match="`tether new` to settle it"):
+        repo.drop("probe")
+    assert "probe" in repo.vcs.bookmarks() and commit in repo.vcs.history_revs()
+    assert fork in default_store().system(system).branches
+    assert not [e for e in repo.ops() if e.command == "drop"]
+    if edits:
+        assert (vcs_root / "notes.txt").read_text() == "my uncommitted work\n"
+    # Settled either way, the drop goes through: onto probe, it leaves first.
+    repo.new("probe")
+    report = repo.drop("probe")
     assert report.left_for == "main" and report.abandoned == [commit]
     assert repo.workspace.bookmark == "main" and "probe" not in repo.vcs.bookmarks()
-    assert fork not in default_store().system(system).branches
     assert not repo.incomplete_ops()
 
 

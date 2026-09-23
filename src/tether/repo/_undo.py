@@ -411,7 +411,29 @@ class UndoOps(RepoCore):
             all_history: Also check the pins of every manifest in VCS history,
                 not just the working tree's.
         """
-        plan = Plan(command="repair", context={"all_history": all_history})
+        history_digest = self.vcs.history_digest()
+        plan = Plan(
+            command="repair",
+            context={
+                "all_history": all_history,
+                "workspace_id": self.workspace.workspace_id,
+                "history_digest": history_digest,
+            },
+        )
+        plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this repair plan was made in another checkout; "
+            "re-run the plan here",
+        )
+        # What the manifests promise -- in the working tree and, with
+        # `all_history`, in every commit -- is what the plan recreates; a
+        # commit added or removed since may promise something else.
+        plan.require(
+            "history_digest",
+            history_digest,
+            detail="history changed since the repair plan was made; re-run the plan",
+        )
         for e in self.incomplete_ops():
             did = ", ".join(
                 f"{r.get('action')} {r.get('key') or r.get('target') or ''}".strip()

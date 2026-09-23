@@ -25,6 +25,7 @@ PRECONDITION_KINDS = frozenset(
     {
         "manifest_hash",
         "workspace_id",
+        "workspace_bookmark",
         "vcs_head",
         "history_digest",
         "config_version",
@@ -39,7 +40,57 @@ PRECONDITION_KINDS = frozenset(
 )
 """What a plan may require of the world before it is applied. Each is one
 check `Repo._verify_plan` knows how to run; a `plan_*` appends them, and
-every `apply_*` runs them all before its first action."""
+every `apply_*` runs them all before its first action. `workspace_bookmark`
+is the bookmark the checkout works on, as `workspace.toml` records it *and*
+as the VCS places the working copy (git's `HEAD` branch; under jj the
+bookmarks at `@` or, with edits in `@`, at `@-`)."""
+
+REQUIRED_PRECONDITIONS: dict[str, frozenset[str]] = {
+    "commit": frozenset({"workspace_id", "workspace_bookmark", "manifest_hash"}),
+    "new": frozenset({"workspace_id", "manifest_hash"}),
+    "restore": frozenset({"workspace_id", "workspace_bookmark", "manifest_hash"}),
+    "promote": frozenset(
+        {"workspace_id", "workspace_bookmark", "bookmark_head", "manifest_hash"}
+    ),
+    "drop": frozenset(
+        {
+            "workspace_id",
+            "workspace_bookmark",
+            "bookmark_head",
+            "no_new_holders",
+            "vcs_head",
+            "history_digest",
+        }
+    ),
+    "gc": frozenset({"workspace_id", "history_digest"}),
+    "repair": frozenset({"workspace_id", "history_digest"}),
+}
+"""The preconditions a command's plan must carry whatever it found to do.
+
+A plan supplies its own preconditions, so a plan that lacks one -- saved by a
+tether from before the kind existed, or edited -- would apply wherever and
+whenever it was loaded. `Repo._verify_plan` refuses such a plan with "re-run
+the plan". The per-object kinds are required per action instead; see
+:data:`REQUIRED_ACTION_PRECONDITIONS`."""
+
+REQUIRED_ACTION_PRECONDITIONS: dict[str, dict[str, tuple[frozenset[str], ...]]] = {
+    "new": {
+        "fork": (frozenset({"ref_head", "ref_absent"}),),
+        "reuse": (frozenset({"ref_head"}),),
+    },
+    "restore": {"fork": (frozenset({"ref_head", "ref_absent"}),)},
+    "promote": {
+        "fast-forward": (
+            frozenset({"base_state"}),
+            frozenset({"ref_head", "pin_state"}),
+        ),
+        "merge": (frozenset({"base_state"}), frozenset({"ref_head", "pin_state"})),
+    },
+}
+"""Per command and action verb, the precondition kinds that must name the
+action's object: each inner set is a group of alternatives, one of which
+must be present (a fork carries `ref_head` when its branch existed at plan
+time and `ref_absent` when it did not)."""
 
 
 @dataclass(frozen=True)
@@ -232,6 +283,22 @@ class Plan:
             return cls.from_dict(json.loads(text))
         except (ValueError, KeyError, TypeError) as exc:
             raise ConfigError(f"invalid plan: {exc}") from exc
+
+    def missing_preconditions(self) -> list[str]:
+        """What this plan lacks of :data:`REQUIRED_PRECONDITIONS` and
+        :data:`REQUIRED_ACTION_PRECONDITIONS`, as `kind` or `kind for key`
+        entries; empty when it carries everything its command requires."""
+        have = {p.kind for p in self.preconditions}
+        missing = sorted(REQUIRED_PRECONDITIONS.get(self.command, frozenset()) - have)
+        per_key: dict[str | None, set[str]] = {}
+        for p in self.preconditions:
+            per_key.setdefault(p.key, set()).add(p.kind)
+        for a in self.actions:
+            groups = REQUIRED_ACTION_PRECONDITIONS.get(self.command, {}).get(a.op, ())
+            for group in groups:
+                if not group & per_key.get(a.key, set()):
+                    missing.append(f"{'/'.join(sorted(group))} for {a.key!r}")
+        return missing
 
     def render(self) -> list[str]:
         """Human-readable lines, one per action, then notes."""

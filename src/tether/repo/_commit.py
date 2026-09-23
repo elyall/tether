@@ -124,6 +124,23 @@ class CommitOps(RepoCore):
                 "pull": fetched is not None,
             },
         )
+        # Where first, then what: a plan applied in the wrong checkout or on
+        # another bookmark is told so, not that the manifests differ there.
+        plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this commit plan was made in another checkout; "
+            "re-run the plan here",
+        )
+        # The commit lands on the bookmark's branches and moves the bookmark:
+        # a plan reviewed on one bookmark must not land on another.
+        plan.require(
+            "workspace_bookmark",
+            self.workspace.bookmark,
+            detail=f"this commit plan was made on "
+            f"{self.workspace.bookmark or 'no bookmark'}; the checkout is on "
+            "{observed} now; re-run the plan",
+        )
         plan.require(
             "manifest_hash",
             plan.context["manifest_hash"],

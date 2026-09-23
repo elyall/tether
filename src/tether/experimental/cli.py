@@ -261,7 +261,7 @@ def register(app: typer.Typer) -> None:
                 specs, notes = specs_from_rows(rows, repo.config.defaults)
                 plan = repo.plan_import(specs, sync=sync, notes=notes)
                 if dry_run or plan_out is not None:
-                    _save_plan(plan, plan_out)
+                    _save_plan(repo, plan, plan_out)
                     _show_plan(plan, as_json=json_out)
                     return
                 report = repo.apply_import(plan)
