@@ -1010,7 +1010,9 @@ def verify(
 @app.command()
 def diff(
     rev_a: str | None = typer.Argument(
-        None, help="From revision (default: the last commit, HEAD or jj's @-)."
+        None,
+        help="From revision (default: the last commit, HEAD or jj's @-; a jj "
+        "working copy with two parents needs one named).",
     ),
     rev_b: str | None = typer.Argument(
         None, help="To revision (default: working tree)."

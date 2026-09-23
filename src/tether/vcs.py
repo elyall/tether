@@ -905,12 +905,17 @@ class JjAdapter:
             "-r",
             rev,
             "-T",
-            "self.commit_id()",
+            'self.commit_id() ++ "\\n"',
         )
-        commit = out.stdout.strip()
-        if not commit:
+        commits = out.stdout.split()
+        if not commits:
             raise VcsError(f"could not resolve revision: {rev}")
-        return commit
+        if len(commits) > 1:
+            shown = ", ".join(c[:12] for c in commits)
+            raise VcsError(
+                f"revision {rev!r} is {len(commits)} commits ({shown}), not one"
+            )
+        return commits[0]
 
     def current_rev(self) -> str:
         return self.resolve("@")

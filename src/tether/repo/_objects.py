@@ -959,23 +959,36 @@ class ObjectOps(RepoCore):
         Content diffs run concurrently for every ``changed`` object whose backend
         declares ``DIFF``; per-object failures land in ``detail_error`` rather
         than aborting the whole diff.
+
+        Raises:
+            VcsError: A revision is not exactly one commit -- with none given,
+                a jj working copy with several parents (a merge): name the
+                parent to compare with.
         """
         resolved_a = self.vcs.resolve(rev_a) if rev_a is not None else None
         resolved_b = self.vcs.resolve(rev_b) if rev_b is not None else None
         a = self._objects_at(resolved_a) if resolved_a is not None else self.objects
         b = self._objects_at(resolved_b) if resolved_b is not None else None
         # Default: compare working tree (a) against its parent commit. Under jj
-        # `@` is the working copy itself once anything has snapshotted it.
+        # `@` is the working copy itself once anything has snapshotted it, and
+        # `@-` always resolves (to the root commit before the first commit).
         if b is None and rev_a is None:
-            try:
-                resolved_b = (
-                    self.vcs.resolve("@-")
-                    if self.vcs.kind == "jj"
-                    else self.vcs.current_rev()
-                )
+            if self.vcs.kind == "jj":
+                try:
+                    resolved_b = self.vcs.resolve("@-")
+                except VcsError as exc:
+                    raise VcsError(
+                        f"diff compares the working copy with its parent, but {exc} "
+                        "(a merge); `tether diff REV` compares one of them with the "
+                        "working tree"
+                    ) from exc
                 b = self._objects_at(resolved_b)
-            except VcsError:
-                b = {}
+            else:
+                try:
+                    resolved_b = self.vcs.current_rev()
+                    b = self._objects_at(resolved_b)
+                except VcsError:
+                    b = {}  # no commit yet: everything is added
             a, b = b, a  # b = parent, a = working; present as parent -> working
             resolved_a, resolved_b = resolved_b, None
         elif b is None:

@@ -1899,6 +1899,50 @@ def test_diff_one_revision_compares_it_with_the_working_tree(vcs_root: Path) -> 
     assert entries["db"].a_pin is not None and entries["db"].b_pin is not None
 
 
+def test_diff_on_a_jj_merge_working_copy_names_the_parents(vcs_root: Path) -> None:
+    """`jj new main feat`: `@-` is two commits. `resolve` returned both ids run
+    together, the error that followed was swallowed, and every object showed
+    as added. The default diff refuses, naming the parents; each can be
+    named, and any other revision that is several commits is refused too."""
+    repo = Repo.init(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("only a jj working copy can have two parents")
+    system = _mem_object(repo)
+    trunk = repo.commit("baseline").vcs_commit
+    repo.new(bookmark="feat")
+    handle = repo.open("db")
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"x": 1})
+    feat = repo.commit("feat").vcs_commit
+    assert default_store().read(system, handle.ref) == {"x": 1}
+    assert trunk and feat
+    subprocess.run(
+        ["jj", "new", trunk, feat], cwd=vcs_root, check=True, capture_output=True
+    )
+    repo = Repo.find(vcs_root)
+    with pytest.raises(VcsError) as refused:
+        repo.diff()
+    message = str(refused.value)
+    assert trunk[:12] in message and feat[:12] in message and "merge" in message
+    assert {e.key: e.change for e in repo.diff(feat)} == {"db": "unchanged"}
+    assert {e.key: e.change for e in repo.diff(trunk)} == {"db": "changed"}
+    both = f"{trunk} | {feat}"
+    for attempt in (
+        lambda: repo.vcs.resolve(both),
+        lambda: repo.diff(both),
+        lambda: repo.open("db", rev=both),
+        lambda: repo.verify(rev=both),
+    ):
+        with pytest.raises(VcsError, match="is 2 commits"):
+            attempt()
+
+
+def test_diff_before_the_first_commit_shows_everything_added(vcs_root: Path) -> None:
+    repo = Repo.init(vcs_root)
+    _mem_object(repo)
+    assert {e.key: e.change for e in repo.diff()} == {"db": "added"}
+
+
 def test_status_reports_an_unreachable_object_beside_the_rest(vcs_root: Path) -> None:
     """One store that cannot be read labels its object `error`; it does not
     abort the report (nor a fresh workspace's first, snapshotting, status)."""
