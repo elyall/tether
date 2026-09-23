@@ -186,11 +186,27 @@ class GcOps(RepoCore):
         history_manifests: list[ObjectManifest] = []
         all_manifests: list[ObjectManifest] = []
         seen: set[str] = set()
+        # Manifests of a backend this tether no longer has (lakeFS): their
+        # pins still count as references, and nothing else reads them.
+        skipped: dict[str, int] = {}
+
+        def available(manifests: Sequence[ObjectManifest]) -> list[ObjectManifest]:
+            out = []
+            for m in manifests:
+                if self._kind_gone(m.kind):
+                    skipped[m.kind] = skipped.get(m.kind, 0) + 1
+                    if m.pin is not None:
+                        referenced.add(m.pin.id)
+                else:
+                    out.append(m)
+            return out
+
+        dropped = available(dropped)
         for _rev, objects in self._iter_history_objects():
             if _rev in excluded:
-                dropped.extend(objects.values())
+                dropped.extend(available(list(objects.values())))
                 continue
-            for m in objects.values():
+            for m in available(list(objects.values())):
                 all_manifests.append(m)
                 if m.pin is None:
                     continue
@@ -201,7 +217,7 @@ class GcOps(RepoCore):
                     seen.add(sig)
                     history_manifests.append(m)
         # Working trees: this checkout's and every other live one's.
-        working = [*self.objects.values(), *self._live_checkout_manifests()]
+        working = available([*self.objects.values(), *self._live_checkout_manifests()])
         referenced.update(m.pin.id for m in working if m.pin is not None)
         inflight = self._inflight_pins()
 
@@ -265,6 +281,13 @@ class GcOps(RepoCore):
             "workspace_id",
             self.workspace.workspace_id,
             detail="this gc plan was made in another checkout; re-run the plan here",
+        )
+        plan.notes.extend(
+            self._gone_note(
+                skipped,
+                "their pins count as references, and nothing in their "
+                "stores is read or released",
+            )
         )
 
         # Unpin native refs not referenced by any manifest.
@@ -463,6 +486,8 @@ class GcOps(RepoCore):
         systems_seen: set[str] = set()
         for key in sorted(self.objects):
             m = self.objects[key]
+            if self._kind_gone(m.kind):
+                continue  # noted with the history walk's
             backend = self.backend_for(m.kind)
             eff = effective_capabilities(backend, m.locator, m.policy)
             if Capability.FORK not in eff:

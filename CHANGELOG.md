@@ -172,6 +172,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   referenced. `gc --delete-stores` also matches an indexed store by the
   identity its locator has now, so a created store a manifest still names is
   no longer deleted.
+- `gc` (a dry run too), `gc --delete-stores` and `verify --all-history` skip,
+  with a note, the manifests history holds of a backend tether no longer
+  has; a dataset that ever held a lakeFS object failed them even after
+  `remove`. Their pins still count as references.
 
 ### Experimental
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import warnings
 
 try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
@@ -838,8 +839,15 @@ class ObjectOps(RepoCore):
 
         ``targets`` maps a report label to a manifest. Identical records under
         different labels (the same pin at many commits) share one backend call.
+        A manifest of a backend this tether no longer has (lakeFS) gets no
+        report; a warning counts them.
         """
         unique: dict[str, tuple[ObjectManifest, list[str]]] = {}
+        gone: dict[str, int] = {}
+        for m in targets.values():
+            if self._kind_gone(m.kind):
+                gone[m.kind] = gone.get(m.kind, 0) + 1
+        targets = {k: m for k, m in targets.items() if not self._kind_gone(m.kind)}
         for label, m in targets.items():
             backend = self.backend_for(m.kind)
             sig = _m.canonical_bytes(
@@ -851,6 +859,8 @@ class ObjectOps(RepoCore):
                 ]
             ).decode()
             unique.setdefault(sig, (m, []))[1].append(label)
+        for note in self._gone_note(gone, "not verified"):
+            warnings.warn(note, stacklevel=3)
 
         def verify_one(sig: str) -> VerifyReport:
             m = unique[sig][0]

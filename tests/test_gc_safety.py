@@ -259,6 +259,77 @@ def test_pinned_index_is_seeded_from_the_op_logs(vcs_root: Path) -> None:
     assert verdicts == {mine.ref: "unpin", stray.ref: "keep-pin"}
 
 
+@pytest.mark.parametrize("kind", ["lakefs", "retired"])
+def test_gc_and_verify_skip_history_of_a_backend_tether_no_longer_has(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A dataset that once held a lakeFS object (removed in 0.1.0b4) was
+    stuck: after `remove` and a commit, `gc` (even `--dry-run`),
+    `gc --delete-stores` and `verify --all-history` failed building a backend
+    for the manifests history still holds. They skip those manifests with a
+    note that says why, keep counting their pins as references, and do the
+    rest of their work; so for any kind tether does not know."""
+    from tether.cli import app
+    from tether.manifest import ObjectManifest, Pin, key_to_relpath, write_object
+    from tether.oplog import TouchedStore, append_touched
+
+    typer_testing = pytest.importorskip("typer.testing")
+    repo, system = _baseline(vcs_root)
+    pid = f"{repo.config.dataset_id}.00000000000000aa"
+    old = ObjectManifest(
+        key="lake",
+        kind=kind,
+        locator={"repository": "lab", "branch": "main"},
+        state={"commit": "c0ffee"},
+        pin=Pin(id=pid, ref=f"tether.{pid}"),
+    )
+    write_object(repo.root, old)
+    rel = (Path(".tether") / key_to_relpath("lake")).as_posix()
+    repo.vcs.commit([rel], f"a {kind} object")
+    (repo.root / rel).unlink()
+    repo.vcs.commit([rel], f"remove the {kind} object")
+    append_touched(
+        repo.vcs.shared_dir(),
+        TouchedStore(repo.config.dataset_id, kind, {"r": "lab"}, {}, "lake", ""),
+    )
+    # A write of the object that remains, and a dead pin of it, so each
+    # command has real work besides the manifests it skips.
+    repo = Repo.find(vcs_root)
+    repo.new(bookmark="w")
+    _write(repo, {"v": 2})
+    dead = repo.commit("w").pinned["db"]
+    assert dead is not None
+    repo.abandon([repo.vcs.bookmarks()["w"]])
+    repo = Repo.find(vcs_root)
+
+    for plan in (repo.plan_gc(), repo.plan_gc(delete_stores=True)):
+        notes = " ".join(plan.notes)
+        assert f"'{kind}': 1 manifest(s) skipped" in notes, plan.render()
+        assert "their pins count as references" in notes
+        if kind == "lakefs":
+            assert "removed in 0.1.0b4" in notes
+        assert [a.target for a in plan.actions if a.op == "unpin"] == [dead.ref]
+    assert f"'{kind}': 1 touched-store record(s) skipped" in " ".join(
+        repo.plan_gc(delete_stores=True).notes
+    )
+    with pytest.warns(UserWarning, match=rf"'{kind}': 1 manifest\(s\) skipped"):
+        reports = repo.verify(all_history=True)
+    assert reports and all(r.ok for r in reports.values())
+    assert not [label for label in reports if label.endswith(":lake")]
+
+    monkeypatch.chdir(vcs_root)
+    runner = typer_testing.CliRunner()
+    r = runner.invoke(app, ["gc"])
+    assert r.exit_code == 0, r.output
+    assert f"'{kind}': 1 manifest(s) skipped" in " ".join(r.output.split())
+    with pytest.warns(UserWarning, match="not verified"):
+        r = runner.invoke(app, ["verify", "--all-history"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["gc", "--delete-stores", "--no-dry-run"])
+    assert r.exit_code == 0, r.output
+    assert dead.ref not in default_store().system(system).tags
+
+
 def test_gc_and_drop_refuse_while_jj_reports_a_conflicted_commit(
     vcs_root: Path,
 ) -> None:

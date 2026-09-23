@@ -29,6 +29,7 @@ from tether.backends.base import (
     check_committed_config,
     content_state,
     effective_capabilities,
+    known_kinds,
     safe_config_keys,
     safe_option_keys,
 )
@@ -111,6 +112,9 @@ _MAX_WORKERS = 16
 
 
 _UNTRUSTED_VCS_KEYS = ("git_path", "jj_path")
+
+_REMOVED_KINDS = {"lakefs": "0.1.0b4"}
+"""Backends tether shipped once, and the release that removed them."""
 
 _CHECKOUT_FILES = (_m.SECRETS_FILENAME, _m.WORKSPACE_FILENAME, OPS_FILENAME)
 """The per-checkout files under `.tether/` that tether reads and trusts; a
@@ -647,6 +651,28 @@ class RepoCore:
         backend.configure_secrets(
             {**committed, **local}, self._secret_rules_for(kind, backend)
         )
+
+    @staticmethod
+    def _kind_gone(kind: str) -> bool:
+        """Whether `kind` names no backend this tether has -- one it removed,
+        which history may still name. A kind whose optional extra is missing
+        is known, and fails as before."""
+        return kind not in known_kinds()
+
+    def _gone_note(
+        self, counts: Mapping[str, int], skipped: str, *, what: str = "manifest(s)"
+    ) -> list[str]:
+        """What `gc` and `verify` say about the `what` they skipped, per kind."""
+        return [
+            f"{kind!r}: {n} {what} skipped -- this tether has no {kind!r} backend"
+            + (
+                f" (removed in {_REMOVED_KINDS[kind]})"
+                if kind in _REMOVED_KINDS
+                else ""
+            )
+            + f"; {skipped}"
+            for kind, n in sorted(counts.items())
+        ]
 
     def _working_ref_for(self, key: str) -> str:
         """The store branch this workspace's bookmark stands for (`key` names

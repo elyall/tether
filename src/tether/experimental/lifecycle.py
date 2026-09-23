@@ -355,11 +355,13 @@ def _store_context(
         if root.resolve() == repo.root.resolve():
             continue
         for m in read_objects(root).values():
+            if m.pin is not None:
+                referenced.add(m.pin.id)
+            if repo._kind_gone(m.kind):
+                continue
             in_use.add(
                 ident(m.kind, dict(repo.backend_for(m.kind).identity(m.locator)))
             )
-            if m.pin is not None:
-                referenced.add(m.pin.id)
     referenced |= repo._inflight_pins()
     keep_slugs = {bookmark_slug(b) for b in keep_bookmarks}
     # What this clone can account for: the bookmarks any `new` in a live
@@ -531,7 +533,11 @@ def _plan_touched_stores(
     kept the store's creator from ever reclaiming it. `skip` holds the
     identities the created-store step is handling in the same plan.
     """
+    gone: dict[str, int] = {}
     for e in touched_stores(repo):
+        if repo._kind_gone(e.kind):
+            gone[e.kind] = gone.get(e.kind, 0) + 1
+            continue
         tag = f"{e.kind}|{canonical_bytes(e.identity).decode()}"
         if tag in skip or _in_use(repo, ctx, e.kind, e.identity, e.locator):
             continue
@@ -574,6 +580,11 @@ def _plan_touched_stores(
             )
         for line in refs.blockers:
             plan.notes.append(f"{e.key}: {where}: kept {line}")
+    plan.notes.extend(
+        repo._gone_note(
+            gone, "their stores are left as they are", what="touched-store record(s)"
+        )
+    )
 
 
 def _plan_created_stores(
