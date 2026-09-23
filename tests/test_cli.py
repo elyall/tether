@@ -1136,6 +1136,43 @@ def test_status_labels_an_unreadable_object_and_exits_1(
         default_store().deleted.discard(systems["bad"])
 
 
+@pytest.mark.parametrize("fanout", [["status", "--snapshot"], ["snapshot"]])
+def test_a_cached_status_keeps_the_last_snapshots_errors_and_exit_code(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, fanout: list[str]
+) -> None:
+    """After a fan-out labelled an object `error`, a plain `status` said
+    clean and exited 0: the object kept the state an earlier snapshot had
+    cached. The error is cached instead, until a snapshot reads it again."""
+    monkeypatch.chdir(vcs_root)
+    repo = Repo.init(vcs_root)
+    systems = {key: f"sys-{uuid.uuid4().hex[:8]}" for key in ("bad", "ok")}
+    for key, system in systems.items():
+        default_store().system(system)
+        repo.add(key, "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    assert runner.invoke(app, ["status", "--snapshot"]).exit_code == 0
+    default_store().deleted.add(systems["bad"])
+    try:
+        assert runner.invoke(app, fanout).exit_code == 1
+        for _ in range(2):  # and it stays: reading the cache changes nothing
+            r = runner.invoke(app, ["status", "--no-snapshot", "--json"])
+            assert r.exit_code == 1, r.output
+            objects = {o["key"]: o for o in json.loads(r.stdout)["objects"]}
+            assert objects["bad"]["state"] == "error"
+            assert "deleted" in objects["bad"]["error"]
+            assert objects["ok"]["state"] == "clean"
+        r = runner.invoke(app, ["status", "--no-snapshot"])
+        assert r.exit_code == 1 and "error  bad" in r.stdout
+        assert "bad:" in r.stderr and "deleted" in r.stderr
+    finally:
+        default_store().deleted.discard(systems["bad"])
+    assert runner.invoke(app, ["status", "--no-snapshot"]).exit_code == 1
+    assert runner.invoke(app, ["status", "--snapshot"]).exit_code == 0
+    r = runner.invoke(app, ["status", "--no-snapshot", "--json"])
+    assert r.exit_code == 0
+    assert {o["state"] for o in json.loads(r.stdout)["objects"]} == {"clean"}
+
+
 def test_init_json_prints_only_json(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -538,7 +538,9 @@ class WorkspaceState:
     ``bookmark`` is the dataset bookmark this checkout works on: its store
     branches are this workspace's working refs (``None``: read-only, no
     working refs). ``last_snapshot`` caches the most recent fan-out
-    fingerprints.
+    fingerprints; ``last_snapshot_errors`` the objects that fan-out could
+    not read, with the branch it tried (``ref``, empty for upstream) and
+    the ``error``.
     """
 
     workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -550,6 +552,7 @@ class WorkspaceState:
     fork_points: dict[str, State] = field(default_factory=dict)
     last_snapshot: dict[str, State] = field(default_factory=dict)
     last_snapshot_at: str | None = None
+    last_snapshot_errors: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_toml(self) -> str:
         doc = tomlkit.document()
@@ -578,6 +581,10 @@ class WorkspaceState:
             doc["last_snapshot"] = {
                 k: _drop_nulls(v) for k, v in self.last_snapshot.items()
             }
+        if self.last_snapshot_errors:
+            doc["last_snapshot_errors"] = {
+                k: dict(v) for k, v in self.last_snapshot_errors.items()
+            }
         return tomlkit.dumps(doc)
 
     @classmethod
@@ -603,10 +610,19 @@ class WorkspaceState:
             last_snapshot_at=(
                 str(data["last_snapshot_at"]) if "last_snapshot_at" in data else None
             ),
+            last_snapshot_errors={
+                str(k): {str(f): str(x) for f, x in dict(v).items()}
+                for k, v in (data.get("last_snapshot_errors") or {}).items()
+            },
         )
 
-    def touch_snapshot(self, snapshot: dict[str, State]) -> None:
+    def touch_snapshot(
+        self,
+        snapshot: dict[str, State],
+        errors: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         self.last_snapshot = snapshot
+        self.last_snapshot_errors = dict(errors or {})
         self.last_snapshot_at = _now()
 
 

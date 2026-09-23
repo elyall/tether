@@ -617,8 +617,8 @@ def status(
     fingerprints every object first (one metadata round-trip per system; a
     suspended Neon compute wakes). A workspace with no snapshot yet takes one.
     Labels: new (never committed), modified, clean, error (its store could not
-    be read; exit 1). `(STALE)` means the committed state changed since this
-    workspace forked; run `tether new`.
+    be read, now or by the last snapshot; exit 1). `(STALE)` means the
+    committed state changed since this workspace forked; run `tether new`.
     """
     repo = _repo()
     try:

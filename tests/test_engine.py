@@ -1593,6 +1593,51 @@ def test_refresh_parses_only_the_manifests_that_changed(
     assert repo.objects["b"].policy.pin == "native"
 
 
+@pytest.mark.parametrize("how", ["status", "snapshot", "commit"])
+def test_a_failed_fingerprint_is_cached_as_an_error_not_a_state(
+    vcs_root: Path, how: str
+) -> None:
+    """Every fan-out that fails for an object -- `status`'s, `snapshot`'s,
+    a commit's -- leaves an error in the cache, never the state an earlier
+    snapshot read. The error applies while nothing newer was cached for the
+    object and it is on the branch the fan-out read."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    _mem_object(repo, "ok")
+    store = default_store()
+    repo.commit("baseline")
+    repo.snapshot()
+    store.write(system, "main", {"v": 1})
+    store.deleted.add(system)
+    try:
+        if how == "status":
+            db = repo.status().objects[0]
+            assert db.state_label == "error"
+        else:
+            with pytest.raises(MultiObjectError):
+                repo.snapshot() if how == "snapshot" else repo.commit("v1")
+        again = Repo.find(vcs_root)
+        assert "db" not in again.workspace.last_snapshot
+        db, ok = again.status(do_snapshot=False).objects
+        assert db.state_label == "error" and "deleted" in (db.error or "")
+        assert db.current_state is None and ok.state_label == "clean"
+        # Recorded against the branch it read; on another it says nothing.
+        again.workspace.last_snapshot_errors["db"]["ref"] = "tether.ws.x.other"
+        db, _ok = again.status(do_snapshot=False).objects
+        assert db.error is None
+        # The only object, unreadable: the cached error is the snapshot, and
+        # a plain status stays local rather than fan out again.
+        again.remove("ok")
+        store.deleted.discard(system)
+        (db,) = Repo.find(vcs_root).status(do_snapshot=False).objects
+        assert db.state_label == "error"
+    finally:
+        store.deleted.discard(system)
+    (db,) = repo.status().objects
+    assert db.state_label == "modified"
+    assert Repo.find(vcs_root).workspace.last_snapshot_errors == {}
+
+
 def test_new_forgets_the_snapshot_cache_of_the_branches_it_leaves(
     vcs_root: Path,
 ) -> None:
@@ -1864,8 +1909,9 @@ def test_status_reports_an_unreachable_object_beside_the_rest(vcs_root: Path) ->
     default_store().deleted.add(bad)
     try:
         for fresh in (True, False):
-            if not fresh:
-                repo.workspace.last_snapshot.clear()  # none yet: it snapshots
+            if not fresh:  # none yet: it snapshots
+                repo.workspace.last_snapshot.clear()
+                repo.workspace.last_snapshot_errors.clear()
             report = repo.status(do_snapshot=fresh)
             assert report.fresh
             by_key = {o.key: o for o in report.objects}

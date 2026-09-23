@@ -425,7 +425,8 @@ class ObjectOps(RepoCore):
             upstream: Contact the upstream branch of objects without a working
                 ref.
             failures: Collect each object whose fingerprint failed here, and
-                leave it out of the result, instead of raising.
+                leave it out of the result, instead of raising. Either way
+                the failure is cached (see `status`).
 
         Returns:
             Current state per object key.
@@ -463,8 +464,6 @@ class ObjectOps(RepoCore):
                 return backend.fingerprint(m.locator, ref)
 
             states, errors = self._fanout_collect(fp, keys)
-            if errors and failures is None:
-                raise MultiObjectError("fan-out failed", errors)
             if failures is not None:
                 failures.update(errors)
             for key, m in self.objects.items():
@@ -485,9 +484,40 @@ class ObjectOps(RepoCore):
                     cached[key] = states[key]
             for key, state in states.items():  # positions: only where unknown
                 cached.setdefault(key, state)
-            self.workspace.touch_snapshot(cached)
+            # A failure is not a state: the object's old entry goes, and the
+            # error is kept with the branch it was read on, so a later
+            # cached `status` still says `error` while that stands.
+            failed = {
+                k: v
+                for k, v in self.workspace.last_snapshot_errors.items()
+                if k in self.objects and k not in keys
+            }
+            for key, exc in errors.items():
+                cached.pop(key, None)
+                failed[key] = {"ref": self._ref_read(key), "error": str(exc)}
+            self.workspace.touch_snapshot(cached, failed)
             write_workspace(self.root, self.workspace)
+        if errors and failures is None:
+            raise MultiObjectError("fan-out failed", errors)
         return states
+
+    def _ref_read(self, key: str) -> str:
+        """The working ref a fingerprint of `key` reads now ("" upstream)."""
+        try:
+            return self._working_ref(key) or ""
+        except TetherError:
+            return ""
+
+    def _cached_error(self, key: str) -> str | None:
+        """The last snapshot's failure for `key`, while it still describes
+        what a snapshot would read: no state was cached for the object since,
+        and it is on the same branch."""
+        failed = self.workspace.last_snapshot_errors.get(key)
+        if failed is None or key in self.workspace.last_snapshot:
+            return None
+        if failed.get("ref", "") != self._ref_read(key):
+            return None
+        return failed.get("error") or "the last snapshot could not read it"
 
     def _enforce_immutability(self, states: dict[str, State]) -> None:
         """Raise for an Observed `file = "immutable"` object that changed."""
@@ -519,12 +549,18 @@ class ObjectOps(RepoCore):
         Args:
             do_snapshot: Take a fresh `snapshot` first; otherwise reuse the
                 cached one (no external systems are contacted) and report its
-                age. A workspace with no snapshot yet always takes one.
+                age -- including which objects it could not read, as
+                `error`. A workspace with no snapshot yet always takes one.
 
         Returns:
             The report; `objects` are sorted by key.
         """
-        fresh = do_snapshot or not self.workspace.last_snapshot
+        cached_errors = {
+            key: error
+            for key in self.objects
+            if (error := self._cached_error(key)) is not None
+        }
+        fresh = do_snapshot or not (self.workspace.last_snapshot or cached_errors)
         failures: dict[str, Exception] = {}
         states = (
             self.snapshot(failures=failures) if fresh else self.workspace.last_snapshot
@@ -563,7 +599,13 @@ class ObjectOps(RepoCore):
                     origin=m.origin,
                     current_state=current,
                     verify=report,
-                    error=str(failures[key]) if key in failures else None,
+                    error=(
+                        str(failures[key])
+                        if key in failures
+                        else None
+                        if fresh
+                        else cached_errors.get(key)
+                    ),
                 )
             )
         stale = self.stale_keys()
