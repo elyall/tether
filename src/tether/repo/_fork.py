@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
-
 try:  # POSIX advisory locks; Windows has no fcntl and gets no writer lock
     import fcntl
 except ImportError:  # pragma: no cover
@@ -13,9 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 from tether import manifest as _m
 from tether.backends.base import (
+    ABSENT,
     Capability,
     VerifyStatus,
     effective_capabilities,
+    fork_ref,
 )
 from tether.errors import (
     ConfigError,
@@ -45,6 +45,16 @@ from tether.repo._reports import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tether.repo import Repo
+
+
+def _expected_head(params: Mapping[str, Any]) -> State | None:
+    """What a planned fork's branch must hold when it is applied: the head the
+    plan saw, `ABSENT` for a branch the plan found missing, `None` (no
+    condition) when the plan knew the branch existed but could not read it."""
+    if not params.get("existing"):
+        return ABSENT
+    head = params.get("head")
+    return dict(head) if head is not None else None
 
 
 class ForkOps(RepoCore):
@@ -657,14 +667,18 @@ class ForkOps(RepoCore):
         write_workspace(self.root, self.workspace)
         return ref
 
-    def _fork_from_manifest(self: Repo, m: ObjectManifest, name: str) -> str:
-        """Create working branch `name` from a manifest's pin (or recorded state)."""
+    def _fork_from_manifest(
+        self: Repo, m: ObjectManifest, name: str, *, expected: State | None = None
+    ) -> str:
+        """Create working branch `name` from a manifest's pin (or recorded
+        state), moving it only from `expected` (the head the plan reviewed,
+        `ABSENT` for a branch it found missing; `None` unconditionally)."""
         backend = self.backend_for(m.kind)
         assert m.state is not None
         eff = effective_capabilities(backend, m.locator, m.policy)
         source = self._pinned_source(m, backend, eff)
         if isinstance(source, Pin):
-            ref = backend.fork(m.locator, source, name)
+            ref = fork_ref(backend, m.locator, source, name, expected)
             self._note_touched(m.key, m.kind, m.locator)
             return ref
         # No usable pin: the recorded state is the fork point while the store
@@ -673,7 +687,7 @@ class ForkOps(RepoCore):
         if report.status is VerifyStatus.MISSING:
             gone = "" if m.pin is None else "pin missing and "
             raise TetherError(f"{gone}recorded state is gone: {report.message}")
-        ref = backend.fork(m.locator, source, name)
+        ref = fork_ref(backend, m.locator, source, name, expected)
         self._note_touched(m.key, m.kind, m.locator)
         return ref
 
@@ -919,47 +933,87 @@ class ForkOps(RepoCore):
                 plan.actions.append(Action("refuse", key, now.kind, detail=refuse))
                 continue
             assert m is not None and m.state is not None
-            existing = self.workspace.working_refs.get(key)
             name = (
-                existing
+                self.workspace.working_refs.get(key)
                 or self.workspace.pending_forks.get(key)
                 or self._working_ref_for(key)
             )
             params: dict[str, Any] = {"then": m.to_toml(), "then_state": m.state}
             detail = f"from {rev}: {m.pin.ref if m.pin else short_state(m.state)}"
-            if existing is not None:
-                head = self._branch_has_new_writes(key, existing)
-                params["existing"] = existing
-                params["head"] = self.workspace.last_snapshot.get(key)
-                with contextlib.suppress(TetherError):
-                    params["head"] = backend.fingerprint(now.locator, existing)
-                detail += f"; resets {existing}"
-                if head is not None and not discard:
+            # Whether the branch exists is the store's answer, not the
+            # workspace's: a fork `new` deferred may have been created since
+            # by a `--shared` peer or another clone writing through the same
+            # bookmark, and a fork would reset it. Its head decides, as in
+            # `plan_new`; a head that cannot be read is refused rather than
+            # taken for "nothing to lose".
+            try:
+                present = name in backend.list_working_refs(now.locator)
+            except TetherError as exc:
+                plan.actions.append(
+                    Action(
+                        "refuse",
+                        key,
+                        now.kind,
+                        target=name,
+                        detail=f"could not list branches ({exc}); whether {name} "
+                        "exists is unknown and a fork would reset it blind",
+                    )
+                )
+                continue
+            head: State | None = None
+            if present:
+                try:
+                    head = backend.fingerprint(now.locator, name)
+                except TetherError as exc:
                     plan.actions.append(
                         Action(
                             "refuse",
                             key,
                             now.kind,
-                            target=existing,
-                            detail=f"{existing} has writes since this workspace last "
-                            f"committed ({short_state(head)}); commit them, or pass "
-                            "--discard to throw them away",
+                            target=name,
+                            detail=f"{name} exists but its head could not be read "
+                            f"({exc}); a restore would reset it blind",
                         )
                     )
                     continue
-                if head is not None:
+                params["existing"] = name
+                params["head"] = head
+                detail += f"; resets {name}"
+                known = [
+                    self.workspace.base_states.get(key),
+                    self.workspace.fork_points.get(key),
+                    now.state,
+                ]
+                unpinned = not any(
+                    self._same(now.kind, head, k) for k in known if k is not None
+                )
+                if unpinned and not discard:
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            now.kind,
+                            target=name,
+                            detail=f"{name} has writes since this workspace last "
+                            f"committed ({short_state(head)}); commit them, or pass "
+                            "--discard to throw them away",
+                            params=params,
+                        )
+                    )
+                    continue
+                if unpinned:
                     detail += f", discarding its writes ({short_state(head)})"
             plan.actions.append(
                 Action("fork", key, now.kind, target=name, detail=detail, params=params)
             )
-            if existing is not None:
+            if present:
                 plan.require(
                     "ref_head",
-                    params["head"],
+                    head,
                     key=key,
                     backend=now.kind,
                     locator=dict(now.locator),
-                    ref=existing,
+                    ref=name,
                     what=f"restore {key}",
                 )
             else:
@@ -1096,23 +1150,17 @@ class ForkOps(RepoCore):
                 self.workspace.fork_points[key] = dict(then_state)
                 self.workspace.last_snapshot[key] = dict(then_state)
 
-            # Every head is checked before the first reset (stale means nothing
-            # happens), and the workspace is written after *each* reset -- with
-            # the siblings that share the branch -- so a process killed between
-            # two resets leaves every branch that was reset described as such.
-            if verify:
-                for a in forks:
-                    if a.params.get("existing"):
-                        self._require_head(
-                            self.backend_for(a.kind),
-                            self.objects[a.key].locator,
-                            str(a.params["existing"]),
-                            a.params.get("head"),
-                            what=f"restore {a.key}",
-                        )
+            # Every head was checked by the plan's preconditions before the
+            # first reset (stale means nothing happens); each reset then moves
+            # the branch only from that head (`expected`), and the workspace
+            # is written after *each* reset -- with the siblings that share
+            # the branch -- so a process killed between two resets leaves
+            # every branch that was reset described as such.
             for a in forks:
                 m = ObjectManifest.from_toml(str(a.params["then"]))
-                ref = self._fork_from_manifest(m, a.target)
+                ref = self._fork_from_manifest(
+                    m, a.target, expected=_expected_head(a.params)
+                )
                 self._progress(op, "fork", key=a.key, ref=ref)
                 adopt(a.key, ref, dict(a.params["then_state"]))
                 for sibling in shares.values():

@@ -16,6 +16,7 @@ from tether.errors import (
     ConfigError,
     ImmutableObjectModified,
     MultiObjectError,
+    StalePlanError,
     StaleWorkingCopyError,
     TetherError,
     VcsError,
@@ -2594,14 +2595,14 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     assert not repo.is_stale()  # deliberate: the next commit pins the restore
     assert repo.workspace.fork_points["db"] == {"snapshot_id": s1}
     assert repo.ops()[0].command == "restore"
-    # promote now sees a divergence (base at s2, fork point s1): a merge, not
-    # a fast-forward.
-    pr = repo.plan_promote(["db"])
-    assert [a.op for a in pr.actions] == ["merge"], pr.actions
     # Committing pins the restored state under db.
     store.write(system, wref, {"v": "restored+"})
     repo.commit("back to v1 and on")
     assert repo.objects["db"].state == {"snapshot_id": store.resolve(system, wref)}
+    # promote now sees a divergence (base at s2, fork point s1): a merge, not
+    # a fast-forward.
+    pr = repo.plan_promote(["db"])
+    assert [a.op for a in pr.actions] == ["merge"], pr.actions
 
     # Writes on the branch block a restore without --discard. Undo of a
     # restore that *reset* the branch does not re-point it: it says what the
@@ -2625,6 +2626,86 @@ def test_restore_reforks_one_object_from_an_older_commit(vcs_root: Path) -> None
     repo.add("late", "memory", {"system": _mem_object(repo, "tmp") and system})
     plan = repo.plan_restore(["late"], c1)
     assert plan.actions[0].op == "refuse" and "not registered" in plan.actions[0].detail
+
+
+def test_restore_checks_the_branch_of_a_pending_fork_too(
+    vcs_root: Path, tmp_path: Path
+) -> None:
+    """`restore` used to look for writes only on a branch this workspace had
+    in `working_refs`. A fork `new` deferred is still pending here while a
+    `--shared` peer (or another clone on the same bookmark) has created the
+    branch and written to it; that head is checked like any other, and the
+    plan binds to it. (Reviewed as e4 and r10.)"""
+    a = Repo.init(vcs_root)
+    if a.vcs.kind == "git":
+        pytest.skip("git cannot check one branch out in two worktrees")
+    system = _mem_object(a)
+    store = default_store()
+    a.commit("baseline")
+    base = a._vcs_head_or_none()
+    assert base
+    a.new(bookmark="feat")  # lazy: pending fork
+    b = _second_checkout(a, vcs_root, tmp_path / "peer")
+    b.new("feat", shared=True)
+    assert "db" in b.workspace.pending_forks and not b.workspace.working_refs
+
+    handle = a.open("db")  # a creates the branch and writes, uncommitted
+    assert isinstance(handle, MemoryHandle)
+    handle.write({"wip": 1})
+    ref = a.workspace.working_refs["db"]
+    head = store.system(system).branches[ref]
+
+    plan = b.plan_restore(["db"], base)
+    (action,) = plan.actions
+    assert action.op == "refuse" and "has writes since" in action.detail
+    with pytest.raises(TetherError, match="cannot restore"):
+        b.apply_restore(plan)
+    assert store.system(system).branches[ref] == head  # a's write survived
+    # Discarding is a choice; the plan then binds to the head it reviewed.
+    plan = b.plan_restore(["db"], base, discard=True)
+    (action,) = plan.actions
+    assert action.op == "fork" and action.params["existing"] == ref
+    assert [p.kind for p in plan.preconditions if p.key == "db"] == ["ref_head"]
+    store.write(system, ref, {"wip": 2})  # a writes again before the apply
+    with pytest.raises(StalePlanError, match="moved since the plan was made"):
+        b.apply_restore(plan)
+    b.restore(["db"], base, discard=True)
+    assert store.system(system).branches[ref] == f"{system}:s0"
+
+
+def test_restore_refuses_a_head_it_cannot_read(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch whose head cannot be read is not "nothing to lose": the plan
+    refuses rather than fall back to the cached snapshot and reset writes it
+    never saw (r7); `plan_new` refuses in the same situation."""
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    repo.commit("baseline")
+    c0 = repo._vcs_head_or_none()
+    assert c0
+    repo.new(bookmark="feat", eager=True)
+    ref = repo.workspace.working_refs["db"]
+    store.write(system, ref, {"v": 0})
+    repo.commit("v0")
+    store.write(system, ref, {"uncommitted": "precious"})
+    repo.status()  # the cache now holds the uncommitted head
+    backend = repo.backend_for("memory")
+    real = backend.fingerprint
+
+    def flaky(locator, working_ref):
+        if working_ref == ref:
+            raise BackendError("timeout", kind="memory")
+        return real(locator, working_ref)
+
+    monkeypatch.setattr(backend, "fingerprint", flaky)
+    plan = repo.plan_restore(["db"], c0)
+    (action,) = plan.actions
+    assert action.op == "refuse" and "could not be read" in action.detail
+    with pytest.raises(TetherError, match="reset it blind"):
+        repo.apply_restore(plan)
+    assert store.read(system, ref) == {"uncommitted": "precious"}
 
 
 def _second_checkout(repo: Repo, vcs_root: Path, other_root: Path) -> Repo:
