@@ -811,7 +811,9 @@ class PromoteOps(RepoCore):
                     },
                 )
             if errors:
-                raise MultiObjectError("promote failed for some objects", errors)
+                raise MultiObjectError(
+                    "promote failed for some objects", errors, report=report
+                )
             return report
 
     def promote(

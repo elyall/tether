@@ -723,7 +723,9 @@ class GcOps(RepoCore):
                     },
                 )
             if errors:
-                raise MultiObjectError("gc failed for some actions", errors)
+                raise MultiObjectError(
+                    "gc failed for some actions", errors, report=report
+                )
             return report
 
     def gc(

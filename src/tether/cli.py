@@ -21,7 +21,7 @@ except ImportError as exc:  # pragma: no cover - optional dep
     ) from exc
 
 from tether.backends.base import Capability, HistoryEntry, tier_of
-from tether.errors import TetherError
+from tether.errors import MultiObjectError, TetherError
 from tether.handles import (
     DeltaHandle,
     DoltHandle,
@@ -1660,7 +1660,8 @@ def gc(
     (`add --create`) that nothing references any more, once only tether's own
     refs remain in them (`delete-store`). Dry-run by default: pass
     `--no-dry-run` (or `--from-plan`) to release. Refused while jj reports a
-    conflicted bookmark or commit.
+    conflicted bookmark or commit. When some actions fail, what the rest did is
+    printed with the failures; exit code 3 if anything was released.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     if force_prune and not prune_bookmarks:
@@ -1677,6 +1678,7 @@ def gc(
             "`repair`; fetch every bookmark first, and read the plan"
         )
     repo = _repo()
+    failed: dict[str, Exception] = {}
     try:
         if from_plan is not None:
             plan = _load_plan(from_plan, "gc")
@@ -1695,6 +1697,10 @@ def gc(
                 _show_plan(plan, as_json=json_out)
                 return
             report = repo.apply_gc(plan)
+    except MultiObjectError as exc:
+        if not isinstance(exc.report, GcReport):
+            _fail(exc)
+        report, failed = exc.report, exc.errors
     except TetherError as exc:
         _fail(exc)
     if json_out:
@@ -1710,11 +1716,24 @@ def gc(
                 "deleted_stores": report.deleted_stores,
                 "kept_stores": report.kept_stores,
                 "forgotten_stores": report.forgotten_stores,
+                "failed": {k: str(v) for k, v in failed.items()},
             },
             as_json=True,
         )
-        return
-    _print_gc_report(report)
+    else:
+        _print_gc_report(report)
+        for target, exc in failed.items():
+            typer.secho(f"FAILED    {target}: {exc}", err=True)
+    if failed:
+        applied = (
+            report.unpinned
+            or report.deleted_working_refs
+            or report.forgotten_working_refs
+            or report.deleted_listings
+            or report.deleted_stores
+            or report.forgotten_stores
+        )
+        raise typer.Exit(PARTIAL if applied else 1)
 
 
 def _print_gc_report(report: GcReport) -> None:
@@ -1811,10 +1830,13 @@ def promote(
     bookmark to this bookmark's commit. Base unchanged since the fork ->
     fast-forward. Base moved -> native 3-way merge where the system has one
     (Dolt, git), otherwise refused with the system's own recipe; after
-    a merge, `commit` then `promote` again to move the trunk.
+    a merge, `commit` then `promote` again to move the trunk. Exit code 1
+    when something was refused or failed and nothing landed, 3 when some of
+    it landed.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     repo = _repo()
+    failed: dict[str, Exception] = {}
     try:
         if from_plan is not None:
             plan = _load_plan(from_plan, "promote")
@@ -1828,8 +1850,14 @@ def promote(
                 _show_plan(plan, as_json=json_out)
                 return
             report = repo.apply_promote(plan)
+    except MultiObjectError as exc:
+        if not isinstance(exc.report, PromoteReport):
+            _fail(exc)
+        report, failed = exc.report, exc.errors
     except TetherError as exc:
         _fail(exc)
+    stopped = bool(report.refused or failed)
+    code = PARTIAL if stopped and (report.fast_forwarded or report.merged) else 1
     if json_out:
         _emit(
             {
@@ -1842,11 +1870,12 @@ def promote(
                 "kept_forks": report.kept_forks,
                 "trunk_moved": report.trunk_moved,
                 "trunk_held": report.trunk_held,
+                "failed": {k: str(v) for k, v in failed.items()},
             },
             as_json=True,
         )
-        if report.refused:
-            raise typer.Exit(1)
+        if stopped:
+            raise typer.Exit(code)
         return
     for key, state in report.fast_forwarded.items():
         typer.echo(f"  fast-forwarded {key} -> {state}")
@@ -1874,8 +1903,10 @@ def promote(
         typer.echo(f"{repo.config.trunk} -> {report.trunk_moved[:12]}")
     if report.trunk_held:
         typer.echo(f"{repo.config.trunk} not moved: {report.trunk_held}")
-    if report.refused:
-        raise typer.Exit(1)
+    for key, exc in failed.items():
+        typer.secho(f"  FAILED         {key}: {exc}", err=True)
+    if stopped:
+        raise typer.Exit(code)
 
 
 # --------------------------------------------------------------------------- #

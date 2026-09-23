@@ -105,9 +105,17 @@ class StalePlanError(TetherError):
 
 
 class MultiObjectError(TetherError):
-    """Aggregates per-object failures from a fan-out operation."""
+    """Aggregates per-object failures from a fan-out operation.
 
-    def __init__(self, message: str, errors: dict[str, Exception]) -> None:
+    ``report`` is what the operation did before it gave up, when it did
+    anything (`apply_gc`, `apply_promote`): the rest landed, and the caller
+    should say so, not just that something failed.
+    """
+
+    def __init__(
+        self, message: str, errors: dict[str, Exception], *, report: object = None
+    ) -> None:
         self.errors = errors
+        self.report = report
         detail = "; ".join(f"{key}: {exc}" for key, exc in errors.items())
         super().__init__(f"{message} ({detail})")

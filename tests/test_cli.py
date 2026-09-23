@@ -516,6 +516,106 @@ def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 1
 
 
+def _two_objects(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """`db` and `db2`, committed on the trunk, then written and committed on
+    bookmark `work`: two pins nothing on the trunk references once `work`
+    is gone, and two fast-forwards to promote."""
+    monkeypatch.chdir(vcs_root)
+    store = default_store()
+    repo = Repo.init(vcs_root)
+    systems = {}
+    for key in ("db", "db2"):
+        systems[key] = f"sys-{uuid.uuid4().hex[:8]}"
+        store.system(systems[key])
+        repo.add(key, "memory", {"system": systems[key], "branch": "main"})
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    for key, system in systems.items():
+        store.write(system, repo.workspace.working_refs[key], {key: "work"})
+    repo.commit("work")
+    return systems
+
+
+@pytest.mark.parametrize("fails", ["one", "both"])
+@pytest.mark.parametrize("json_out", [False, True])
+def test_cli_gc_reports_what_it_released_when_some_actions_fail(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, fails: str, json_out: bool
+) -> None:
+    """A gc whose unpins partly fail printed only the error and exited 1,
+    though the rest was released. It prints its report and the failures,
+    and exits 3 when anything was released (1 when nothing was)."""
+    from tether.backends.memory import MemoryBackend
+
+    systems = _two_objects(vcs_root, monkeypatch)
+    repo = Repo.find(vcs_root)
+    backend = repo.backend_for("memory")
+    for n, system in enumerate(systems.values()):  # a pin no manifest names
+        loc = {"system": system}
+        backend.pin(
+            loc, backend.fingerprint(loc, None), f"{repo.config.dataset_id}.{n}"
+        )
+    real_unpin = MemoryBackend.unpin
+
+    def flaky(self, locator, pin):
+        if fails == "both" or locator["system"] == systems["db2"]:
+            raise RuntimeError("store unavailable")
+        return real_unpin(self, locator, pin)
+
+    monkeypatch.setattr(MemoryBackend, "unpin", flaky)
+    args = [
+        "gc",
+        "--no-dry-run",
+        "--release-foreign",
+        *(["--json"] if json_out else []),
+    ]
+    r = runner.invoke(app, args)
+    assert r.exit_code == (3 if fails == "one" else 1), r.output
+    if json_out:
+        payload = json.loads(r.stdout)
+        assert len(payload["unpinned"].get("memory", [])) == (fails == "one")
+        assert len(payload["failed"]) == (1 if fails == "one" else 2)
+    else:
+        assert f"unpinned {int(fails == 'one')} pin(s)" in r.stdout
+        assert "FAILED" in r.output and "store unavailable" in r.output
+
+
+@pytest.mark.parametrize("stop", ["refused", "failed"])
+def test_cli_promote_exits_3_when_part_of_it_landed(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """Named keys land one by one: `db` fast-forwards while `db2`'s base
+    moved under the apply (refused) or its store failed. That exited 1,
+    like a promote where nothing moved; it is 3 now, with what landed
+    printed -- and 1 still when nothing did."""
+    from tether.backends.memory import MemoryBackend
+
+    systems = _two_objects(vcs_root, monkeypatch)
+    store = default_store()
+    real_promote = MemoryBackend.promote
+
+    def db2_stops(self, locator, source, **kw):
+        if locator["system"] == systems["db2"]:
+            if stop == "failed":
+                raise RuntimeError("store unavailable")
+            store.write(systems["db2"], "main", {"concurrent": 1})
+        return real_promote(self, locator, source, **kw)
+
+    monkeypatch.setattr(MemoryBackend, "promote", db2_stops)
+    r = runner.invoke(app, ["promote", "db", "db2"])
+    assert r.exit_code == 3, r.output
+    assert "fast-forwarded db" in r.stdout
+    assert ("refused        db2" in r.stdout) is (stop == "refused")
+    assert ("FAILED         db2" in r.output) is (stop == "failed")
+    assert store.read(systems["db"], "main") == {"db": "work"}
+    r = runner.invoke(app, ["promote", "db2", "--json"])
+    if stop == "failed":  # nothing moved: exit 1, as before
+        assert r.exit_code == 1, r.output
+        assert not json.loads(r.stdout)["fast_forwarded"]
+    else:  # the re-plan merges onto the moved base, as the refusal said
+        assert r.exit_code == 0, r.output
+        assert set(json.loads(r.stdout)["merged"]) == {"db2"}
+
+
 def test_cli_ops(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(vcs_root)
     r = runner.invoke(app, ["init"])
