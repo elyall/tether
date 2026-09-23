@@ -1030,24 +1030,32 @@ class RepoCore:
         return ids
 
     def _refuse_conflicts(self, what: str) -> None:
-        """Refuse `what` while jj reports a conflicted bookmark or commit.
+        """Refuse `what` while jj reports a conflicted bookmark, or a conflict
+        in this dataset's `.tether/` that no later commit resolved.
 
         A conflicted bookmark has several targets and is left out of
         `bookmarks()`, so the commits it reaches would count as reachable
-        from nothing; a conflicted commit's manifests are several answers.
-        Neither is a state to judge references in.
+        from nothing. An unresolved conflict in `.tether/` leaves the
+        manifests a bookmark or working copy stands on with several answers.
+        Neither is a state to judge references in. A conflict elsewhere, or
+        one resolved in a later commit, is history like any other: the walk
+        reads every side of it (`VcsAdapter.iter_history_files`).
         """
+        tether_dir = (self._dataset_rel() / _m.TETHER_DIR).as_posix()
         found = [
-            f"bookmark {name} has conflicting targets (`jj bookmark list`)"
+            f"bookmark {name} has conflicting targets; `jj bookmark set {name} "
+            "-r REV` picks one"
             for name in self.vcs.conflicted_bookmarks()
         ] + [
-            f"commit {commit[:12]} is conflicted (`jj resolve`)"
-            for commit in self.vcs.conflicted_commits()
+            f"commit {commit[:12]} has conflicted manifests under {tether_dir}/; "
+            f"`jj new {commit[:12]}`, fix the files, then `jj squash` (or keep "
+            "the fix in that new commit)"
+            for commit in self.vcs.unresolved_conflicts(tether_dir)
         ]
         if found:
             raise VcsError(
                 f"{what} refused while the VCS reports conflicts, which hide what "
-                f"history references: {'; '.join(found)}. Resolve them first"
+                f"history references: {'; '.join(found)}"
             )
 
     def bookmark_holders(self, bookmark: str) -> list[str]:

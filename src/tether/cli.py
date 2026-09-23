@@ -1660,8 +1660,9 @@ def gc(
     (`add --create`) that nothing references any more, once only tether's own
     refs remain in them (`delete-store`). Dry-run by default: pass
     `--no-dry-run` (or `--from-plan`) to release. Refused while jj reports a
-    conflicted bookmark or commit. When some actions fail, what the rest did is
-    printed with the failures; exit code 3 if anything was released.
+    conflicted bookmark, or a conflict in `.tether/` no later commit resolved.
+    When some actions fail, what the rest did is printed with the failures;
+    exit code 3 if anything was released.
     """
     _refuse_preview_with_apply(dry_run, plan_out, from_plan)
     if force_prune and not prune_bookmarks:

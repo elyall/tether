@@ -4,6 +4,7 @@ checkout's working tree or by an operation that has not finished, branches a
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -371,6 +372,144 @@ def test_gc_and_drop_refuse_while_jj_reports_a_conflicted_commit(
     assert not repo.vcs.conflicted_commits()
     unpins = {x.target for x in repo.plan_gc().actions if x.op == "unpin"}
     assert unpins == {feat_pin.ref, side.pinned["db"].ref}
+
+
+def _commit(vcs_root: Path, revset: str) -> str:
+    return _jj(vcs_root, "log", "--no-graph", "-r", revset, "-T", "self.commit_id()")
+
+
+def _file_conflict(vcs_root: Path, relpath: str, *, resolved: bool) -> str:
+    """Two edits of `relpath` on top of main, the second rebased onto the
+    first: the second is conflicted. `resolved` fixes it in a child."""
+    path = vcs_root / relpath
+    for side in ("A", "B"):
+        _jj(vcs_root, "new", "main", "-m", f"side {side}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{side}\n", encoding="utf-8")
+    _jj(vcs_root, "new", "main")
+    a = _commit(vcs_root, 'description(glob:"side A*")')
+    _jj(
+        vcs_root,
+        "rebase",
+        "-r",
+        _commit(vcs_root, 'description(glob:"side B*")'),
+        "-d",
+        a,
+    )
+    b = _commit(vcs_root, 'description(glob:"side B*")')
+    if resolved:
+        _jj(vcs_root, "new", b, "-m", "fixed")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("A and B\n", encoding="utf-8")
+        _jj(vcs_root, "new", "main")
+    return b
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+@pytest.mark.parametrize(
+    "relpath",
+    ["README", "docs/notes.md", "other/.tether/objects/x.toml", "ds/.tetherx/y"],
+)
+def test_a_conflict_outside_the_datasets_manifests_blocks_neither_gc_nor_drop(
+    vcs_root: Path, relpath: str, resolved: bool
+) -> None:
+    """The review's case: a README conflict, which jj users resolve in a
+    child commit, blocked gc and drop forever. So did any conflict anywhere
+    in history -- another directory's `.tether/`, a sibling whose name only
+    starts like it -- resolved or not."""
+    if shutil.which("jj") is None or not (vcs_root / ".jj").is_dir():
+        pytest.skip("jj conflicts")
+    repo = Repo.init(vcs_root / "ds")
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.commit("baseline")
+    repo.new(bookmark="feat")
+    _write(repo, {"x": "feat"})
+    repo.commit("feat write")
+    repo.new("main")
+    conflicted = _file_conflict(vcs_root, relpath, resolved=resolved)
+    repo = Repo.find(vcs_root / "ds")
+    assert conflicted in repo.vcs.conflicted_commits()
+    repo.plan_gc()
+    report = repo.drop("feat")
+    assert report.abandoned and "feat" not in repo.vcs.bookmarks()
+
+
+@pytest.mark.parametrize("where", ["child", "grandchild"])
+def test_a_manifest_conflict_resolved_in_a_later_commit_no_longer_blocks(
+    vcs_root: Path, where: str
+) -> None:
+    """Resolving in a new commit on top leaves the conflicted commit in
+    history, and the bookmark on it. gc reads every side of it, so what
+    either side pinned is still referenced; nothing blocks any more."""
+    repo, system = _baseline(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicts")
+    repo.new(bookmark="feat")
+    _write(repo, {"x": "feat"})
+    feat_pin = repo.commit("feat write").pinned["db"]
+    repo.new("main")
+    _write(repo, {"x": "main"})
+    trunk = repo.commit("trunk write")
+    assert feat_pin is not None and trunk.vcs_commit is not None
+    _jj(vcs_root, "rebase", "-b", "feat", "-d", "main")
+    repo = Repo.find(vcs_root)
+    (conflicted,) = repo.vcs.conflicted_commits()
+    with pytest.raises(VcsError, match=r"conflicted manifests under \.tether/"):
+        repo.plan_gc()
+    _jj(vcs_root, "new", conflicted, "-m", "on top")
+    if where == "grandchild":  # a child that leaves the conflict in place
+        (vcs_root / "README").write_text("unrelated\n", encoding="utf-8")
+        _jj(vcs_root, "new", "-m", "resolution")
+    text = repo.vcs.read_file_at(trunk.vcs_commit, ".tether/objects/db.toml")
+    assert text is not None
+    (vcs_root / ".tether" / "objects" / "db.toml").write_text(text, encoding="utf-8")
+    _jj(vcs_root, "new", "main")
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.conflicted_commits()[-1] == conflicted
+    assert repo.vcs.bookmarks()["feat"] == conflicted
+    plan = repo.plan_gc()
+    assert not [a for a in plan.actions if a.op == "unpin"], plan.render()
+    repo.plan_drop("feat")
+    assert feat_pin.ref in default_store().system(system).tags
+
+
+def test_a_manifest_conflict_still_open_on_one_line_blocks_with_the_remedy(
+    vcs_root: Path,
+) -> None:
+    """Resolved on one line, still conflicted on a sibling line (a head):
+    refused, naming that head, with a remedy that works on a commit that
+    is not the working copy -- not `jj resolve`."""
+    repo, _system = _baseline(vcs_root)
+    if repo.vcs.kind != "jj":
+        pytest.skip("jj conflicts")
+    repo.new(bookmark="feat")
+    _write(repo, {"x": "feat"})
+    repo.commit("feat write")
+    repo.new("main")
+    _write(repo, {"x": "main"})
+    trunk = repo.commit("trunk write")
+    assert trunk.vcs_commit is not None
+    _jj(vcs_root, "rebase", "-b", "feat", "-d", "main")
+    (conflicted,) = Repo.find(vcs_root).vcs.conflicted_commits()
+    _jj(vcs_root, "new", conflicted, "-m", "resolution")
+    text = repo.vcs.read_file_at(trunk.vcs_commit, ".tether/objects/db.toml")
+    assert text is not None
+    (vcs_root / ".tether" / "objects" / "db.toml").write_text(text, encoding="utf-8")
+    _jj(vcs_root, "new", conflicted, "-m", "other line")
+    (vcs_root / "README").write_text("unrelated\n", encoding="utf-8")
+    _jj(vcs_root, "new", "main")
+    other = _commit(vcs_root, 'description(glob:"other line*")')
+    repo = Repo.find(vcs_root)
+    with pytest.raises(VcsError) as refused:
+        repo.plan_gc()
+    message = str(refused.value)
+    assert f"commit {other[:12]} has conflicted manifests under .tether/" in message
+    assert f"`jj new {other[:12]}`" in message and "`jj squash`" in message
+    assert "jj resolve" not in message and conflicted[:12] not in message
+    with pytest.raises(VcsError, match=other[:12]):
+        repo.plan_drop("feat")
 
 
 def test_promote_refuses_a_conflicted_trunk(vcs_root: Path) -> None:

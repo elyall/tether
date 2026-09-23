@@ -155,10 +155,11 @@ class GcOps(RepoCore):
         (every side of a conflicted jj commit included), the working tree of
         this or any other live checkout, or an operation still running or
         interrupted in one of them. Refused while jj reports a conflicted
-        bookmark or commit.
+        bookmark, or a conflict in the dataset's `.tether/` that no later
+        commit resolved.
 
         Raises:
-            VcsError: The VCS reports conflicts.
+            VcsError: The VCS reports such a conflict.
         """
         self._refuse_conflicts("gc")
         scope = scope or GcScope()
@@ -848,8 +849,9 @@ class GcOps(RepoCore):
         Raises:
             ConfigError: The trunk, an unknown bookmark, or one another live
                 checkout works on.
-            VcsError: The VCS reports a conflicted bookmark or commit; which
-                commits only this bookmark reaches cannot be told then.
+            VcsError: The VCS reports a conflicted bookmark, or an unresolved
+                conflict in `.tether/`; which commits only this bookmark
+                reaches, or what they reference, cannot be told then.
         """
         trunk = self.config.trunk
         if bookmark == trunk:

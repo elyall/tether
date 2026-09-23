@@ -595,6 +595,13 @@ class VcsAdapter(Protocol):
     def conflicted_commits(self) -> list[str]:
         """Visible commits whose tree holds a conflict (jj). Empty under git."""
 
+    def unresolved_conflicts(self, reldir: str) -> list[str]:
+        """Conflicted commits that are a visible head or a working copy and
+        whose conflict touches `reldir` (jj). A descendant inherits a
+        conflict until it resolves it, so a conflict no later commit resolved
+        always shows at a head, and one resolved in a child (or further down)
+        does not -- wherever the bookmarks are. Empty under git."""
+
     def commit_info(self, revs: list[str]) -> list[CommitInfo]:
         """Author, timestamps, message, and parents for many commits in one call."""
 
@@ -1148,6 +1155,31 @@ class JjAdapter:
 
     def conflicted_commits(self) -> list[str]:
         return [commit for commit, conflict, _wc, _here in self._scan() if conflict]
+
+    def unresolved_conflicts(self, reldir: str) -> list[str]:
+        rows = self._scan()
+        conflicted = {c for c, conflict, _wc, _here in rows if conflict}
+        if not conflicted:
+            return []
+        heads = self._jj(
+            "log",
+            "--no-graph",
+            "--ignore-working-copy",
+            "-r",
+            ":: ~ (::)-",
+            "-T",
+            'self.commit_id() ++ "\\n"',
+        ).stdout.split()
+        tips = {*heads, *(c for c, _conflict, wc, _here in rows if wc)}
+        prefixes = tuple(f"{reldir.strip('/')}{sep}" for sep in {"/", os.sep})
+        found = []
+        for commit in sorted(conflicted & tips):
+            paths = self._jj(
+                "resolve", "--list", "--ignore-working-copy", "-r", commit, check=False
+            ).stdout.splitlines()
+            if any(p.startswith(prefixes) for p in paths):
+                found.append(commit)
+        return found
 
     def bookmark_set(self, name: str, rev: str) -> None:
         self._jj("bookmark", "set", name, "-r", rev, "--allow-backwards")
@@ -1753,6 +1785,9 @@ class GitAdapter:
 
     def conflicted_commits(self) -> list[str]:
         return []  # a merge in progress is the index's, not history's
+
+    def unresolved_conflicts(self, reldir: str) -> list[str]:
+        return []
 
     def position(self) -> dict[str, Any]:
         # An unborn branch (no commits yet) has a symbolic HEAD but no commit.
