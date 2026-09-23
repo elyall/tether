@@ -41,17 +41,26 @@ def test_plan_round_trips_preconditions_and_refuses_format_1() -> None:
     plan.require("manifest_hash", "abc", detail="manifests changed")
     plan.require("ref_head", {"snapshot_id": "s1"}, key="db", backend="memory", ref="r")
     data = json.loads(plan.to_json())
-    assert data["format"] == PLAN_FORMAT == 2
+    assert data["format"] == PLAN_FORMAT == 3
+    assert data["digest"] == plan.digest()
     again = Plan.from_dict(data)
     assert again.preconditions == plan.preconditions
     assert again.preconditions[1].params == {"backend": "memory", "ref": "r"}
+    assert again.digest() == plan.digest() and not again.edited()
     with pytest.raises(ValueError, match="unknown precondition kind"):
         plan.require("not-a-kind")
     with pytest.raises(ConfigError, match="unknown plan precondition"):
         Precondition.from_dict({"kind": "nope"})
-    # A plan saved before 0.1.0b1 carries no preconditions: refused, re-plan.
+    # A plan saved before 0.1.0b1 carries no preconditions, one saved before
+    # 0.1.0b4 no digest: refused, re-plan.
     data["format"] = 1
     with pytest.raises(StalePlanError, match=r"format 1 predates 0\.1\.0b1"):
+        Plan.from_dict(data)
+    data["format"] = 2
+    del data["digest"]
+    with pytest.raises(
+        StalePlanError, match=r"format 2 predates 0\.1\.0b4.*re-run the plan"
+    ):
         Plan.from_dict(data)
     data["format"] = 99
     with pytest.raises(ConfigError, match="unsupported plan format"):
@@ -249,13 +258,23 @@ def test_verify_plan_checks_each_kind(vcs_root: Path) -> None:
     # no_new_holders: nobody else is on the bookmark.
     repo._verify_plan(plan_with("no_new_holders", bookmark="work"), cmd)
 
-    # bookmark_head: where the bookmark is, or `None` for no bookmark.
+    # bookmark_head: where the bookmark is. One naming no bookmark checks
+    # nothing and is refused; `None` (made on no bookmark) holds only while
+    # the checkout is still on none.
     repo._verify_plan(
         plan_with("bookmark_head", repo.vcs.bookmarks()["main"], bookmark="main"), cmd
     )
     with pytest.raises(StalePlanError, match="bookmark_head drifted"):
         repo._verify_plan(plan_with("bookmark_head", "0" * 40, bookmark="main"), cmd)
+    with pytest.raises(StalePlanError, match=r"drifted \(no bookmark named\)"):
+        repo._verify_plan(plan_with("bookmark_head", None), cmd)
+    with pytest.raises(StalePlanError, match=r"drifted \(main\)"):
+        repo._verify_plan(plan_with("bookmark_head", None, bookmark=None), cmd)
+    repo.workspace.bookmark = None
     repo._verify_plan(plan_with("bookmark_head", None, bookmark=None), cmd)
+    with pytest.raises(StalePlanError, match="bookmark_head drifted"):
+        repo._verify_plan(plan_with("bookmark_head", "0" * 40, bookmark=None), cmd)
+    repo.workspace.bookmark = "main"
 
     # verify=False runs the command check only.
     repo._verify_plan(plan_with("manifest_hash", "nope"), cmd, verify=False)
@@ -314,6 +333,116 @@ def test_a_plan_missing_a_required_precondition_is_refused(vcs_root: Path) -> No
         repo.apply_gc(Plan.from_dict(gc))
     # `verify=False` (plan and apply in one call) skips the requirement.
     repo.apply_commit(old, verify=False)
+
+
+def _edit_promote(data: dict, edit: str) -> None:
+    """One hand edit of a saved two-object promote plan (`db`, `db2`)."""
+    ffs = [a for a in data["actions"] if a["op"] == "fast-forward"]
+    if edit == "drop an action":
+        data["actions"] = [a for a in data["actions"] if a["key"] != "db2"]
+    elif edit == "target_state":
+        ffs[0]["params"]["target_state"] = dict(ffs[0]["params"]["base_state"])
+    elif edit == "source ref":
+        ffs[0]["params"]["source"] = {"ref": "tether.ws.00000000.elsewhere"}
+    elif edit == "fast-forward -> merge":
+        ffs[0]["op"] = "merge"
+    elif edit == "bookmark_commit":
+        data["context"]["bookmark_commit"] = "0" * 40
+    elif edit == "subset":
+        data["context"]["subset"] = True
+    elif edit == "precondition expected":
+        pre = next(p for p in data["preconditions"] if p["kind"] == "base_state")
+        pre["expected"] = dict(ffs[1]["params"]["target_state"])
+    elif edit == "note":
+        data["notes"].append("reviewed by nobody")
+    elif edit == "digest removed":
+        del data["digest"]
+    else:  # pragma: no cover
+        raise AssertionError(edit)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        "drop an action",
+        "target_state",
+        "source ref",
+        "fast-forward -> merge",
+        "bookmark_commit",
+        "subset",
+        "precondition expected",
+        "note",
+        "digest removed",
+    ],
+)
+def test_a_saved_promote_plan_edited_anywhere_is_refused(
+    vcs_root: Path, edit: str
+) -> None:
+    """Port of the review's D8: a plan's preconditions were checked, but not
+    what they vouch for. Deleting one fast-forward from a saved two-object
+    promote plan landed `db` alone and moved main to a commit recording
+    `db2`'s fork state; `context.bookmark_commit` and an action's
+    `target_state` could be changed as freely. The digest binds actions,
+    context and preconditions: an edit anywhere is refused and nothing
+    moves."""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    systems = {key: _mem(repo, key) for key in ("db", "db2")}
+    repo.commit("baseline")
+    repo.new(bookmark="work", eager=True)
+    for key, system in systems.items():
+        store.write(system, repo.workspace.working_refs[key], {key: "feat"})
+    repo.commit("feat writes")
+    plan = repo.plan_promote()
+    assert sorted(a.op for a in plan.actions) == ["fast-forward", "fast-forward"]
+    data = json.loads(plan.to_json())
+    _edit_promote(data, edit)
+    edited = Plan.from_dict(data)
+    heads = {k: store.system(s).branches["main"] for k, s in systems.items()}
+    trunk = repo.vcs.bookmarks()["main"]
+
+    with pytest.raises(StalePlanError, match="edited after it was saved"):
+        repo.apply_promote(edited)
+    assert {k: store.system(s).branches["main"] for k, s in systems.items()} == heads
+    assert repo.vcs.bookmarks()["main"] == trunk
+    assert not [e for e in repo.ops() if e.command == "promote"]
+    # The plan as saved still applies.
+    report = repo.apply_promote(Plan.from_json(plan.to_json()))
+    assert set(report.fast_forwarded) == {"db", "db2"} and report.trunk_moved
+
+
+@pytest.mark.parametrize("command", ["commit", "new", "gc", "restore", "drop"])
+def test_every_saved_plan_is_bound_by_its_digest(vcs_root: Path, command: str) -> None:
+    """The binding is the plan format's, not promote's: a saved plan of any
+    command with one field changed is refused before anything is checked or
+    written, and applies unchanged."""
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    c1 = repo.commit("baseline").vcs_commit
+    assert c1 is not None
+    if command in ("restore", "drop"):
+        repo.new(bookmark="work", eager=True)
+        default_store().write(system, repo.workspace.working_refs["db"], {"b": 2})
+        repo.commit("work")
+    if command == "drop":
+        repo.new("main")
+    default_store().write(system, "main", {"a": 3})
+    plan = {
+        "commit": lambda: repo.plan_commit("m"),
+        "new": lambda: repo.plan_new(bookmark="other", eager=True),
+        "gc": lambda: repo.plan_gc(),
+        "restore": lambda: repo.plan_restore(["db"], c1, discard=True),
+        "drop": lambda: repo.plan_drop("work"),
+    }[command]()
+    apply = getattr(repo, f"apply_{command}")
+    data = json.loads(plan.to_json())
+    data["context"]["reviewed"] = "by hand"
+    journaled = len(repo.ops())
+    with pytest.raises(StalePlanError, match="edited after it was saved"):
+        apply(Plan.from_dict(data))
+    assert len(repo.ops()) == journaled
+    apply(Plan.from_json(plan.to_json()))
+    assert len(repo.ops()) > journaled or not plan.writes
 
 
 def test_saved_plans_are_bound_to_the_bookmark_they_were_made_on(

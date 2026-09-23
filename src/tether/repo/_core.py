@@ -1477,6 +1477,13 @@ class RepoCore:
                 "tether, or edited) and cannot be trusted to apply where it was "
                 "reviewed; re-run the plan"
             )
+        if plan.edited():
+            raise StalePlanError(
+                f"this {command} plan was edited after it was saved: its actions, "
+                "context and preconditions no longer match the digest they were "
+                "saved with, so the checks no longer vouch for what it would do; "
+                "re-run the plan"
+            )
         for pre in plan.preconditions:
             self._check_precondition(pre)
 
@@ -1564,14 +1571,16 @@ class RepoCore:
             if holders:
                 fail(", ".join(holders))
         elif kind == "bookmark_head":
-            # A checkout on no bookmark has no head to bind to: `None` both
-            # ways, so the kind can be required of every promote plan.
-            bookmark = params.get("bookmark")
-            observed = (
-                self.vcs.bookmarks().get(str(bookmark))
-                if bookmark is not None
-                else None
-            )
+            if "bookmark" not in params:
+                fail("no bookmark named")  # a check that checks nothing
+            bookmark = params["bookmark"]
+            if bookmark is None:
+                # Made on no bookmark (so the kind can be required of every
+                # promote plan): it holds while the checkout is still on none.
+                if pre.expected is not None or self.workspace.bookmark is not None:
+                    fail(self.workspace.bookmark or pre.expected)
+                return
+            observed = self.vcs.bookmarks().get(str(bookmark))
             if observed != pre.expected:
                 fail(observed or "gone")
         elif kind == "store_empty":

@@ -12,6 +12,7 @@ world still matches the plan before touching anything.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -19,9 +20,17 @@ from typing import Any
 
 from tether.errors import ConfigError, StalePlanError
 
-PLAN_FORMAT = 2
+PLAN_FORMAT = 3
 """Bumped when a saved plan's shape changes. Format 1 (before 0.1.0b1) had
-no `preconditions`; such a plan is refused with "re-run the plan"."""
+no `preconditions`; format 2 (before 0.1.0b4) no `digest`, so its actions
+and context could be edited apart from the preconditions that vouch for
+them. Either is refused with "re-run the plan"."""
+
+_UNBOUND_FORMATS = {
+    1: "plan format 1 predates 0.1.0b1 and carries no preconditions",
+    2: "plan format 2 predates 0.1.0b4 and carries no digest binding its actions "
+    "and context to its preconditions",
+}
 
 PRECONDITION_KINDS = frozenset(
     {
@@ -203,6 +212,10 @@ class Plan:
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
+    saved_digest: str | None = field(default=None, compare=False, repr=False)
+    """The `digest` a loaded plan was saved with (`None`: made in this
+    process); `Repo._verify_plan` refuses a plan whose content no longer
+    matches it."""
 
     NON_WRITES = frozenset(
         {
@@ -244,7 +257,7 @@ class Plan:
             Precondition(kind, expected, key=key, params=params, detail=detail)
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def _content(self) -> dict[str, Any]:
         return {
             "format": PLAN_FORMAT,
             "command": self.command,
@@ -255,17 +268,32 @@ class Plan:
             "actions": [a.to_dict() for a in self.actions],
         }
 
+    def digest(self) -> str:
+        """SHA-256 of everything else in the saved plan, as JSON reads it back
+        (keys sorted, values through `str` where JSON has no type).
+
+        The preconditions vouch for the world the actions and context were
+        computed from; the digest binds the three together, so a saved plan
+        edited in one place -- an action dropped, a `target_state` or
+        `bookmark_commit` changed -- is refused at apply rather than applied
+        under checks that describe another plan. It detects edits, it does
+        not authenticate: whoever can write the file can recompute it.
+        """
+        normalized = json.loads(json.dumps(self._content(), default=str))
+        text = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self._content(), "digest": self.digest()}
+
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, default=str)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Plan:
         fmt = int(data.get("format", PLAN_FORMAT))
-        if fmt == 1:
-            raise StalePlanError(
-                "plan format 1 predates 0.1.0b1 and carries no preconditions; "
-                "re-run the plan"
-            )
+        if fmt in _UNBOUND_FORMATS:
+            raise StalePlanError(f"{_UNBOUND_FORMATS[fmt]}; re-run the plan")
         if fmt != PLAN_FORMAT:
             raise ConfigError(f"unsupported plan format {fmt!r}")
         return cls(
@@ -277,7 +305,15 @@ class Plan:
                 Precondition.from_dict(p) for p in data.get("preconditions", [])
             ],
             created_at=str(data.get("created_at", "")),
+            # A saved plan with no digest was edited as surely as one with
+            # the wrong digest.
+            saved_digest=str(data.get("digest") or ""),
         )
+
+    def edited(self) -> bool:
+        """Whether this plan was loaded and its content no longer matches the
+        digest it was saved with (see :meth:`digest`)."""
+        return self.saved_digest is not None and self.saved_digest != self.digest()
 
     @classmethod
     def from_json(cls, text: str) -> Plan:
