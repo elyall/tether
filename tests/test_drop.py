@@ -324,6 +324,62 @@ def test_drop_refuses_when_the_vcs_and_the_workspace_file_disagree(
     assert not repo.incomplete_ops()
 
 
+def test_drop_from_the_bookmark_sees_it_through_a_working_copy_with_edits(
+    vcs_root: Path,
+) -> None:
+    """jj reports no bookmark for a working copy with edits of its own (the
+    bookmark sits on `@-`), so `drop` from the bookmark planned no leave, and
+    the abandon rebased the working copy onto the trunk while the workspace
+    file still said the bookmark. The leave is planned now; the edits stay as
+    jj keeps them, a change rebased onto the destination."""
+    if not (vcs_root / ".jj").exists():
+        pytest.skip("only a jj working copy carries edits as a commit of its own")
+    repo, system = _baseline(vcs_root)
+    commit, fork, pin = _probe(repo)
+    (vcs_root / "notes.txt").write_text("my uncommitted work\n")
+    subprocess.run(["jj", "status"], cwd=vcs_root, check=True, capture_output=True)
+    repo = Repo.find(vcs_root)
+    assert repo.vcs.current_bookmarks() == [] and repo.workspace.bookmark == "probe"
+    edits = repo.vcs.position()
+    assert not edits["empty"]
+
+    plan = repo.plan_drop("probe")
+    assert plan.actions[0].op == "leave-bookmark" and plan.context["leave"] == "main"
+    report = repo.apply_drop(plan)
+    assert report.left_for == "main" and report.abandoned == [commit]
+    repo = Repo.find(vcs_root)
+    assert repo.workspace.bookmark == "main" and repo.vcs.current_bookmarks() == [
+        "main"
+    ]
+    assert repo.vcs.position()["empty"]
+    assert "probe" not in repo.vcs.bookmarks() and commit not in repo.vcs.history_revs()
+    assert not (vcs_root / "notes.txt").exists()  # not in the working copy ...
+
+    def jj(*args: str) -> str:
+        return subprocess.run(
+            ["jj", *args], cwd=vcs_root, check=True, capture_output=True, text=True
+        ).stdout
+
+    # ... but kept as a change of its own, rebased onto main by the abandon
+    # (jj's rule for the descendants of an abandoned commit): its diff --
+    # the note -- now sits on main's manifests, so probe's pin and branch go
+    # as they would have from an empty working copy.
+    parents = jj(
+        "log",
+        "--no-graph",
+        "-r",
+        edits["id"],
+        "-T",
+        "parents.map(|c| c.commit_id()).join(',')",
+    )
+    assert parents == repo.vcs.bookmarks()["main"]
+    assert jj("file", "show", "-r", edits["id"], "notes.txt") == "my uncommitted work\n"
+    assert f"tether.{pin}" not in default_store().system(system).tags
+    assert fork not in default_store().system(system).branches
+    assert all(v.ok for v in repo.verify(rev=edits["id"]).values())
+    assert not repo.incomplete_ops()
+
+
 def test_a_drop_whose_store_half_fails_closes_its_journal_entry(
     vcs_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

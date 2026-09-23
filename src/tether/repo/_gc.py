@@ -951,8 +951,10 @@ class GcOps(RepoCore):
             if here:
                 # As after `new <destination>`: its manifests, none of this
                 # bookmark's working refs or pending forks, and (jj) without
-                # the empty working-copy commit on top of the bookmark, whose
-                # tree still names the bookmark's pins.
+                # the working-copy commit on top of the bookmark, whose tree
+                # still names the bookmark's pins (empty, it goes with the
+                # leave; with edits, jj rebases the *change* onto the
+                # destination, whose manifests it then carries).
                 self.objects = self._objects_at(destination)
                 self.workspace.working_refs = {}
                 self.workspace.pending_forks = {}
@@ -1101,10 +1103,14 @@ class GcOps(RepoCore):
 
     def _on_bookmark(self: Repo, bookmark: str, commits: Sequence[str]) -> bool:
         """Whether this checkout is on `bookmark`, as the VCS sees it (git's
-        `HEAD` branch, jj's bookmarks at the working copy). A jj bookmark with
-        no commits of its own shares its commit with its base, and jj cannot
-        say which of the two the working copy is on: `workspace.toml` can."""
-        on = bookmark in self.vcs.current_bookmarks()
+        `HEAD` branch; jj's bookmarks at the working copy or, with edits in
+        the working copy, at its parent -- a hand edit must not turn "on the
+        bookmark" into "on no bookmark", or the abandon rebases the working
+        copy onto the trunk while the workspace file still says the bookmark).
+        A jj bookmark with no commits of its own shares its commit with its
+        base, and jj cannot say which of the two the working copy is on:
+        `workspace.toml` can."""
+        on = bookmark in self._vcs_bookmarks_here()
         if on and self.vcs.kind == "jj" and not commits:
             return self.workspace.bookmark == bookmark
         return on
