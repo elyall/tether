@@ -486,6 +486,12 @@ def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wref = Repo.find(".").workspace.working_refs["db"]
     s2 = store.write(system, wref, {"a": 1, "b": 2})
 
+    # Only committed states land: the trunk moves to the bookmark's commit,
+    # whose manifest must describe the upstream afterwards.
+    r = runner.invoke(app, ["promote", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "refuse" in r.output and "`tether commit` them first" in r.output
+    assert runner.invoke(app, ["commit", "-m", "work"]).exit_code == 0
     r = runner.invoke(app, ["promote", "--dry-run"])
     assert r.exit_code == 0, r.output
     assert "fast-forward" in r.output and "base unchanged since fork" in r.output
@@ -497,6 +503,7 @@ def test_cli_promote(vcs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     # A divergence with the ff strategy is refused (non-zero exit, hint shown).
     store.write(system, wref, {"a": 1, "b": 2, "c": 3})
+    assert runner.invoke(app, ["commit", "-m", "more work"]).exit_code == 0
     store.write(system, "main", {"a": 7, "b": 2})
     r = runner.invoke(app, ["promote", "--strategy", "ff"])
     assert r.exit_code == 1, r.output

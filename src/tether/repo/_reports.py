@@ -224,6 +224,10 @@ class PromoteReport:
     each system's fast-forward stands on its own (see the caveats)."""
     conflicts: dict[str, list[str]] = field(default_factory=dict)
     """Key -> conflicting units reported by a merge that was rolled back."""
+    kept_forks: dict[str, str] = field(default_factory=dict)
+    """Key -> why the working branch was not reset onto a merge result: it
+    gained writes between the plan and the merge, and those are never
+    discarded; commit them and promote again."""
     trunk_moved: str | None = None
     """The commit the trunk bookmark now points at, when every promoted object
     fast-forwarded and nothing was refused: the bookmark's commit describes

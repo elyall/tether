@@ -13,12 +13,16 @@ from tether.backends.base import (
     Capability,
     effective_capabilities,
 )
+from tether.backends.base import fork_ref as _fork_ref
+from tether.backends.base import merge_ref as _merge_ref
+from tether.backends.base import promote_ref as _promote_ref
 from tether.errors import (
     BackendError,
     ConfigError,
     MergeConflict,
     MultiObjectError,
     PinDriftError,
+    RefMovedError,
     TetherError,
 )
 from tether.manifest import (
@@ -97,6 +101,8 @@ class PromoteOps(RepoCore):
             if key not in objects:
                 raise ConfigError(f"no such object: {key}")
         message = message or f"tether promote {rev or self.workspace.workspace_id[:8]}"
+        bookmark = self.workspace.bookmark
+        marks = self.vcs.bookmarks()
         plan = Plan(
             command="promote",
             context={
@@ -106,7 +112,37 @@ class PromoteOps(RepoCore):
                 "subset": bool(keys),
                 "manifest_hash": manifest_hash(objects),
                 "workspace_id": self.workspace.workspace_id,
+                "bookmark": bookmark,
+                # The commit a full promotion moves the trunk to: this
+                # bookmark's, as reviewed -- never whatever the checkout is on
+                # by the time the plan is applied.
+                "bookmark_commit": marks.get(bookmark) if bookmark else None,
             },
+        )
+        plan.require(
+            "workspace_id",
+            self.workspace.workspace_id,
+            detail="this promote plan was made in another checkout; "
+            "re-run the plan here",
+        )
+        plan.require(
+            "workspace_bookmark",
+            bookmark,
+            detail=f"this promote plan was made on {bookmark or 'no bookmark'}; the "
+            "checkout is on {observed} now; re-run the plan",
+        )
+        plan.require(
+            "bookmark_head",
+            plan.context["bookmark_commit"],
+            bookmark=bookmark,
+            detail=f"bookmark {bookmark} moved since the promote plan was made (now "
+            "at {observed}); re-run the plan",
+        )
+        plan.require(
+            "manifest_hash",
+            plan.context["manifest_hash"],
+            rev=rev,
+            detail="manifests changed since the promote plan was made; re-run the plan",
         )
         # Every forkable object needs its base branch read, and off the trunk
         # its working branch too: two store round trips per object. Take them
@@ -138,6 +174,7 @@ class PromoteOps(RepoCore):
         if errors:
             raise MultiObjectError("promote: could not read branch heads", errors)
 
+        current: list[str] = []
         for key in selected:
             m = objects[key]
             backend = self.backend_for(m.kind)
@@ -150,6 +187,7 @@ class PromoteOps(RepoCore):
                 continue
 
             base_state, probed_target = probed[key]
+            base_txt = f"{m.locator.get('branch', 'main')}"
 
             # What to promote, and what the base looked like when it was forked.
             source: dict[str, Any]
@@ -187,12 +225,37 @@ class PromoteOps(RepoCore):
                         f"{key}: no working branch yet; nothing to promote"
                     )
                     continue
+                if m.state is None:
+                    plan.notes.append(
+                        f"{key}: nothing committed on this bookmark yet; commit first"
+                    )
+                    continue
                 target_state = probed_target
                 source = {"ref": working_ref}
                 fork_point = self.workspace.fork_points.get(key)
+                if not self._same(m.kind, target_state, m.state):
+                    # The trunk moves to this bookmark's commit, whose manifest
+                    # must describe what landed: a write the commit does not
+                    # record would reach the base under a commit that says
+                    # something else.
+                    plan.actions.append(
+                        Action(
+                            "refuse",
+                            key,
+                            m.kind,
+                            target=base_txt,
+                            detail=f"{working_ref} has writes since the last commit "
+                            f"({short_state(m.state)} committed, "
+                            f"{short_state(target_state)} on the branch); `tether "
+                            "commit` them first",
+                            params={"locator": dict(m.locator)},
+                        )
+                    )
+                    continue
 
             if self._same(m.kind, target_state, base_state):
                 plan.notes.append(f"{key}: base already at the target")
+                current.append(key)
                 continue
 
             # Is the base still behind the source? The store's own history
@@ -215,7 +278,6 @@ class PromoteOps(RepoCore):
                 "target_state": target_state,
                 "fork_point": fork_point,
             }
-            base_txt = f"{m.locator.get('branch', 'main')}"
             hint = f"; {backend.PROMOTE_HINT}" if backend.PROMOTE_HINT else ""
 
             if unchanged is True and strategy != "merge" and can_ff:
@@ -314,7 +376,11 @@ class PromoteOps(RepoCore):
         if keys:
             self._refuse_partial_scopes(plan, set(selected), ("fast-forward", "merge"))
         self._share_scope_writes(plan, ("fast-forward", "merge"))
-        self._refuse_trunk_regression(plan, keys, rev)
+        # Base branches already holding what this bookmark's commit records:
+        # with nothing left to write, that commit describes the upstream and
+        # the trunk can move to it (the second promote after a merge).
+        plan.context["current"] = current
+        self._refuse_trunk_regression(plan, keys, rev, current=bool(current))
         # Everything the check needs travels in the precondition: the object
         # may have been removed since a `--rev` plan named it, and its base
         # branch must still be where the plan saw it; what lands must be what
@@ -359,7 +425,12 @@ class PromoteOps(RepoCore):
         return plan
 
     def _refuse_trunk_regression(
-        self, plan: Plan, keys: Sequence[str] | None, rev: str | None
+        self,
+        plan: Plan,
+        keys: Sequence[str] | None,
+        rev: str | None,
+        *,
+        current: bool = False,
     ) -> None:
         """A full promotion moves the trunk bookmark onto this bookmark's
         commit. That is a fast-forward only when the trunk is an ancestor of
@@ -367,13 +438,15 @@ class PromoteOps(RepoCore):
         `--allow-backwards` refuses the same move). Land the data anyway and
         `main` would describe a different upstream than the stores hold, so
         the whole plan is refused: merge or rebase the manifests first, or
-        name keys (a subset never moves the trunk).
+        name keys (a subset never moves the trunk). `current` says the plan
+        would move the trunk with nothing to write (every base already holds
+        what the commit records), which needs the same guard.
         """
         bookmark = self.workspace.bookmark
         if keys or rev is not None or not bookmark or self.on_trunk():
             return
         writes = [a for a in plan.actions if a.op in ("fast-forward", "merge")]
-        if not writes:
+        if not writes and not current:
             return
         marks = self.vcs.bookmarks()
         trunk_commit = marks.get(self.config.trunk)
@@ -410,6 +483,7 @@ class PromoteOps(RepoCore):
             else a
             for a in plan.actions
         ]
+        plan.context["current"] = []  # nothing to write and the trunk stays
         plan.notes.append(f"nothing moved: {why}")
 
     def _action_scope(self, a: Action) -> tuple[str, str] | None:
@@ -540,23 +614,51 @@ class PromoteOps(RepoCore):
                 source = _source_object(a.params["source"])
                 # Land what was reviewed: the target state the plan captured,
                 # not whatever the ref's head is by now. Every Forkable backend
-                # promotes and merges from a state.
+                # promotes and merges from a state -- and moves the base only
+                # from the head the plan saw (`expected`), so a commit that
+                # lands on it in between is refused, not overwritten.
                 reviewed = a.params.get("target_state")
                 what: str | Pin | State = dict(reviewed) if reviewed else source
+                base = a.params.get("base_state")
+                expected = dict(base) if base is not None else None
                 if a.op == "fast-forward":
-                    new_state = backend.promote(locator, what)
+                    new_state = _promote_ref(backend, locator, what, expected)
                     self._progress(op, "fast-forward", key=key, state=new_state)
                     return "ff", new_state
-                new_state = backend.merge(locator, what, message)
+                new_state = _merge_ref(backend, locator, what, message, expected)
                 self._progress(op, "merge", key=key, state=new_state)
                 return "merge", new_state
 
-            results, errors = self._fanout_collect(run_one, list(by_key))
+            # Merges first, then fast-forwards: a merge is what can still stop
+            # (a conflict, a moved base), and a fast-forward that has landed
+            # cannot be taken back. When a merge stops, the fast-forwards are
+            # held rather than landed beside a system that did not move.
+            merges = [k for k, a in by_key.items() if a.op == "merge"]
+            ffs = [k for k in by_key if k not in merges]
+            results, errors = self._fanout_collect(run_one, merges)
             for key, exc in list(errors.items()):
                 if isinstance(exc, MergeConflict):
                     report.conflicts[key] = list(exc.conflicts)
                     report.refused[key] = str(exc)
                     errors.pop(key)
+                elif isinstance(exc, RefMovedError):
+                    report.refused[key] = f"{exc}; re-run the plan"
+                    errors.pop(key)
+            if ffs and (report.refused or errors) and merges:
+                stopped = ", ".join(sorted(set(report.refused) | set(errors)))
+                for key in ffs:
+                    report.held[key] = (
+                        f"would fast-forward: held because the merge of {stopped} "
+                        "did not land, and a bookmark lands whole or not at all"
+                    )
+            elif ffs:
+                more, more_errors = self._fanout_collect(run_one, ffs)
+                results.update(more)
+                for key, exc in more_errors.items():
+                    if isinstance(exc, RefMovedError):
+                        report.refused[key] = f"{exc}; re-run the plan"
+                    else:
+                        errors[key] = exc
 
             # Siblings sharing the branch take the member's result.
             for a in plan.actions:
@@ -570,11 +672,25 @@ class PromoteOps(RepoCore):
                 m = self.objects.get(key)
                 working_ref = self.workspace.working_refs.get(key)
                 if how == "merge" and m is not None and working_ref is not None:
-                    # The fork now lags the base; reset it onto the merge result so
-                    # the next commit pins what the base holds.
-                    self.workspace.working_refs[key] = self.backend_for(m.kind).fork(
-                        m.locator, new_state, working_ref
-                    )
+                    # The fork now lags the base; reset it onto the merge result
+                    # so the next commit pins what the base holds -- unless it
+                    # gained writes since the plan read it: those stay, and the
+                    # next commit pins them for another merge.
+                    reviewed = by_key[key].params.get("target_state")
+                    try:
+                        self.workspace.working_refs[key] = _fork_ref(
+                            self.backend_for(m.kind),
+                            m.locator,
+                            new_state,
+                            working_ref,
+                            dict(reviewed) if reviewed else None,
+                        )
+                    except RefMovedError as exc:
+                        report.kept_forks[key] = (
+                            f"{working_ref} gained writes during the merge "
+                            f"({exc}); left as it is -- commit them and promote again"
+                        )
+                        continue
                 if (
                     key in self.workspace.working_refs
                     or key in self.workspace.fork_points
@@ -585,25 +701,30 @@ class PromoteOps(RepoCore):
             if touched:
                 write_workspace(self.root, self.workspace)
             # The dataset side of the promotion: when the whole bookmark landed
-            # cleanly, its commit now describes the upstream branches, so the
-            # trunk bookmark moves to it -- `jj bookmark set main -r feature`.
-            # A merge leaves states the commit does not describe; commit first,
-            # then promote again (a fast-forward) to move the trunk. A subset
-            # (`promote KEY...`) never moves it: the rest has not landed.
+            # cleanly -- or every base already held what its commit records --
+            # that commit describes the upstream branches, so the trunk
+            # bookmark moves to it: `jj bookmark set main -r feature`, at the
+            # commit the plan reviewed. A merge leaves states the commit does
+            # not describe; commit first, then promote again to move the
+            # trunk. A subset (`promote KEY...`) never moves it: the rest has
+            # not landed.
             bookmark = self.workspace.bookmark
             if (
-                results
+                (results or plan.context.get("current"))
                 and bookmark
                 and not self.on_trunk()
                 and plan.context.get("rev") is None
                 and not plan.context.get("subset")
                 and not report.refused
+                and not report.held
                 and not report.merged
                 and not errors
             ):
                 marks = self.vcs.bookmarks()
-                commit = marks.get(bookmark)
+                commit = plan.context.get("bookmark_commit") or marks.get(bookmark)
                 trunk_commit = marks.get(self.config.trunk)
+                if commit == trunk_commit:
+                    commit = None  # already there: nothing to move
                 if commit and self.config.trunk in self.vcs.conflicted_bookmarks():
                     # Absent from `marks` because it has several targets, not
                     # because there is no trunk yet: moving it would drop the

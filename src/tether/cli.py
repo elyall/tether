@@ -1778,6 +1778,7 @@ def promote(
                 "refused": report.refused,
                 "held": report.held,
                 "conflicts": report.conflicts,
+                "kept_forks": report.kept_forks,
                 "trunk_moved": report.trunk_moved,
                 "trunk_held": report.trunk_held,
             },
@@ -1790,6 +1791,8 @@ def promote(
         typer.echo(f"  fast-forwarded {key} -> {state}")
     for key, state in report.merged.items():
         typer.echo(f"  merged         {key} -> {state}")
+    for key, why in report.kept_forks.items():
+        typer.secho(f"  kept           {key}: {why}", fg=typer.colors.YELLOW)
     for key in report.skipped:
         typer.echo(f"  skipped        {key}")
     for key, why in report.refused.items():

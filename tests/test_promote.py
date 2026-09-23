@@ -104,8 +104,15 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
     plan = repo.plan_promote()
     assert plan.is_empty and any("already at the target" in n for n in plan.notes)
 
-    # Writes on the fork; main unchanged -> fast-forward.
+    # Writes on the fork are landed once committed: the trunk moves to the
+    # bookmark's commit, whose manifest must describe what the base holds.
     s2 = store.write(system, wref, {"a": 1, "b": 2})
+    plan = repo.plan_promote()
+    (a,) = plan.actions
+    assert a.op == "refuse" and "writes since the last commit" in a.detail
+    assert plan.is_empty
+    repo.commit("b")
+    # Committed; main unchanged -> fast-forward.
     plan = repo.plan_promote()
     (a,) = plan.actions
     assert a.op == "fast-forward" and "base unchanged since fork" in a.detail
@@ -120,23 +127,27 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
     # Both sides move on different keys -> merge; the fork is reset onto the
     # merge result so the next commit pins what main now holds.
     store.write(system, wref, {"a": 1, "b": 2, "c": 3})
+    repo.commit("c")
     store.write(system, "main", {"a": 9, "b": 2})
     plan = repo.plan_promote()
     (a,) = plan.actions
     assert a.op == "merge" and "base moved since fork" in a.detail
-    # A write that slips onto the fork after the plan is *not* merged: the
-    # merge takes the state the plan reviewed, not the live ref.
-    store.write(system, wref, {"a": 1, "b": 2, "c": 3, "late": True})
-    report = repo.apply_promote(plan, verify=False)
+    report = repo.apply_promote(plan)
     merged = report.merged["db"]
     assert store.read(system, "main") == {"a": 9, "b": 2, "c": 3}
     assert branches[wref] == merged["snapshot_id"]  # fork reset onto the merge
     assert repo.workspace.fork_points["db"] == merged
+    assert report.trunk_moved is None  # the commit does not describe main yet
     res = repo.commit("after merge")
     assert res.pinned["db"] is not None and repo.objects["db"].state == merged
+    # Commit, then promote again: nothing to write, and the trunk moves.
+    report = repo.promote()
+    assert report.skipped == ["db"] and report.trunk_moved == res.vcs_commit
+    assert repo.vcs.bookmarks()["main"] == res.vcs_commit
 
     # Same key on both sides -> conflict: reported, nothing written, no raise.
     store.write(system, wref, {**store.read(system, wref), "k": "fork"})
+    repo.commit("k")
     head = store.write(system, "main", {**store.read(system, "main"), "k": "main"})
     report = repo.promote()
     assert report.conflicts == {"db": ["k"]}
@@ -151,6 +162,7 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
     branches["main"] = branches[wref]
     repo.workspace.fork_points["db"] = {"snapshot_id": branches["main"]}
     store.write(system, wref, {**store.read(system, wref), "z": 1})
+    repo.commit("z")
     plan = repo.plan_promote(strategy="merge")
     (a,) = plan.actions
     assert a.op == "merge" and "base unchanged since fork" in a.detail
@@ -158,6 +170,144 @@ def test_promote_fast_forward_merge_and_conflict(vcs_root: Path) -> None:
         repo.plan_promote(strategy="rebase")
     with pytest.raises(ConfigError):
         repo.plan_promote(["nope"])
+
+
+def test_promote_lands_only_committed_states(vcs_root: Path) -> None:
+    """The trunk moves to the bookmark's commit, so what lands must be what
+    that commit records: a fork holding writes since the last commit is
+    refused, and nothing -- neither the store's base nor the trunk -- moves.
+    (r7 / r2B: the store's main ended at the uncommitted head while the
+    trunk commit recorded the committed state.)"""
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    store.write(system, wref, {"x": "committed"})
+    committed = repo.commit("feat write").vcs_commit
+    store.write(system, wref, {"x": "UNCOMMITTED"})
+    main_before = repo.vcs.bookmarks()["main"]
+
+    plan = repo.plan_promote()
+    (a,) = plan.actions
+    assert a.op == "refuse" and "writes since the last commit" in a.detail
+    assert "`tether commit` them first" in a.detail
+    report = repo.apply_promote(plan)
+    assert "db" in report.refused and not report.fast_forwarded
+    assert report.trunk_moved is None
+    assert store.read(system, "main") == {"a": 1}
+    assert repo.vcs.bookmarks()["main"] == main_before
+    assert not [e for e in repo.ops() if e.command == "promote"]
+    # Committed, the same head lands, and the trunk follows.
+    later = repo.commit("feat write 2").vcs_commit
+    assert later != committed
+    report = repo.promote()
+    assert store.read(system, "main") == {"x": "UNCOMMITTED"}
+    assert report.trunk_moved == later
+
+
+def test_merges_run_before_fast_forwards(vcs_root: Path) -> None:
+    """A merge is what can still stop at apply (a conflict); a fast-forward
+    that has landed cannot be taken back. Merges go first, and when one
+    stops, the fast-forwards are held so the bookmark does not land half.
+    (r13: a fast-forward landed, then the other system's merge conflicted.)"""
+    repo = Repo.init(vcs_root)
+    store = default_store()
+    db = _mem(repo, "db")
+    db2 = _mem(repo, "db2")
+    repo.commit("baseline")
+    repo.new(bookmark="feat", eager=True)
+    refs = dict(repo.workspace.working_refs)
+    store.write(db, refs["db"], {"a": 1, "k": "feat"})
+    store.write(db2, refs["db2"], {"a": 1, "k": "feat"})
+    repo.commit("feat writes")
+    # db2's base moved on the same key: its merge will conflict; db's is a
+    # clean fast-forward.
+    store.write(db2, "main", {"a": 1, "k": "trunk"})
+    db_main_before = store.system(db).branches["main"]
+
+    plan = repo.plan_promote()
+    ops = {a.key: a.op for a in plan.actions}
+    assert ops == {"db": "fast-forward", "db2": "merge"}
+    report = repo.apply_promote(plan)
+    assert report.conflicts == {"db2": ["k"]} and "db2" in report.refused
+    assert "db" in report.held and "merge of db2 did not land" in report.held["db"]
+    assert not report.fast_forwarded and report.trunk_moved is None
+    assert store.system(db).branches["main"] == db_main_before  # not landed
+    assert store.read(db2, "main") == {"a": 1, "k": "trunk"}
+
+
+def test_a_write_landing_on_the_fork_during_a_merge_is_kept(vcs_root: Path) -> None:
+    """After a merge the fork is reset onto the merge result -- from the head
+    the plan reviewed. A write that lands on the fork in between is not
+    discarded by the reset: the branch is left alone and reported, so the
+    next commit pins it for another merge. (r11: the reset was
+    unconditional and the late write's snapshot lost its only ref.)"""
+    from tether.backends.memory import MemoryBackend
+
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    store.write(system, wref, {"a": 1, "feat": 1})
+    repo.commit("feat write")
+    store.write(system, "main", {"a": 1, "trunk": 1})  # a merge, then
+    plan = repo.plan_promote()
+    assert [a.op for a in plan.actions] == ["merge"]
+
+    real_merge = MemoryBackend.merge
+
+    def merge_with_a_concurrent_write(self, locator, source, message, **kw):
+        store.write(system, wref, {**store.read(system, wref), "late": 1})
+        return real_merge(self, locator, source, message, **kw)
+
+    MemoryBackend.merge = merge_with_a_concurrent_write  # type: ignore[method-assign]
+    try:
+        report = repo.apply_promote(plan)
+    finally:
+        MemoryBackend.merge = real_merge  # type: ignore[method-assign]
+    merged = report.merged["db"]
+    assert store.read(system, "main") == {"a": 1, "feat": 1, "trunk": 1}
+    assert (
+        "db" in report.kept_forks
+        and "gained writes during the merge" in (report.kept_forks["db"])
+    )
+    assert store.read(system, wref) == {"a": 1, "feat": 1, "late": 1}  # kept
+    assert store.system(system).branches[wref] != merged["snapshot_id"]
+    assert repo.workspace.fork_points["db"] != merged  # the fork was not moved
+    # The late write is committed and merged like any other.
+    repo.commit("late")
+    report = repo.promote()
+    assert store.read(system, "main") == {"a": 1, "feat": 1, "trunk": 1, "late": 1}
+
+
+def test_promote_refuses_a_base_that_moved_under_the_apply(vcs_root: Path) -> None:
+    """The plan's `base_state` is re-checked before the first action; a commit
+    that lands on the base *after* that check and before the move is caught
+    by the backend's conditional move (`expected`), and refused rather than
+    overwritten."""
+    from tether.backends.memory import MemoryBackend
+
+    repo = Repo.init(vcs_root)
+    system = _mem(repo)
+    store = default_store()
+    wref = _forked(repo)
+    store.write(system, wref, {"a": 1, "b": 2})
+    repo.commit("b")
+    plan = repo.plan_promote()
+    real_promote = MemoryBackend.promote
+
+    def promote_after_a_concurrent_commit(self, locator, source, **kw):
+        store.write(system, "main", {"a": 1, "concurrent": True})
+        return real_promote(self, locator, source, **kw)
+
+    MemoryBackend.promote = promote_after_a_concurrent_commit  # type: ignore[method-assign]
+    try:
+        report = repo.apply_promote(plan)
+    finally:
+        MemoryBackend.promote = real_promote  # type: ignore[method-assign]
+    assert "db" in report.refused and "expected" in report.refused["db"]
+    assert not report.fast_forwarded and report.trunk_moved is None
+    assert store.read(system, "main") == {"a": 1, "concurrent": True}  # kept
 
 
 def test_promote_never_moves_the_trunk_backwards(vcs_root: Path) -> None:
@@ -228,6 +378,7 @@ def test_promote_refuses_when_backend_cannot(
     store = default_store()
     wref = _forked(repo)
     store.write(system, wref, {"a": 1, "b": 2})
+    repo.commit("b")
     backend = repo.backend_for("memory")
 
     # No MERGE: divergence is refused with the backend's recipe.
@@ -340,6 +491,7 @@ def test_promote_rev_track_and_stale(vcs_root: Path) -> None:
 
     # A plan goes stale when the base moves after planning.
     store.write(system, wref, {"a": 1, "b": 2, "c": 3})
+    repo.commit("c")
     plan = repo.plan_promote()
     store.write(system, "main", {"a": 5})
     with pytest.raises(StalePlanError):
@@ -468,6 +620,7 @@ def test_icechunk_promote(tmp_path: Path, vcs_root: Path) -> None:
     wref = repo.workspace.working_refs["zarr"]
     assert handle.branch == wref if hasattr(handle, "branch") else True
     commit(str(path), wref, 1)
+    repo.commit("v1")
 
     report = repo.promote()
     r = ic.Repository.open(ic.local_filesystem_storage(str(path)))
@@ -476,6 +629,7 @@ def test_icechunk_promote(tmp_path: Path, vcs_root: Path) -> None:
 
     # main moves independently: no merge in Icechunk -> refused with the hint.
     commit(str(path), wref, 2)
+    repo.commit("v2")
     commit(str(path), "main", 99)
     plan = repo.plan_promote()
     (a,) = plan.actions
