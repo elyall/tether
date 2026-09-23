@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 from tether import manifest as _m
 from tether.backends.base import (
+    ABSENT,
     Capability,
     VerifyStatus,
     effective_capabilities,
 )
 from tether.errors import (
+    RefMovedError,
     TetherError,
 )
 from tether.manifest import (
@@ -792,8 +794,15 @@ class UndoOps(RepoCore):
         return plan
 
     def apply_repair(self: Repo, plan: Plan) -> RepairReport:
-        """Execute a plan from `plan_repair`; failures are reported, not raised."""
-        with self._writer_lock():
+        """Execute a plan from `plan_repair`; failures are reported, not raised.
+
+        A `refork` recreates a branch the plan found missing, and only while
+        it still is: under the repository lock, like `new` (another checkout
+        of this repository re-creating it waits), and with `expected` absent
+        (a clone elsewhere that re-created it in between is refused, not
+        reset).
+        """
+        with self._writer_lock(), self._repo_lock():
             self._verify_plan(plan, "repair")
             report = RepairReport(plan=plan)
             pre = {"workspace": self.workspace.to_toml()}
@@ -814,13 +823,18 @@ class UndoOps(RepoCore):
                         self._progress(op, "repin", key=a.key, target=a.target)
                     elif a.op == "refork":
                         m = self.objects[a.key]
-                        ref = self._fork_from_manifest(m, a.target)
+                        ref = self._fork_from_manifest(m, a.target, expected=ABSENT)
                         self._progress(op, "refork", key=a.key, ref=ref)
                         self.workspace.working_refs[a.key] = ref
                         if m.state is not None:
                             self.workspace.fork_points[a.key] = dict(m.state)
                         self._mark_base_states([a.key])
                         report.reforked[a.key] = ref
+                except RefMovedError as exc:
+                    report.failed[f"{a.op} {a.target}"] = (
+                        f"{exc}: re-created elsewhere since the plan, and left as it "
+                        "is; `tether new` decides what to do with it"
+                    )
                 except TetherError as exc:
                     report.failed[f"{a.op} {a.target}"] = str(exc)
             if report.reforked:

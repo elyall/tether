@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -3030,6 +3031,66 @@ def test_repair_recreates_missing_pins_and_branches(vcs_root: Path) -> None:
     sys_.tags[pin2.ref] = store.write(system, "main", {"v": "elsewhere"})
     plan = repo.plan_repair()
     assert plan.is_empty and any("drifted" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize("peer", ["another checkout", "another clone"])
+def test_repair_never_resets_a_branch_re_created_since_the_plan(
+    vcs_root: Path, monkeypatch: pytest.MonkeyPatch, peer: str
+) -> None:
+    """`repair` plans a `refork` because the branch is missing, and checks
+    `ref_absent` before it starts -- but it forked without `expected` and
+    without the repository lock, so a branch re-created in between (with
+    writes) was reset onto the pin. It holds the lock now, as `new` does,
+    so another checkout of this repository waits; and the fork expects the
+    branch absent, so a clone that shares no lock is refused and its branch
+    kept. The refusal is reported like any failed repair."""
+    from tether.backends.memory import MemoryBackend
+    from tether.repo._core import RepoCore
+
+    repo = Repo.init(vcs_root)
+    system = _mem_object(repo)
+    store = default_store()
+    store.write(system, "main", {"v": 1})
+    repo.commit("v1")
+    repo.new(bookmark="work", eager=True)
+    wref = repo.workspace.working_refs["db"]
+    pinned = store.resolve(system, wref)
+    del store.system(system).branches[wref]
+    plan = repo.plan_repair()
+    assert [(a.op, a.target) for a in plan.actions] == [("refork", wref)]
+
+    held: list[bool] = []
+    real_lock = RepoCore._repo_lock
+
+    @contextlib.contextmanager
+    def watched_lock(self):
+        with real_lock(self):
+            held.append(True)
+            try:
+                yield
+            finally:
+                held.pop()
+
+    monkeypatch.setattr(RepoCore, "_repo_lock", watched_lock)
+    real_fork = MemoryBackend.fork
+    peer_head: list[str] = []
+
+    def fork_after_the_peer(self, locator, source, name, **kw):
+        assert held, "the refork runs under the repository lock"
+        if peer == "another clone":
+            store.system(system).branches[name] = pinned
+            peer_head.append(store.write(system, name, {"v": "the peer's write"}))
+        return real_fork(self, locator, source, name, **kw)
+
+    monkeypatch.setattr(MemoryBackend, "fork", fork_after_the_peer)
+    report = repo.apply_repair(plan)
+    if peer == "another clone":
+        assert not report.reforked
+        assert "re-created elsewhere since the plan" in report.failed[f"refork {wref}"]
+        assert store.resolve(system, wref) == peer_head[0]  # kept
+    else:
+        assert report.reforked == {"db": wref} and not report.failed
+        assert store.resolve(system, wref) == pinned
 
 
 def test_abandon_frees_the_pins_only_those_commits_referenced(vcs_root: Path) -> None:
