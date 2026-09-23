@@ -124,6 +124,58 @@ def test_assumed_role_is_cached_until_near_expiry(boto3: _FakeBoto3) -> None:
     assert aws_credentials(options) == second
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_concurrent_callers_share_one_resolution(
+    boto3: _FakeBoto3, monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """16 threads (the engine's fan-out) asking for one role made 16 STS
+    calls: each found the cache empty. They share one call now -- and its
+    failure; a later caller tries again. Another role is resolved beside it,
+    not behind it."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tether.errors import ConfigError
+
+    real = credentials._resolve
+    calls: list[str] = []
+    started = threading.Event()
+
+    def slow(options: Any, profile: Any, role: Any) -> Any:
+        calls.append(str(role))
+        started.set()
+        time.sleep(0.2)  # every other thread arrives while this one resolves
+        if fails and role == "arn:aws:iam::1:role/r":
+            raise ConfigError("could not resolve AWS credentials: denied")
+        return real(options, profile, role)
+
+    monkeypatch.setattr(credentials, "_resolve", slow)
+    options = {"role_arn": "arn:aws:iam::1:role/r"}
+
+    def ask(_: int) -> dict[str, str] | Exception | None:
+        try:
+            return aws_credentials(options)
+        except ConfigError as exc:
+            return exc
+
+    with ThreadPoolExecutor(17) as ex:
+        results = list(ex.map(ask, range(16)))
+        started.wait(5)
+        other = ex.submit(aws_credentials, {"role_arn": "arn:aws:iam::1:role/o"})
+        assert other.result(timeout=5) is not None
+    assert calls.count("arn:aws:iam::1:role/r") == 1
+    assert calls.count("arn:aws:iam::1:role/o") == 1
+    if fails:
+        assert all(isinstance(r, ConfigError) for r in results)
+        assert isinstance(ask(0), ConfigError)
+        assert calls.count("arn:aws:iam::1:role/r") == 2  # not cached
+    else:
+        first = results[0]
+        assert isinstance(first, dict) and first["access_key_id"] == "ASIA1"
+        assert all(r == first for r in results)
+
+
 def test_static_profile_keys_are_cached_indefinitely(boto3: _FakeBoto3) -> None:
     options = {"profile": "lab"}
     first = aws_credentials(options)

@@ -46,6 +46,20 @@ keys that do not expire)."""
 _lock = threading.Lock()
 
 
+class _Flight:
+    """One resolution in progress, which callers for the same options wait
+    on instead of each asking STS (the engine resolves from 16 threads)."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.creds: dict[str, str] = {}
+        self.expires: float | None = None
+        self.error: BaseException | None = None
+
+
+_flights: dict[str, _Flight] = {}
+
+
 def _now() -> float:
     """The clock expiries are compared against (tests replace it)."""
     return time.time()
@@ -78,7 +92,8 @@ def aws_credentials(options: Mapping[str, Any]) -> dict[str, str] | None:
 
     A profile or role is resolved once per set of options and served from a
     cache until :data:`REFRESH_MARGIN` seconds before the credentials expire
-    (static profile keys: indefinitely).
+    (static profile keys: indefinitely). Concurrent callers for the same
+    options share one resolution, and its failure.
 
     Raises:
         ConfigError: A profile or role is named but `boto3` is not installed,
@@ -105,13 +120,29 @@ def aws_credentials_expiring(
     key = _cache_key(options)
     with _lock:
         hit = _cache.get(key)
-    if hit is not None:
-        creds, expires = hit
-        if expires is None or expires - _now() > REFRESH_MARGIN:
-            return dict(creds), expires
-    creds, expires = _resolve(options, profile, role)
-    with _lock:
-        _cache[key] = (creds, expires)
+        if hit is not None and (hit[1] is None or hit[1] - _now() > REFRESH_MARGIN):
+            return dict(hit[0]), hit[1]
+        flight = _flights.get(key)
+        leader = flight is None
+        if flight is None:
+            flight = _flights[key] = _Flight()
+    if not leader:
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        return dict(flight.creds), flight.expires
+    try:
+        creds, expires = _resolve(options, profile, role)
+        flight.creds, flight.expires = creds, expires
+        with _lock:
+            _cache[key] = (creds, expires)
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        with _lock:
+            del _flights[key]
+        flight.done.set()
     return dict(creds), expires
 
 

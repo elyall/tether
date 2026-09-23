@@ -483,6 +483,44 @@ def test_store_is_rebuilt_when_the_rule_resolves_to_fresh_credentials(
     b.fingerprint(loc, None)
     b.fingerprint(loc, None)
     assert opened == 2
+    # One store per rule, replaced by each generation of keys -- not one kept
+    # per refresh for the life of the backend.
+    for n in range(3, 8):
+        current = {"access_key_id": f"ASIA{n}", "secret_access_key": f"s{n}"}
+        b.fingerprint(loc, None)
+    assert opened == 7 and len(b._stores) == 1
+
+
+def test_concurrent_fingerprints_build_one_store_per_generation(
+    backend: tuple[FileBackend, _MemoryStores], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine fingerprints objects from 16 threads; each thread that
+    found no store built its own."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    b, stores = backend
+    for n in range(16):
+        obstore.put(stores("s3://bucket", {}), f"k{n}", b"1")
+    opened = 0
+    gate = threading.Barrier(16, timeout=5)
+    lock = threading.Lock()
+
+    def counting(root: str, locator: Locator) -> MemoryStore:
+        nonlocal opened
+        with lock:
+            opened += 1
+        return stores(root, locator)
+
+    monkeypatch.setattr(b, "_open_store", counting)
+
+    def fp(n: int) -> dict:
+        gate.wait()
+        return b.fingerprint({"uri": f"s3://bucket/k{n}"}, None)
+
+    with ThreadPoolExecutor(16) as ex:
+        assert len(list(ex.map(fp, range(16)))) == 16
+    assert opened == 1
 
 
 def test_remote_missing_object(backend: tuple[FileBackend, _MemoryStores]) -> None:
