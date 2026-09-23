@@ -9,6 +9,7 @@ which environment variable holds a secret. Those live in the untracked
 from __future__ import annotations
 
 import shutil
+import subprocess
 import warnings
 from pathlib import Path
 from typing import Any, cast
@@ -19,9 +20,11 @@ from tether.errors import BackendError, ConfigError
 from tether.manifest import (
     SECRETS_FILENAME,
     UNTRACKED_FILES,
+    WORKSPACE_FILENAME,
     read_config,
     write_config,
 )
+from tether.oplog import OPS_FILENAME
 from tether.repo import Repo
 
 
@@ -39,6 +42,95 @@ def test_committed_executable_paths_are_refused(vcs_root: Path) -> None:
         Repo.find(vcs_root)
     assert "secrets.toml" in str(exc.value)
     assert not Path("/tmp/pwned").exists()
+
+
+def _vcs(root: Path, *args: str) -> None:
+    subprocess.run(list(args), cwd=root, check=True, capture_output=True)
+
+
+def _hostile_clone(src: Path, dst: Path, name: str, text: str) -> Path:
+    """A dataset whose author committed `.tether/<name>` (taking it out of
+    the committed `.tether/.gitignore` first), cloned to `dst` the way a
+    user gets it: `git clone`, plus `jj git init --colocate` under jj."""
+    jj = (src / ".jj").is_dir()
+    Repo.init(src)
+    ignore = src / ".tether" / ".gitignore"
+    ignore.write_text(
+        "".join(
+            f"{line}\n"
+            for line in ignore.read_text().splitlines()
+            if line != f"/{name}"
+        )
+    )
+    (src / ".tether" / name).write_text(text)
+    if jj:
+        _vcs(src, "jj", "commit", "-m", "dataset")
+        _vcs(src, "jj", "bookmark", "set", "main", "-r", "@-")
+    else:
+        _vcs(src, "git", "add", "-A")
+        _vcs(src, "git", "commit", "-qm", "dataset")
+    _vcs(src, "git", "clone", "-q", "-b", "main", str(src), str(dst))
+    if jj:
+        _vcs(dst, "jj", "git", "init", "--colocate")
+    return dst
+
+
+@pytest.mark.parametrize("name", [SECRETS_FILENAME, WORKSPACE_FILENAME, OPS_FILENAME])
+def test_a_clone_that_commits_a_per_checkout_file_is_refused(
+    vcs_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """`.tether/.gitignore` is committed, so a dataset's author can commit
+    the files it lists. A cloned `secrets.toml` naming `git_path` / `jj_path`
+    ran that program on `tether status`; a cloned `workspace.toml` or
+    `ops.jsonl` chose where writes go and which pins gc may release. Each is
+    refused while the VCS tracks it -- before the secrets file is read, so
+    the program never runs -- and the advice in the refusal works."""
+    from tether.cli import app
+
+    typer_testing = pytest.importorskip("typer.testing")
+    jj = (vcs_root / ".jj").is_dir()
+    outside = tmp_path_factory.mktemp("attacker")
+    marker = outside / "PWNED"
+    evil = outside / "evil.sh"
+    evil.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    evil.chmod(0o755)
+    text = {
+        SECRETS_FILENAME: f'[vcs]\ngit_path = "{evil}"\njj_path = "{evil}"\n',
+        WORKSPACE_FILENAME: 'workspace_id = "0123abcd"\nbookmark = "main"\n'
+        '[working_refs]\ndb = "tether.ws.feedface.main"\n',
+        OPS_FILENAME: '{"id": "0123456789ab", "at": "2026-01-01T00:00:00+00:00", '
+        '"command": "commit", "result": {"pinned": {"db": "0a1b2c3d.1"}}}\n',
+    }[name]
+    clone = _hostile_clone(
+        vcs_root, tmp_path_factory.mktemp("clone") / "ds", name, text
+    )
+    monkeypatch.chdir(clone)
+    runner = typer_testing.CliRunner()
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code != 0
+    message = " ".join(r.output.split())
+    assert f"{'jj' if jj else 'git'} tracks .tether/{name}" in message
+    untrack = "jj file untrack" if jj else "git rm --cached"
+    assert f"{untrack} .tether/{name}" in message
+    with pytest.raises(ConfigError, match=rf"tracks \.tether/{name}"):
+        Repo.find(clone)
+    assert not marker.exists()
+
+    # Following the refusal: a cloned secrets file goes; the others are
+    # untracked as the message says, and stay on disk.
+    if name == SECRETS_FILENAME:
+        (clone / ".tether" / name).unlink()
+    elif jj:
+        _vcs(clone, "jj", "file", "untrack", f".tether/{name}")
+    else:
+        _vcs(clone, "git", "rm", "-q", "--cached", f".tether/{name}")
+        _vcs(clone, "git", "commit", "-qm", "untrack")
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, r.output
+    assert not marker.exists()
 
 
 def test_executables_come_from_secrets_or_env(

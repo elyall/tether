@@ -67,6 +67,7 @@ from tether.manifest import (
     write_workspace,
 )
 from tether.oplog import (
+    OPS_FILENAME,
     OpEntry,
     TouchedStore,
     append_op,
@@ -110,14 +111,24 @@ _MAX_WORKERS = 16
 
 _UNTRUSTED_VCS_KEYS = ("git_path", "jj_path")
 
+_CHECKOUT_FILES = (_m.SECRETS_FILENAME, _m.WORKSPACE_FILENAME, OPS_FILENAME)
+"""The per-checkout files under `.tether/` that tether reads and trusts; a
+copy the VCS tracks is refused (see `_refuse_tracked`)."""
 
-def _vcs_executables(root: Path, config: RepoConfig) -> tuple[str | None, str | None]:
-    """Where `git` and `jj` come from: `.tether/secrets.toml`, then the
-    environment (`TETHER_GIT`, `TETHER_JJ`), never the committed `tether.toml`.
+
+def _open_vcs(root: Path, config: RepoConfig) -> VcsAdapter:
+    """The VCS adapter for the dataset at `root`.
+
+    `git` and `jj` come from `.tether/secrets.toml`, then the environment
+    (`TETHER_GIT`, `TETHER_JJ`), never the committed `tether.toml`. The
+    secrets file is read only once the VCS -- found through the environment
+    alone -- says it tracks none of the per-checkout files, so a clone
+    cannot name the executable that answers that question.
 
     Raises:
-        ConfigError: The committed file names an executable -- a clone must
-            not choose what runs on your machine.
+        ConfigError: The committed file names an executable (a clone must
+            not choose what runs on your machine), or the VCS tracks a
+            per-checkout file.
     """
     committed = [k for k in _UNTRUSTED_VCS_KEYS if config.vcs.get(k)]
     if committed:
@@ -127,10 +138,74 @@ def _vcs_executables(root: Path, config: RepoConfig) -> tuple[str | None, str | 
             ".tether/secrets.toml (untracked) under [vcs], or set TETHER_GIT / "
             "TETHER_JJ"
         )
+    env_jj = os.environ.get("TETHER_JJ") or None
+    env_git = os.environ.get("TETHER_GIT") or None
+    prefer = str(config.vcs.get("prefer", "jj"))
+    vcs = detect_vcs(root, jj_path=env_jj, git_path=env_git, prefer=prefer)
+    _refuse_tracked(root, vcs)
     secrets = read_secrets(root)
-    jj = secrets.vcs.get("jj_path") or os.environ.get("TETHER_JJ")
-    git = secrets.vcs.get("git_path") or os.environ.get("TETHER_GIT")
-    return (str(jj) if jj else None, str(git) if git else None)
+    jj = secrets.vcs.get("jj_path")
+    git = secrets.vcs.get("git_path")
+    if not jj and not git:
+        return vcs
+    return detect_vcs(
+        root,
+        jj_path=str(jj) if jj else env_jj,
+        git_path=str(git) if git else env_git,
+        prefer=prefer,
+    )
+
+
+def _refuse_tracked(root: Path, vcs: VcsAdapter) -> None:
+    """Refuse a checkout whose `secrets.toml`, `workspace.toml` or `ops.jsonl`
+    the VCS tracks.
+
+    Each is this checkout's own: the secrets name executables, endpoints
+    and SQL; the workspace names the branches writes go to; the op log
+    tells `gc` which pins this clone made. A tracked copy arrived with a
+    clone (or was committed by hand), and `.tether/.gitignore`, the only
+    thing keeping them out, is itself committed.
+
+    Raises:
+        ConfigError: One of them is tracked (the message says how to
+            untrack it), or the VCS cannot say.
+    """
+    present = [n for n in _CHECKOUT_FILES if (_m.tether_path(root) / n).is_file()]
+    if not present:
+        return
+    try:
+        rel = root.resolve().relative_to(Path(vcs.root).resolve())
+    except ValueError:  # pragma: no cover - dataset outside vcs root
+        rel = Path(".")
+    paths = {(rel / _m.TETHER_DIR / n).as_posix(): n for n in present}
+    try:
+        tracked = vcs.tracked(list(paths))
+    except VcsError as exc:
+        raise ConfigError(
+            f"cannot tell whether {vcs.kind} tracks this checkout's "
+            f"{', '.join(present)} ({exc}); tether reads them only once it can. "
+            "Put jj/git on PATH or set TETHER_JJ / TETHER_GIT (secrets.toml's "
+            "jj_path / git_path are read after this check)"
+        ) from exc
+    if not tracked:
+        return
+    names = [f"{_m.TETHER_DIR}/{paths[p]}" for p in tracked]
+    # `jj file untrack` wants the file ignored; a cloned `.gitignore` may not be.
+    ensure_ignored(root, only_present=True)
+    untrack = (
+        f"`jj file untrack {' '.join(names)}`"
+        if vcs.kind == "jj"
+        else f"`git rm --cached {' '.join(names)}`"
+    )
+    raise ConfigError(
+        f"{vcs.kind} tracks {', '.join(names)}: tether reads these per-checkout "
+        "files only when the VCS does not, since a tracked copy arrives with "
+        "every clone -- and secrets.toml chooses executables, endpoints and "
+        "credentials, workspace.toml where writes go, ops.jsonl which pins gc "
+        "may release. Review (or delete) them, then untrack them from the "
+        f"dataset root ({root}) with {untrack} -- the files stay on disk and "
+        f"{_m.TETHER_DIR}/.gitignore ignores them -- and commit"
+    )
 
 
 class RepoCore:
@@ -397,14 +472,7 @@ class RepoCore:
         config = config or RepoConfig()
         ensure_layout(root)  # writes .tether/.gitignore for every untracked file
         write_config(root, config)
-        jj_path, git_path = _vcs_executables(root, config)
-        vcs = detect_vcs(
-            root,
-            jj_path=jj_path,
-            git_path=git_path,
-            prefer=str(config.vcs.get("prefer", "jj")),
-        )
-        repo = cls(root, config, vcs)
+        repo = cls(root, config, _open_vcs(root, config))
         repo.workspace.bookmark = repo.adopt_trunk()
         write_workspace(root, repo.workspace)
         return repo
@@ -449,21 +517,17 @@ class RepoCore:
                 than this tether's (only `upgrade` should).
 
         Raises:
-            ConfigError: If no dataset root is found, or the dataset's version
-                is not this tether's (run `tether upgrade`).
+            ConfigError: If no dataset root is found, the dataset's version
+                is not this tether's (run `tether upgrade`), or the VCS
+                tracks `.tether/secrets.toml`, `workspace.toml` or
+                `ops.jsonl` (a clone brought them; the message says how to
+                untrack them).
         """
         root = find_dataset_root(Path(path))
         if root is None:
             raise ConfigError(f"no tether dataset found at or above {path}")
         config = read_config(root)
-        jj_path, git_path = _vcs_executables(root, config)
-        vcs = detect_vcs(
-            root,
-            jj_path=jj_path,
-            git_path=git_path,
-            prefer=str(config.vcs.get("prefer", "jj")),
-        )
-        return cls(root, config, vcs, allow_outdated=allow_outdated)
+        return cls(root, config, _open_vcs(root, config), allow_outdated=allow_outdated)
 
     # -- internals ------------------------------------------------------------- #
     def backend_for(self, kind: str) -> ObjectBackend:

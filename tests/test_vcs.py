@@ -42,6 +42,32 @@ def test_adapter_roundtrip(vcs_root: Path) -> None:
     assert ".tether/objects/b.toml" not in vcs.list_files_at(c1, ".tether/objects")
 
 
+def test_tracked_names_exactly_the_files_the_vcs_tracks(vcs_root: Path) -> None:
+    """Committed files are tracked; an ignored or absent one is not, nor a
+    tracked file's neighbour or directory. Paths are matched literally:
+    spaces and fileset / pathspec operators are just characters."""
+    vcs = detect_vcs(vcs_root)
+    odd = [
+        "my data/.tether/secrets.toml",
+        "a (b)|c & d/.tether/ops.jsonl",
+        "star*/.tether/workspace.toml",
+    ]
+    for rel in odd:
+        _write(vcs_root, rel, "x\n")
+    _write(vcs_root, ".gitignore", "/ignored.toml\n")
+    _write(vcs_root, "ignored.toml", "x\n")
+    if vcs.kind == "jj":
+        subprocess.run(["jj", "commit", "-m", "c"], cwd=vcs_root, check=True)
+    else:
+        subprocess.run(["git", "add", "-A"], cwd=vcs_root, check=True)
+        subprocess.run(["git", "commit", "-qm", "c"], cwd=vcs_root, check=True)
+    _write(vcs_root, "late.toml", "x\n")  # written after the last snapshot / add
+    assert vcs.tracked([]) == []
+    assert vcs.tracked([*odd, "ignored.toml", "absent.toml", "late.toml"]) == odd
+    assert vcs.tracked(["star-x/.tether/workspace.toml"]) == []
+    assert vcs.tracked(["my data/.tether", "my data/.tether/secrets"]) == []
+
+
 def test_commit_info_and_refs(vcs_root: Path) -> None:
     vcs = detect_vcs(vcs_root)
     _write(vcs_root, "tether.toml", "v=1\n")

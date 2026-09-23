@@ -21,6 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$DOLT_PASSWORD` went to any host a manifest named.
 - Object keys may not contain `\` or a drive letter, and are checked when a
   manifest is read.
+- `.tether/secrets.toml`, `workspace.toml` and `ops.jsonl` are refused while
+  jj or git tracks them, with the command that untracks them. The committed
+  `.tether/.gitignore` was all that kept them out, so a cloned
+  `secrets.toml` naming `git_path` ran that program on `tether status`.
 
 ### Added
 

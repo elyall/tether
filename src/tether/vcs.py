@@ -485,6 +485,12 @@ class VcsAdapter(Protocol):
         """Whether any of ``relpaths`` differs from the last commit (jj: ``@``
         vs its parent; git: index or worktree vs ``HEAD``)."""
 
+    def tracked(self, relpaths: list[str]) -> list[str]:
+        """Which of ``relpaths`` (files) the VCS tracks: in jj's working-copy
+        commit as last snapshotted, in git's index. One call and no snapshot,
+        so `Repo.find` can afford it on every run: a per-checkout file the VCS
+        tracks came with a clone (or was committed by hand) and is refused."""
+
     def commit_alive(self, commit: str) -> bool:
         """Whether ``commit`` -- or, in jj, the change it belonged to -- is still
         part of visible history. jj resolves the commit to its change id (hidden
@@ -1123,6 +1129,19 @@ class JjAdapter:
         out = self._jj("diff", "--summary", "-r", "@", *relpaths)
         return bool(out.stdout.strip())
 
+    def tracked(self, relpaths: list[str]) -> list[str]:
+        if not relpaths:
+            return []
+        # `root-file:` matches exactly that file from the root, whatever the
+        # path holds (spaces, fileset operators); a path absent from `@` is
+        # a warning on stderr, not an error.
+        patterns = [f"root-file:{json.dumps(p, ensure_ascii=False)}" for p in relpaths]
+        out = self._jj(
+            "file", "list", "--ignore-working-copy", "-r", "@", "--", *patterns
+        )
+        listed = {line.strip() for line in out.stdout.splitlines()}
+        return [p for p in relpaths if p in listed]
+
     def commit(
         self, relpaths: list[str], message: str, *, advance: str | None = None
     ) -> str:
@@ -1486,6 +1505,13 @@ class GitAdapter:
     def dirty(self, relpaths: list[str]) -> bool:
         out = self._git("status", "--porcelain", "--", *relpaths)
         return bool(out.stdout.strip())
+
+    def tracked(self, relpaths: list[str]) -> list[str]:
+        if not relpaths:
+            return []
+        out = self._git("--literal-pathspecs", "ls-files", "-z", "--", *relpaths)
+        listed = set(filter(None, out.stdout.split("\0")))
+        return [p for p in relpaths if p in listed]
 
     def commit(
         self, relpaths: list[str], message: str, *, advance: str | None = None
