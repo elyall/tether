@@ -25,10 +25,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ObjectBackend.fork`, `promote` and `merge` take `expected=`, the head the
+  caller reviewed (or `ABSENT`): the ref moves only from there, else
+  `RefMovedError` and nothing moves. git and Icechunk use their native
+  compare-and-swap (`update-ref` with the old value, `reset_branch(...,
+  from_snapshot_id=)` where the installed icechunk has it); the other backends
+  compare just before acting; a backend written without the keyword is called
+  as before. The engine passes the heads its plans reviewed.
+- The conformance suite checks conditional forks, `PROMOTE`, `MERGE`,
+  `ancestor_of`, and opening an older recorded state.
+- `tether.plan.REQUIRED_PRECONDITIONS` (per command) and
+  `REQUIRED_ACTION_PRECONDITIONS` (per action), and a `workspace_bookmark`
+  precondition: the checkout's bookmark as `workspace.toml` and the VCS see it.
+
 - `gc --release-foreign` (`Repo.gc(release_foreign=)`): also release
   unreferenced pins this clone did not create.
 
 ### Changed
+
+- A plan must carry the preconditions its command requires; one that lacks
+  them -- saved by an older tether, or edited -- is refused as stale. Every
+  plan binds to the checkout that made it (`--plan FILE` persists the
+  workspace id first), and `commit`, `restore`, `promote` and `drop` plans to
+  its bookmark.
+- `promote` lands committed states only: a working branch with writes since
+  the last commit is refused (`tether commit` them first). Merges run before
+  fast-forwards, which are held when a merge does not land; the trunk moves to
+  the commit the plan reviewed, and a second promote after a merge moves it
+  once every base holds what that commit records.
+- `restore` checks the head of every branch it would reset -- a fork `new`
+  deferred included, which a `--shared` peer may have created -- and wants
+  `--discard` for writes nobody committed; a head it cannot read is refused.
+- `undo` reverses the newest operation and refuses, rather than reaches past,
+  one it cannot undo; `tether undo ID` puts back only the `workspace.toml`
+  fields that entry changed. The `new` and `gc` a `drop` runs are journaled
+  as its steps (`parent`; `(step of ID)` in `tether ops`) and cannot be undone
+  on their own.
+- `new`, `restore` and the first writable `open` on a bookmark hold the
+  repository lock while they check and fork, and fork only onto the head the
+  plan saw; a restore stopped by a branch that moved under it records what it
+  did reset and asks for a new plan for the rest.
+- Where the platform has no `fcntl` (Windows), commands that write are
+  refused with one message; `status`, `verify`, `diff`, `log`, `ops` and
+  `gc --dry-run` work.
 
 - `gc` and `drop` release only pins this clone created, recorded in
   `tether-pinned.jsonl` beside the repository lock (seeded from the op logs on
@@ -53,6 +92,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected branches, and paid plans allow a few.
 
 ### Fixed
+
+- Two `--shared` checkouts materializing one lazy fork: the second listed the
+  branch as absent while the first forked and wrote, then forked onto the pin
+  and threw the write away.
+- `undo <older new>` after a commit on the branch it created deleted the
+  branch -- the committed state counted as "known" -- which for a
+  `pin = "record"` object held the only copy of what the commit recorded; the
+  branch is refused without `--discard`, and the workspace no longer rolls
+  back to the bookmark of that time. Undoing an older `add` moved the checkout
+  to `main` with no working refs, and the next write went to the store's
+  `main`.
+- Two `tether undo`s after a `drop` revived the abandoned commit, naming a
+  deleted pin, bookmark and branch.
+- jj: undoing a commit that other commits were built on squashed it away and
+  rewrote them; refused now (`jj backout` reverts it in place).
+- `promote` landed a working branch's uncommitted writes and moved the trunk
+  to a commit recording an older state; a merge that conflicted left the
+  fast-forwards beside it landed; a saved plan applied on another bookmark
+  moved the trunk to that bookmark's commit; the reset after a merge discarded
+  a write that landed during it.
+- A long-lived `Repo`'s writable `open` used the workspace it loaded at
+  construction: after another process ran `new`, its handle was still on the
+  trunk's upstream branch. The open re-reads the checkout first.
+- `new` kept the snapshot cache of the bookmark it left, so `status` without a
+  snapshot reported the old branch's head under the new bookmark and
+  `commit --no-snapshot` pinned it as the new bookmark's state.
+- AWS credentials from a profile or role were resolved once per operation and
+  never refreshed; they are cached with their expiry and resolved again five
+  minutes before it, Icechunk repositories and file stores are rebuilt when
+  the keys change, and the file store cache is keyed per credential rule and
+  region rather than per bucket root (two prefixes of one bucket with
+  different rules shared the first's credentials).
+- The checkout and repository locks' re-entrancy was per `Repo`, not per
+  thread: a second thread walked in while the first held the lock, and the
+  counter could end at -1, after which that `Repo` never locked or refreshed
+  again.
+- jj: `drop` from a bookmark whose working copy had edits planned no leave
+  (jj reports no bookmark for a non-empty `@`), and the abandon rebased the
+  working copy onto the trunk while `workspace.toml` still named the bookmark.
 
 - `gc` counts every live checkout's working-tree manifests and the pins of
   operations still running or interrupted as references; it released a pin

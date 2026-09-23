@@ -238,10 +238,18 @@ def test_conformance() -> None:
 
 The suite checks fingerprint stability and change, identity/pin-id
 determinism, `DIFF` (empty self-diff, non-empty after a mutation),
-`ADDRESSABLE` (open by state), `PIN` (create, list, verify shallow and deep,
-idempotency, protection against later drift of the working ref), `FORK` (a
-fresh fork fingerprints equal to the pinned state; writes to the fork leave the
-base untouched), and unpin. For `CREATE` it walks the store lifecycle at a
+`ADDRESSABLE` (open by state -- an older recorded state too, on a handle
+naming another address than the current one), `PIN` (create, list, verify
+shallow and deep, idempotency, protection against later drift of the working
+ref), `FORK` (a fresh fork fingerprints equal to the pinned state; writes to
+the fork leave the base untouched; a conditional fork -- `expected=` a stale
+head, or `ABSENT` onto an existing branch -- raises `RefMovedError` and moves
+nothing, where the backend takes the keyword), `PROMOTE` (the base follows
+the fork, a second promote is a no-op, a base that moved on its own is
+refused, a stale `expected` is `RefMovedError`), `MERGE` (two diverged sides
+make a new base state; a stale `expected` is refused), `ancestor_of` (the
+fork point is an ancestor of the fork, not the other way round; the default
+answers `None`), and unpin. For `CREATE` it walks the store lifecycle at a
 `fresh_locator()`: `create` -> `owner` names the creator -> `is_ref_empty` is
 `True` -> a second `create` is refused -> a written fork makes it `False`, and
 `True` again when that fork is in `ignoring` -> the fork deleted, `True` ->

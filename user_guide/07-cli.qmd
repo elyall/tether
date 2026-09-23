@@ -107,6 +107,31 @@ branch heads it will touch, the workspace -- and refuses with
 contract is spelled out in
 [Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans).
 
+A plan carries its own preconditions, so each command *requires* a set of
+them and refuses a plan that lacks one -- saved by an older tether, or edited
+-- as stale ("predates the ... precondition(s) tether now requires"). Every
+plan binds to the checkout that made it (`workspace_id`, which `--plan`
+persists in `workspace.toml` first) and, where it lands on or leaves a
+bookmark, to that bookmark as both the workspace file and the VCS see it
+(`workspace_bookmark`: git's `HEAD` branch; under jj the bookmarks at `@` or,
+with edits in `@`, at `@-`):
+
+| Command | Required preconditions | Per object |
+| --- | --- | --- |
+| `commit` | `workspace_id`, `workspace_bookmark`, `manifest_hash` | -- |
+| `new` | `workspace_id`, `manifest_hash` | each `fork`: `ref_head` (the branch exists) or `ref_absent`; each `reuse`: `ref_head` |
+| `restore` | `workspace_id`, `workspace_bookmark`, `manifest_hash` | each `fork`: `ref_head` or `ref_absent` |
+| `promote` | `workspace_id`, `workspace_bookmark`, `bookmark_head`, `manifest_hash` | each `fast-forward` / `merge`: `base_state`, and `ref_head` or `pin_state` |
+| `drop` | `workspace_id`, `workspace_bookmark`, `bookmark_head`, `no_new_holders`, `vcs_head`, `history_digest` | -- |
+| `gc`, `repair` | `workspace_id`, `history_digest` | -- |
+
+The heads a plan reviewed are also what the stores are asked to move *from*:
+`fork`, `promote` and `merge` take the expected head (or "absent") and refuse
+with `RefMovedError` when the ref holds something else at the moment of the
+move, so a write that lands between the check and the act is refused rather
+than overwritten. Backends with a native compare-and-swap (git, Icechunk)
+use it; the others compare just before acting.
+
 ```
 plan: commit (2 write(s))
                  pin  zarr/imaging  [icechunk] tether.0a1b2c3d.deb4861eb388e5f6  native ref at snapshot_id=K3F9M2A1B7C8D4E5…
@@ -307,10 +332,14 @@ and touches nothing else -- other objects' branches, the working-tree
 manifests, and the VCS working copy stay. The object is *not* stale
 afterwards: the next `commit` pins what you restored. Its fork point moves to
 `REV`'s state, so `promote` treats a base that moved since as a divergence
-(merge or refuse), not a fast-forward. A branch holding writes you never
-committed is refused unless `--discard`. `undo` of a restore deletes the
-branch if the restore *created* it and otherwise reports the head it had:
-`restore` again, from the commit you want, is the way back.
+(merge or refuse), not a fast-forward. Whether the branch exists, and what it
+holds, is the store's answer, not the workspace's: a fork `new` deferred may
+have been created since by a `--shared` peer, and a branch holding writes
+nobody committed is refused unless `--discard` (a head that cannot be read is
+refused outright). The plan binds to each head it reviewed, so a write in
+between makes it stale. `undo` of a restore deletes the branch if the restore
+*created* it and otherwise reports the head it had: `restore` again, from the
+commit you want, is the way back.
 
 ## `promote`
 
@@ -320,20 +349,29 @@ ancestry): unchanged and `PROMOTE` -> `fast-forward`; moved and `MERGE` ->
 `merge`; otherwise `refuse` with the backend's recipe. `--strategy ff` turns
 merges into refusals, `--strategy merge` turns fast-forwards into refusals.
 
+What lands is what the bookmark's commit records: a working branch with
+writes since the last commit is refused (`tether commit` them first), because
+the trunk moves to that commit and its manifest must describe the upstream.
+
 A bookmark is planned whole or not at all: if any object is refused and no
 keys were named, the others are `held` (the output says what each would have
 done) and nothing is written -- a refusal never leaves `main` with a mix of
-landed and unlanded systems. That guarantee is the plan's: once the apply is
-under way each system's fast-forward stands on its own, so a backend that
-fails mid-apply leaves the systems before it landed and the trunk bookmark
-where it was (`promote` again finishes the rest; there is no cross-system
-undo). `tether promote KEY...` lands a subset on purpose; the trunk bookmark
-never moves for a subset. When everything fast-forwarded and nothing was
-refused, the trunk bookmark is moved to this bookmark's commit
-(`main -> <commit>` in the output). After a merge the branch is reset onto
-the merge result so the next `commit` pins it, and a second `promote` moves
-the trunk. Exit status is `1` when anything was refused (conflicts included).
-The walkthrough: [Landing it](04-branching-and-writing.qmd#landing-it-tether-promote).
+landed and unlanded systems. At apply the merges run first and the
+fast-forwards only once every merge landed: a merge is what can still stop
+(a conflict, a base that moved), and a fast-forward cannot be taken back.
+Beyond that each system's move stands on its own, so a backend that fails
+mid-apply leaves the systems before it landed and the trunk bookmark where it
+was (`promote` again finishes the rest; there is no cross-system undo).
+`tether promote KEY...` lands a subset on purpose; the trunk bookmark never
+moves for a subset. When everything fast-forwarded and nothing was refused,
+the trunk bookmark is moved to the commit the plan reviewed (`main ->
+<commit>` in the output) -- the bookmark's commit at plan time, not wherever
+the checkout is by the time the plan is applied. After a merge the branch is
+reset onto the merge result so the next `commit` pins it (a branch that
+gained writes during the merge is left as it is and named in the output),
+and a second `promote` -- with every base already at what that commit records
+-- moves the trunk. Exit status is `1` when anything was refused (conflicts
+included). The walkthrough: [Landing it](04-branching-and-writing.qmd#landing-it-tether-promote).
 
 ## `drop`
 
@@ -486,8 +524,10 @@ applicable.
 The log is a journal: a store-writing command appends its entry (plan and
 what `undo` would need) and syncs it *before* the first side effect, then
 appends a completion mark with the result. A process killed in between leaves
-an entry marked `INCOMPLETE`; `undo` skips it (what it did is not known),
-`repair --dry-run` names it, and `gc` collects whatever it left. Each side
+an entry marked `INCOMPLETE`; `undo` refuses it (what it did is not known),
+`repair --dry-run` names it, and `gc` collects whatever it left. The `new`
+and `gc` a `drop` runs are journaled as its steps (`parent` in the JSON,
+`(step of ID)` in the listing). Each side
 effect also appends a progress record as it takes effect, so `repair
 --dry-run` can say which forks, unpins, or fast-forwards of an interrupted
 operation had already happened; running the command again finishes what is
@@ -495,10 +535,15 @@ left.
 
 One writer holds `.tether/lock` for the duration of a writing command, so two
 `tether` processes in one checkout cannot interleave journal entries and
-`workspace.toml` writes. Commands that create references to pins (`commit`,
-`pull`), release them (`gc`), or remove commits (`undo`, `abandon`, `drop`)
-also hold a repository-wide lock in the VCS's shared directory, so a gc here
-cannot race a commit in another workspace.
+`workspace.toml` writes (threads sharing one `Repo` take turns the same way).
+Commands that create references to pins (`commit`, `pull`), release them
+(`gc`), remove commits (`undo`, `abandon`, `drop`), or create a bookmark's
+store branch (`new`, the first writable `open` on a `--shared` bookmark) also
+hold a repository-wide lock in the VCS's shared directory, so a gc here cannot
+race a commit in another workspace, and two `--shared` checkouts cannot both
+find a branch absent and fork over each other. Where the platform has no
+`fcntl` (Windows) writing commands are refused; see
+[Caveats](12-caveats-and-performance.qmd#one-writer-per-checkout-one-per-repository).
 
 `commit` compensates as a unit: if anything fails after the pins -- a
 manifest write, a listing, the VCS commit -- the pins this commit created are
@@ -511,9 +556,14 @@ trailing error is reported.
 
 ### `undo`
 
-`tether undo [OP_ID]` reverses the newest undoable entry (or the one named)
-*where the store still allows it*, and says exactly what it could not
-reverse:
+`tether undo [OP_ID]` reverses the newest entry (or the one named) *where the
+store still allows it*, and says exactly what it could not reverse. Undos and
+what they reversed are skipped, so several slips in a row are several `undo`s;
+anything else the newest entry cannot be -- a `drop`, an `INCOMPLETE`
+operation -- is refused, not skipped: undoing the `new` before a `drop` would
+bring back half of what the drop threw away. Name an older entry by id and
+only the `workspace.toml` fields *that* entry changed come back, never what
+later entries did to the rest.
 
 ```
 $ tether undo
@@ -525,13 +575,14 @@ undid 3f1c9a2b7d4e (new: forked db, zarr/imaging)
 
 | Undoing a... | Does | Refused when |
 | --- | --- | --- |
-| `commit` | uncommits it (jj: squash into `@`; git: `reset --soft`); manifests become working-tree edits; pins stay | it is no longer the working copy's parent |
-| `new`, lazy fork, `restore` | deletes the branches it *created*, restores `workspace.toml`, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made; a branch it *reset* is reported with its old head (`IRREVERSIBLE`, exit `2`) -- `restore KEY --from REV` or `new --discard` puts it where you want | a created branch gained writes since (commit them, or `--discard`) |
+| `commit` | uncommits it (jj: squash into `@`; git: `reset --soft`); manifests become working-tree edits; pins stay | it is no longer the working copy's parent; under jj, other commits are built on it (squashing it away would rewrite them -- `jj backout` instead) |
+| `new`, lazy fork, `restore` | deletes the branches it *created*, restores the `workspace.toml` fields it changed, returns the VCS working copy if it has not moved, deletes a bookmark `-b` made; a branch it *reset* is reported with its old head (`IRREVERSIBLE`, exit `2`) -- `restore KEY --from REV` or `new --discard` puts it where you want | a created branch gained writes since, or holds a state a manifest records with no pin of its own (a `pin = "record"` object committed on it): commit or undo those, or `--discard` |
 | `pull` | uncommits it like a `commit`; pins stay | it is no longer the working copy's parent |
 | `gc` | restores forgotten working refs and deleted listings; deleted *branches* and *pins* stay deleted and print as `IRREVERSIBLE` (exit `2`) -- `repair` recreates a bookmark's branches from its manifests, and pins while the state is reachable | -- |
 | `add`, `remove`, `set`, `import` | restores the manifests (and `undo add` removes a store `--create` made while it is still empty) | -- |
 | `promote` | -- | always; the previous upstream heads are printed (the trunk bookmark: `jj bookmark set main -r <before>`) |
 | `repair`, `upgrade`, `abandon`, `drop`, `forget-workspace` | -- | always |
+| the `new` or `gc` a `drop` ran | -- | always: they are steps of the drop (`tether ops` shows them under it), undone with it or not at all -- `jj undo` brings the commits and bookmark back, `repair` the branches and pins |
 
 The rule for the store side: `undo` deletes what an operation *created* and
 never guesses where something it *reset* should go -- that is a `restore` you
@@ -664,7 +715,7 @@ per-table counts.
 | `abandon` | `{"abandoned": [commit ids], "gc_plan": plan, "gc_applied": bool}` |
 | `drop` | `{"bookmark", "left_for": bookmark or null, "abandoned": [commit ids], "gc": {the applied gc's fields} or null}`; dry run (default): the plan |
 | `forget-workspace` | `{"workspace": id8, "removed_files": [paths], "vcs": str or null, "failed": {target: reason}}`; with `--dry-run`: the plan |
-| `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by", "vcs_commit_gone"}]`, newest first |
+| `ops` | `[{"id", "at", "command", "plan", "result", "pre", "undoes", "undone_by", "status", "parent", "progress", "vcs_commit_gone"}]`, newest first; `parent` names the `drop` an entry is a step of |
 | `undo` | `{"undone": op id, "command", "undo_id", "restored": [str], "irreversible": [str], "skipped": [str]}` |
 | `repair` | `{"repinned": {key: pin_id}, "reforked": {key: ref}, "failed": {target: reason}, "notes": [str]}`; with `--dry-run`: the plan |
 | `upgrade` | `{"from_version", "to_version", "renamed_pins": {old ref: new ref}, "renamed_branches": {old: new}, "rewritten_commits": {old id: new id}, "refingerprinted": [keys], "rewritten_manifests": [keys], "failed": {target: reason}, "vcs_commit"}`; with `--dry-run`: the plan |

@@ -435,19 +435,26 @@ error: refusing to reset working branches with unpinned writes:
   zarr/imaging: tether.ws.0a1b2c3d.relabel has writes since this workspace last committed (snapshot_id=Q7ZK…); commit them, or pass --discard to throw them away
 ```
 
-Commit, or `tether new --discard` if that was scratch work.
+Commit, or `tether new --discard` if that was scratch work. `tether restore
+KEY --from REV` resets one object's branch the same way and asks the same
+question -- it looks at the branch as the store has it, a fork `new` deferred
+included, and wants `--discard` for writes you never committed.
 
 ## Undo
 
 Every command that touched a store is in this workspace's operation log
-(`tether ops`), and `tether undo` reverses the newest entry where the store
+(`tether ops`), and `tether undo` reverses the *newest* entry where the store
 still allows it: a commit is *uncommitted* (manifests become working-tree
 edits again; the pins stay, still referenced); a fork or `new` deletes the
-branches it created and puts `workspace.toml` and the working copy back. What
-it cannot reverse -- a `gc`'s deleted refs, a `promote` -- it says so, with
-the tool that puts it right (`repair`, `restore`, a manual reset). `jj undo`
-and `git reset` stay what they were: they move the manifests, never the
-stores. The full table is in the
+branches it created and puts `workspace.toml` and the working copy back. When
+the newest entry cannot be undone -- a `drop`, or the `new` and `gc` it ran,
+an interrupted operation -- `undo` refuses rather than reach past it; `tether
+undo ID` names an older entry, and then puts back only the `workspace.toml`
+fields that entry changed, never what later ones did. What it cannot reverse
+-- a `gc`'s deleted refs, a `promote`, a branch holding a state a commit since
+recorded -- it says so, with the tool that puts it right (`repair`, `restore`,
+a manual reset). `jj undo` and `git reset` stay what they were: they move the
+manifests, never the stores. The full table is in the
 [CLI Guide](07-cli.qmd#ops-undo-repair).
 
 ## Workspaces and bookmarks
