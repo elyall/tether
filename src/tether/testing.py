@@ -8,7 +8,10 @@ same spec validates an Observed file backend and a Forkable Icechunk backend.
 
 from __future__ import annotations
 
+import threading
+import warnings
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol, runtime_checkable
 
 from tether.backends.base import (
@@ -358,13 +361,34 @@ def _unpin_checks(h: BackendHarness, loc: Locator, state: dict, pid: str) -> Non
     assert b.verify(loc, state, pin, deep=False).status is VerifyStatus.MISSING
 
 
-def _conditional_fork_checks(h: BackendHarness, loc: Locator) -> None:
+def _takes_expected(b: ObjectBackend, method: str, conditional: bool) -> bool:
+    """Whether `method` takes `expected`. A backend declaring
+    `CONDITIONAL_REF` must; one that does not moves unconditionally, which
+    passes with a warning -- the engine warns the same way at every move."""
+    if accepts_expected(getattr(b, method)):
+        return True
+    if conditional:
+        raise AssertionError(
+            f"{b.kind} declares CONDITIONAL_REF, but its {method}() takes no `expected`"
+        )
+    warnings.warn(
+        f"{b.kind}.{method}() takes no `expected`: its ref moves are "
+        "unconditional, and a concurrent write is overwritten",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return False
+
+
+def _conditional_fork_checks(
+    h: BackendHarness, loc: Locator, *, conditional: bool
+) -> None:
     """`fork(..., expected=)`: the head the caller reviewed must still be the
     branch's head (or the branch must not exist, for `ABSENT`) for the move
     to happen; otherwise `RefMovedError`, and the branch stays where it was."""
     b = h.backend
-    if not accepts_expected(b.fork):
-        return  # a backend from before the keyword: its moves are unconditional
+    if not _takes_expected(b, "fork", conditional):
+        return
     source = b.fingerprint(loc, None)
     name = working_ref_name(CONFORMANCE_DATASET, "conformance-cas")
     wref = b.fork(loc, source, name)
@@ -398,6 +422,51 @@ def _conditional_fork_checks(h: BackendHarness, loc: Locator) -> None:
     b.delete_working_ref(loc, again)
 
 
+RACERS = 8
+"""Threads the `CONDITIONAL_REF` race checks start at once."""
+
+
+def _race(attempt: Callable[[], object]) -> list[BaseException | None]:
+    """Run `attempt` in `RACERS` threads released together; per thread the
+    exception it raised, or `None` for a move that went through."""
+    barrier = threading.Barrier(RACERS, timeout=60)
+
+    def one() -> BaseException | None:
+        barrier.wait()
+        try:
+            attempt()
+        except BackendError as exc:
+            return exc
+        return None
+
+    with ThreadPoolExecutor(max_workers=RACERS) as pool:
+        return list(pool.map(lambda _: one(), range(RACERS)))
+
+
+def _conditional_race_checks(h: BackendHarness, loc: Locator) -> None:
+    """`CONDITIONAL_REF`: the head check and the move are one step, so of
+    several writers holding the same `expected`, exactly one moves the ref
+    and the rest are refused -- creating a branch (`ABSENT`) and resetting
+    one from the head they all read."""
+    b = h.backend
+    source = b.fingerprint(loc, None)
+    name = working_ref_name(CONFORMANCE_DATASET, "conformance-race")
+    for expected, what in ((ABSENT, "create"), (None, "reset")):
+        if expected is None:
+            h.mutate(loc, name)
+            expected = b.fingerprint(loc, name)
+        outcomes = _race(
+            lambda expected=expected: b.fork(loc, source, name, expected=expected)
+        )
+        won = [o for o in outcomes if o is None]
+        assert len(won) == 1, (
+            f"{len(won)} of {RACERS} racing forks that {what} one branch from the "
+            "same `expected` went through; a conditional move lets exactly one"
+        )
+        assert _same(b, b.fingerprint(loc, name), source)
+    b.delete_working_ref(loc, name)
+
+
 def _ancestry_checks(h: BackendHarness, loc: Locator) -> None:
     """`ancestor_of`: the fork point is in the fork's history, the fork's head
     is not in the fork point's. A backend that leaves the default in place
@@ -420,17 +489,33 @@ def _ancestry_checks(h: BackendHarness, loc: Locator) -> None:
     b.delete_working_ref(loc, wref)
 
 
-def _promote_checks(h: BackendHarness, loc: Locator) -> None:
+def _promote_checks(h: BackendHarness, loc: Locator, *, conditional: bool) -> None:
     """`promote`: the base follows the fork; a fast-forward is idempotent; a
     base that moved on its own is refused, and a stale `expected` is refused
-    as `RefMovedError` before anything else is compared."""
+    as `RefMovedError` before anything else is compared -- also where the
+    fast-forward itself would land -- while the right one lets it land."""
     b = h.backend
+    takes = _takes_expected(b, "promote", conditional)
     base = b.fingerprint(loc, None)
     name = working_ref_name(CONFORMANCE_DATASET, "conformance-promote")
     wref = b.fork(loc, base, name)
     h.mutate(loc, wref)
     fork_head = b.fingerprint(loc, wref)
-    moved = b.promote(loc, wref)
+    if takes:
+        # The fork's head is a state the base never held: a backend that
+        # ignores `expected` fast-forwards here.
+        _refuses(
+            lambda: b.promote(loc, wref, expected=fork_head),
+            RefMovedError,
+            "promote with a stale expected must raise RefMovedError, also when "
+            "the fast-forward would land",
+        )
+        assert _same(b, b.fingerprint(loc, None), base), (
+            "a refused promote must leave the base where it was"
+        )
+        moved = b.promote(loc, wref, expected=base)
+    else:
+        moved = b.promote(loc, wref)
     assert _same(b, moved, b.fingerprint(loc, None)), (
         "promote must return the base's new state"
     )
@@ -459,7 +544,7 @@ def _promote_checks(h: BackendHarness, loc: Locator) -> None:
     assert _same(b, b.fingerprint(loc, None), diverged), (
         "a refused promote must leave the base where it was"
     )
-    if accepts_expected(b.promote):
+    if takes:
         _refuses(
             lambda: b.promote(loc, wref, expected=moved),
             RefMovedError,
@@ -469,10 +554,12 @@ def _promote_checks(h: BackendHarness, loc: Locator) -> None:
     b.delete_working_ref(loc, wref)
 
 
-def _merge_checks(h: BackendHarness, loc: Locator) -> None:
+def _merge_checks(h: BackendHarness, loc: Locator, *, conditional: bool) -> None:
     """`merge`: two sides written to different places merge into a new base
-    state; a stale `expected` is refused as `RefMovedError`."""
+    state; a stale `expected` is refused as `RefMovedError` -- also where
+    the merge itself would land -- and the right one lets it land."""
     b = h.backend
+    takes = _takes_expected(b, "merge", conditional)
     base = b.fingerprint(loc, None)
     name = working_ref_name(CONFORMANCE_DATASET, "conformance-merge")
     wref = b.fork(loc, base, name)
@@ -480,7 +567,21 @@ def _merge_checks(h: BackendHarness, loc: Locator) -> None:
     fork_head = b.fingerprint(loc, wref)
     h.mutate(loc, None)
     before = b.fingerprint(loc, None)
-    merged = b.merge(loc, wref, "conformance merge")
+    if takes:
+        # Reviewed before the base's own write: a backend that ignores
+        # `expected` merges here.
+        _refuses(
+            lambda: b.merge(loc, wref, "conformance merge", expected=base),
+            RefMovedError,
+            "merge with a stale expected must raise RefMovedError, also when the "
+            "merge would land",
+        )
+        assert _same(b, b.fingerprint(loc, None), before), (
+            "a refused merge must leave the base where it was"
+        )
+        merged = b.merge(loc, wref, "conformance merge", expected=before)
+    else:
+        merged = b.merge(loc, wref, "conformance merge")
     assert _same(b, merged, b.fingerprint(loc, None)), (
         "merge must return the base's new state"
     )
@@ -490,7 +591,7 @@ def _merge_checks(h: BackendHarness, loc: Locator) -> None:
     assert b.ancestor_of(loc, before, merged) in (True, None), (
         "merge must keep the base's history"
     )
-    if accepts_expected(b.merge):
+    if takes:
         _refuses(
             lambda: b.merge(loc, wref, "conformance merge", expected=before),
             RefMovedError,
@@ -534,13 +635,20 @@ def run_conformance(harness: BackendHarness) -> None:
         _unpin_checks(harness, loc, state, pid)
 
     if Capability.FORK in caps:
-        _conditional_fork_checks(harness, loc)
+        # Declared per object where the store decides (Icechunk: object
+        # stores only), so the harness's locator is asked too.
+        conditional = Capability.CONDITIONAL_REF in (
+            caps | effective_capabilities(b, loc, Policy())
+        )
+        _conditional_fork_checks(harness, loc, conditional=conditional)
+        if conditional:
+            _conditional_race_checks(harness, loc)
         if Capability.PROMOTE in caps or Capability.MERGE in caps:
             _ancestry_checks(harness, loc)
         if Capability.PROMOTE in caps:
-            _promote_checks(harness, loc)
+            _promote_checks(harness, loc, conditional=conditional)
         if Capability.MERGE in caps:
-            _merge_checks(harness, loc)
+            _merge_checks(harness, loc, conditional=conditional)
 
     if Capability.CREATE in caps:
         _create_checks(harness)

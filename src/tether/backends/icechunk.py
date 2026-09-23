@@ -413,7 +413,9 @@ class IcechunkBackend(ObjectBackend):
         """Whether `Repository.reset_branch` takes `from_snapshot_id` -- the
         compare-and-swap `fork` and `promote` move a branch with. Icechunk
         1.x (the resolution on Python 3.11) lacks it; there the reviewed head
-        is compared before an unconditional reset (:func:`check_expected`)."""
+        is compared before an unconditional reset (:func:`check_expected`).
+        The swap is atomic on object stores only (`CONDITIONAL_REF`, see
+        `effective_capabilities`)."""
         import inspect
 
         import icechunk as ic
@@ -572,6 +574,12 @@ class IcechunkBackend(ObjectBackend):
         caps = self.capabilities
         if self._lifecycle_api() is not None:
             caps &= ~Capability.CREATE
+        # `create_branch` and `reset_branch(from_snapshot_id=)` are atomic
+        # where the store has a conditional put; on local filesystem storage
+        # several racing processes each "win" them.
+        uri = str(locator.get("uri") or locator.get("path") or "")
+        if urlparse(uri).scheme == "s3" and self._conditional_reset():
+            caps |= Capability.CONDITIONAL_REF
         return caps
 
     def _require_lifecycle_api(self) -> None:

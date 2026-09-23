@@ -8,6 +8,7 @@ without any external system.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Collection
 from dataclasses import dataclass, field
 
@@ -52,6 +53,9 @@ class MemoryStore:
         self.deleted: set[str] = set()
         """Systems `delete_store` removed: reading one is an error, not a
         silent re-creation, until `create` makes it again."""
+        self.lock = threading.RLock()
+        """Held by every write and ref move: a conditional move's check and
+        its write are one step against other threads (`CONDITIONAL_REF`)."""
 
     def system(self, name: str) -> _System:
         if name in self.deleted:
@@ -86,17 +90,18 @@ class MemoryStore:
         *,
         extra_parents: list[str] | None = None,
     ) -> str:
-        sys = self.system(name)
-        sys.counter += 1
-        sid = f"{name}:s{sys.counter}"
-        sys.snapshots[sid] = dict(payload)
-        parents = []
-        if branch in sys.branches:
-            parents.append(sys.branches[branch])
-        parents.extend(extra_parents or [])
-        sys.parents[sid] = parents
-        sys.branches[branch] = sid
-        return sid
+        with self.lock:
+            sys = self.system(name)
+            sys.counter += 1
+            sid = f"{name}:s{sys.counter}"
+            sys.snapshots[sid] = dict(payload)
+            parents = []
+            if branch in sys.branches:
+                parents.append(sys.branches[branch])
+            parents.extend(extra_parents or [])
+            sys.parents[sid] = parents
+            sys.branches[branch] = sid
+            return sid
 
     def ancestors(self, name: str, sid: str) -> list[str]:
         """``sid`` and everything reachable through parent links (nearest first)."""
@@ -127,6 +132,7 @@ class MemoryBackend(ObjectBackend):
         | Capability.PROMOTE
         | Capability.MERGE
         | Capability.CREATE
+        | Capability.CONDITIONAL_REF
     )
 
     def __init__(self, store: MemoryStore | None = None) -> None:
@@ -274,8 +280,9 @@ class MemoryBackend(ObjectBackend):
             sid = str(source["snapshot_id"])
             if sid not in sys.snapshots:
                 raise BackendError(f"snapshot {sid} gone", key=system, kind="memory")
-        self._require_head(system, name, expected, "fork")
-        sys.branches[name] = sid
+        with self.store.lock:
+            self._require_head(system, name, expected, "fork")
+            sys.branches[name] = sid
         return name
 
     def delete_working_ref(self, locator: Locator, ref: str) -> None:
@@ -351,19 +358,20 @@ class MemoryBackend(ObjectBackend):
         name = self._system(locator)
         sys = self.store.system(name)
         base = self._base_branch(locator)
-        self._require_head(name, base, expected, "promote")
-        head = sys.branches[base]
-        target = self._source_sid(name, source)
-        if target == head:
-            return {"snapshot_id": head}
-        if head not in self.store.ancestors(name, target):
-            raise BackendError(
-                f"{base} moved to {head}, which is not an ancestor of {target}",
-                key=name,
-                kind="memory",
-            )
-        sys.branches[base] = target
-        return {"snapshot_id": target}
+        with self.store.lock:
+            self._require_head(name, base, expected, "promote")
+            head = sys.branches[base]
+            target = self._source_sid(name, source)
+            if target == head:
+                return {"snapshot_id": head}
+            if head not in self.store.ancestors(name, target):
+                raise BackendError(
+                    f"{base} moved to {head}, which is not an ancestor of {target}",
+                    key=name,
+                    kind="memory",
+                )
+            sys.branches[base] = target
+            return {"snapshot_id": target}
 
     def merge(
         self,
@@ -376,42 +384,43 @@ class MemoryBackend(ObjectBackend):
         name = self._system(locator)
         sys = self.store.system(name)
         base = self._base_branch(locator)
-        self._require_head(name, base, expected, "merge")
-        head = sys.branches[base]
-        src = self._source_sid(name, source)
-        if src == head or src in self.store.ancestors(name, head):
-            return {"snapshot_id": head}
-        if head in self.store.ancestors(name, src):
-            sys.branches[base] = src  # fast-forward
-            return {"snapshot_id": src}
-        src_line = self.store.ancestors(name, src)
-        common = next(
-            (a for a in self.store.ancestors(name, head) if a in src_line), None
-        )
-        anc = sys.snapshots.get(common, {}) if common else {}
-        ours, theirs = sys.snapshots[head], sys.snapshots[src]
-        merged = dict(ours)
-        conflicts: list[str] = []
-        for k in sorted(set(ours) | set(theirs) | set(anc)):
-            o, t, a = ours.get(k), theirs.get(k), anc.get(k)
-            if o == t:
-                continue
-            if o == a:  # only they changed it
-                if k in theirs:
-                    merged[k] = t
-                else:
-                    merged.pop(k, None)
-            elif t != a:  # both changed it differently
-                conflicts.append(k)
-        if conflicts:
-            raise MergeConflict(
-                f"{len(conflicts)} key(s) changed on both {base} and {src}",
-                conflicts=conflicts,
-                key=name,
-                kind="memory",
+        with self.store.lock:
+            self._require_head(name, base, expected, "merge")
+            head = sys.branches[base]
+            src = self._source_sid(name, source)
+            if src == head or src in self.store.ancestors(name, head):
+                return {"snapshot_id": head}
+            if head in self.store.ancestors(name, src):
+                sys.branches[base] = src  # fast-forward
+                return {"snapshot_id": src}
+            src_line = self.store.ancestors(name, src)
+            common = next(
+                (a for a in self.store.ancestors(name, head) if a in src_line), None
             )
-        sid = self.store.write(name, base, merged, extra_parents=[src])
-        return {"snapshot_id": sid}
+            anc = sys.snapshots.get(common, {}) if common else {}
+            ours, theirs = sys.snapshots[head], sys.snapshots[src]
+            merged = dict(ours)
+            conflicts: list[str] = []
+            for k in sorted(set(ours) | set(theirs) | set(anc)):
+                o, t, a = ours.get(k), theirs.get(k), anc.get(k)
+                if o == t:
+                    continue
+                if o == a:  # only they changed it
+                    if k in theirs:
+                        merged[k] = t
+                    else:
+                        merged.pop(k, None)
+                elif t != a:  # both changed it differently
+                    conflicts.append(k)
+            if conflicts:
+                raise MergeConflict(
+                    f"{len(conflicts)} key(s) changed on both {base} and {src}",
+                    conflicts=conflicts,
+                    key=name,
+                    kind="memory",
+                )
+            sid = self.store.write(name, base, merged, extra_parents=[src])
+            return {"snapshot_id": sid}
 
     def open(
         self,

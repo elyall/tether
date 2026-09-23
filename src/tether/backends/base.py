@@ -71,6 +71,16 @@ class Capability(Flag):
     **Experimental**: the feature built on it (`add --create`,
     `gc --delete-stores`; `tether.experimental.lifecycle`) is the one tether
     operation with no `repair`, and has not yet run against real resources."""
+    CONDITIONAL_REF = auto()
+    """`fork` (and `promote` / `merge`, where declared) honour `expected` in
+    one step the system makes atomic -- git's `update-ref` with an old value,
+    Icechunk's `from_snapshot_id` on object stores -- so a concurrent writer
+    is refused, never overwritten. Without it a backend that takes
+    `expected` compares the head just before the move (`check_expected`),
+    and a write in between can slip through; one that does not take it
+    moves unconditionally, and the engine warns (see `fork_ref`). The
+    conformance suite fails a backend that declares this and ignores
+    `expected`."""
 
 
 class Tier(Enum):
@@ -589,7 +599,8 @@ class ObjectBackend(Protocol):
         ``expected`` is the base head the caller reviewed: when the base holds
         another state, raise :class:`~tether.errors.RefMovedError` and move
         nothing (a compare-and-swap where the system has one -- git's
-        `update-ref` with an old value, Icechunk's `from_snapshot_id`).
+        `update-ref` with an old value, Icechunk's `from_snapshot_id` on an
+        object store; see :attr:`Capability.CONDITIONAL_REF`).
         Returns the base branch's new state.
         """
         raise CapabilityError(f"{self.kind} backend cannot promote", kind=self.kind)
@@ -844,9 +855,10 @@ def check_expected(
     `list_working_refs`; :data:`ABSENT` expects that); ``None`` means the
     locator's base branch, which `promote` and `merge` move. A check before
     the act, so a write in between still slips through -- narrower than
-    git's `update-ref` or Icechunk's `from_snapshot_id`, which backends with
-    one should use instead -- but the plan's reviewed head is compared, not
-    ignored. `None` checks nothing.
+    git's `update-ref` or Icechunk's `from_snapshot_id` on an object store,
+    which backends with one should use instead (and declare
+    :attr:`Capability.CONDITIONAL_REF`) -- but the plan's reviewed head is
+    compared, not ignored. `None` checks nothing.
 
     Raises:
         RefMovedError: The head is not ``expected``.
@@ -903,6 +915,31 @@ def accepts_expected(method: Callable[..., Any]) -> bool:
     )
 
 
+def _unconditional(
+    backend: ObjectBackend,
+    locator: Locator,
+    expected: State,
+    method: str,
+    *,
+    ref: str | None = None,
+) -> None:
+    """A conditional move asked of a backend whose `method` takes no
+    `expected`: compare the head here, just before the move, and warn that a
+    write landing in between is overwritten (see
+    :attr:`Capability.CONDITIONAL_REF`)."""
+    import warnings
+
+    warnings.warn(
+        f"the {backend.kind} backend's {method}() takes no `expected`, so its ref "
+        "moves are not conditional: tether compares the head just before the "
+        "move, and a write landing in between is overwritten. Update the backend "
+        "(see Capability.CONDITIONAL_REF)",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    check_expected(backend, locator, expected, ref=ref, what=method)
+
+
 def fork_ref(
     backend: ObjectBackend,
     locator: Locator,
@@ -911,8 +948,13 @@ def fork_ref(
     expected: State | None,
 ) -> str:
     """:meth:`ObjectBackend.fork` with ``expected`` where the backend takes
-    it; a backend predating the keyword is called the old way."""
-    if expected is None or not accepts_expected(backend.fork):
+    it; a backend predating the keyword is called the old way, after the
+    engine compared the head itself (with a warning: that move is not
+    conditional)."""
+    if expected is None:
+        return backend.fork(locator, source, name)
+    if not accepts_expected(backend.fork):
+        _unconditional(backend, locator, expected, "fork", ref=name)
         return backend.fork(locator, source, name)
     return backend.fork(locator, source, name, expected=expected)
 
@@ -924,7 +966,10 @@ def promote_ref(
     expected: State | None,
 ) -> State:
     """:meth:`ObjectBackend.promote`, as :func:`fork_ref` is to `fork`."""
-    if expected is None or not accepts_expected(backend.promote):
+    if expected is None:
+        return backend.promote(locator, source)
+    if not accepts_expected(backend.promote):
+        _unconditional(backend, locator, expected, "promote")
         return backend.promote(locator, source)
     return backend.promote(locator, source, expected=expected)
 
@@ -937,7 +982,10 @@ def merge_ref(
     expected: State | None,
 ) -> State:
     """:meth:`ObjectBackend.merge`, as :func:`fork_ref` is to `fork`."""
-    if expected is None or not accepts_expected(backend.merge):
+    if expected is None:
+        return backend.merge(locator, source, message)
+    if not accepts_expected(backend.merge):
+        _unconditional(backend, locator, expected, "merge")
         return backend.merge(locator, source, message)
     return backend.merge(locator, source, message, expected=expected)
 

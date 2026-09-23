@@ -78,7 +78,12 @@ class GitBackend(ObjectBackend):
         | Capability.CREATE
         | Capability.PROMOTE
         | Capability.MERGE
+        | Capability.CONDITIONAL_REF
     )
+    """`CONDITIONAL_REF`: forks and promotes move refs with `update-ref` and
+    an old value. A merge, and a promote onto a checked-out base, run in the
+    checkout (`git merge`) and compare the head just before; a commit landing
+    in between is merged or refused as not a fast-forward, never discarded."""
 
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}

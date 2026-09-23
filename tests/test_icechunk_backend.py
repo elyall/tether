@@ -617,6 +617,37 @@ def test_icechunk_fork_with_expected_is_a_compare_and_swap(tmp_path: Path) -> No
     assert b.fingerprint(loc, name) == source
 
 
+@pytest.mark.parametrize(
+    ("uri", "swap", "native"),
+    [
+        ("s3://bucket/prefix", True, True),
+        ("s3://bucket/prefix", False, False),  # icechunk 1.x: no swap at all
+        ("/data/repo", True, False),  # local storage: racing writers all "win"
+        ("file:///data/repo", True, False),
+    ],
+)
+def test_icechunk_claims_a_native_swap_on_object_stores_only(
+    uri: str, swap: bool, native: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`create_branch` and `reset_branch(from_snapshot_id=)` are atomic only
+    where the store has a conditional put: in an 8-process race on local
+    filesystem storage several processes won each of them. The backend still
+    compares the head there (and the conformance checks hold), but it
+    declares `CONDITIONAL_REF` for `s3://` repositories alone."""
+    from tether.backends.base import Capability, effective_capabilities
+    from tether.backends.icechunk import IcechunkBackend
+    from tether.manifest import Policy
+
+    monkeypatch.setattr(
+        IcechunkBackend, "_conditional_reset", staticmethod(lambda: swap)
+    )
+    b = IcechunkBackend()
+    assert Capability.CONDITIONAL_REF not in b.capabilities
+    caps = effective_capabilities(b, {"uri": uri, "branch": "main"}, Policy())
+    assert (Capability.CONDITIONAL_REF in caps) is native
+    assert Capability.FORK in caps and Capability.PROMOTE in caps
+
+
 def test_icechunk_without_from_snapshot_id_checks_before_the_reset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
