@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,22 @@ def _env(monkeypatch: pytest.MonkeyPatch, _jj_config: Path) -> None:
     for var in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
         monkeypatch.setenv(var, "tests@tether.dev")
     monkeypatch.delenv("TETHER_REV", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _backend_registry() -> Iterator[None]:
+    """Take back the backend kinds a test registers (`memtable`, `stuck`, ...)
+    and restore any factory it replaced: `known_kinds()`, and with it the
+    CLI's `--kind` help, must not depend on which tests ran first. A built-in
+    kind stays: its module registers once, on first import."""
+    from tether.backends import base
+
+    saved = dict(base._REGISTRY)
+    yield
+    for kind in list(base._REGISTRY):
+        if kind not in saved and kind not in base._BUILTIN_MODULES:
+            del base._REGISTRY[kind]
+    base._REGISTRY.update(saved)
 
 
 @pytest.fixture
