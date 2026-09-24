@@ -13,25 +13,47 @@ fake, a local stand-in, or not at all. By that definition `file` and
 `icechunk` are stable on local storage, which is what CI runs; their S3, GCS
 and Azure paths are **not yet cloud-tested** and are labelled so in the
 README and the backends guide until section 2's runs happen. `tether
-backends` prints the label per kind; `add`, `--create`, and
-`gc --delete-stores` print the note.
+backends` prints each kind's maturity, `add` prints a note for an
+experimental kind, and `--create` and `gc --delete-stores` print theirs.
 
 ## 1. Correctness blockers
 
-The beta-exit work (0.1.0b4) closed the review's
-findings: git hardening and the trust boundary for a cloned dataset, a `gc`
-that releases only what this clone created and counts every live checkout,
-jj and git isolated from the user's configuration, plans bound to their
-checkout and bookmark, conditional ref moves, per-thread locks, and the
-backend and CLI fixes. What remains is coverage, not known bugs:
+The beta-exit work (0.1.0b4) closed the first review's findings, and then
+the second review's:
+
+- **S1.** `secrets.toml`, `workspace.toml` and `ops.jsonl` are refused while
+  the VCS tracks them, at `find` and at every refresh that sees a changed
+  `workspace.toml` (each `open`, each writing command); git 2.38 is
+  enforced.
+- **D1.** `gc` never releases a pin id any manifest names, and local paths
+  are resolved fully (symlinks, trailing slashes, `file://`).
+- **D2.** `promote` compares fork heads with the bookmark's commit, not the
+  working tree.
+- **D3.** `undo ID` reverts only the fields still holding what the operation
+  left, and refuses a `new` whose bookmark the checkout still works on.
+- **D4.** Lance's conditional fork never deletes or replaces a branch it did
+  not check (a small window remains; below).
+- **D8.** Saved plans are format 3, with a digest binding actions and
+  context to their preconditions.
+- **U1-U5.** Format version 5 and one migration carry a 0.1.0b3 dataset's
+  identities, listings, Lance, Neon and directory states, and DuckLake paths
+  forward; `gc` and `verify` skip manifests of removed kinds; 0.1.0b3
+  refuses a version 5 dataset.
+- **jj template aliases.** tether's templates call keywords as methods, and
+  the hostile-config fixture aliases them.
+
+What remains:
 
 | Blocker | What is missing | What settles it |
 | --- | --- | --- |
-| **Real-service runs** for `neon`, `dolt`, `iceberg`, `ducklake` | Every one of them has run only against a fake or a local stand-in. Rate limits, eventual consistency, permission models and the cost of a Neon branch per commit are unobserved. | The rows in section 2, once each, with the result recorded; a CI row where a credential or a container can live there. |
-| **Cloud runs** for `file` and `icechunk` on S3, GCS and Azure | The object-store code paths -- obstore options such as `allow_http`, versioned objects, `s3_storage` with per-object credentials, `delete_store` on a prefix -- have run against in-memory stores and S3-compatible fakes only. | The S3, credentials, GCS and Azure rows in section 2. Until then the labels say "not yet cloud-tested". |
-| **Windows** | Writing commands are refused where `fcntl` is missing; read-only ones work. Nothing has run on Windows at all. | A decision: implement the checkout and repository locks on `msvcrt`, or ship 0.1.0 with writes refused on Windows and say so in the README. Either way a Windows CI row (section 3). |
+| **Real-service runs** for `neon`, `dolt`, and S3 through SeaweedFS | Neon and Dolt have run only against fakes. The SeaweedFS-backed S3 test skips without `weed` on `PATH`, so CI has never run it. Rate limits, eventual consistency, permissions and the cost of a Neon branch per commit are unobserved. | The rows in section 2, once each, with the result recorded; `weed` in a CI image; a CI row where a credential or a container can live. |
+| **Cloud runs** for `file` and `icechunk` on S3, GCS and Azure | The object-store code paths (obstore client options, versioned objects, `s3_storage` with per-object credentials, `delete_store` on a prefix) have run against in-memory stores and S3-compatible stand-ins only. | The S3, credentials, GCS and Azure rows in section 2. Until then the labels say "not yet cloud-tested". |
+| **Lance's conditional fork** | Onto an existing branch, the head is compared and the branch then deleted and created again: a peer's branch created in that window can be replaced. A fork expecting "absent" is atomic. | A conditional branch update in Lance, then `CONDITIONAL_REF`; until then the window is documented and Lance stays stable. |
+| **Icechunk on local storage** | `reset_branch(from_snapshot_id=)` and `create_branch` are atomic only on object stores (`CONDITIONAL_REF` on `s3://` only). On a local or NFS-shared filesystem, racing processes can each win. | A lock tether takes around local-storage moves, or a refusal of `--shared` there; the docs say so meanwhile. |
+| **jj repo-level aliases** | tether replaces the user config layer, but jj still loads repo- and workspace-level config. A repo-level alias of `if()`, of a lambda parameter, or of `files()` still changes what tether reads. | Refuse such aliases after `jj config list --repo`, or an upstream jj flag that skips repo config. |
+| **Native handles across `new`** | Every `open` follows the current bookmark, but a handle opened before another process's `new -b` keeps writing to its old branch. | A handle that checks the workspace's bookmark before it writes, or the documented "reopen after `new`" stays. |
+| **Windows** | Writing commands are refused where `fcntl` is missing, and a default `open` is read-only; the README says so. Nothing has run on Windows at all. | A decision: implement the checkout and repository locks on `msvcrt`, or ship 0.1.0 with writes refused. Either way a Windows CI row (section 3). |
 | **jj version range** | The minimum is jj 0.43.0 (the version tether's tests run against locally); CI installs 0.45.1 only. Nothing between or beyond has run. | The version-matrix row in section 3. |
-| **jj template aliases** | tether's revsets use operator forms, so a user's revset aliases cannot change what it walks. Its `jj log -T` templates are not defended the same way: a `[template-aliases]` entry that shadows a keyword tether uses could change what it reads. | Pass a controlled config layer for templates as for revsets, or check the output shape; the hostile-config fixture (section 3) gets a template alias. |
 | **git `promote`/`merge` under a detached `HEAD`** | With the default `ref = HEAD` the git backend moves the checked-out branch, and refuses a detached `HEAD`, which a colocated jj checkout always has. Documented; not fixed. | Decide whether to merge without a checkout (`merge-tree --write-tree`, `commit-tree`, a conditional `update-ref`) before 0.1.0, or keep the documented refusal. |
 | **A teardown command** | Removing tether from a repository is a manual recipe in the Troubleshooting page: list and delete every `tether.<id>.*` ref per store. | A command, or the recipe stays and is exercised once by hand against every stable backend. |
 
@@ -62,7 +84,7 @@ fixture in `tests/`.
 
 | Test | What it runs | What it decides |
 | --- | --- | --- |
-| **jj version matrix with a hostile user config** | The core loop, `gc`, `drop` and `undo` under jj 0.43.0 (the minimum), the CI pin (0.45.1) and the newest release, each with the hostile-config fixture from `tests/test_vcs_isolation.py` (colour forced on, `all()` aliased, auto-tracking off, `log.showSignature`) plus a `[template-aliases]` entry shadowing a keyword tether's templates use. | Whether 0.43.0 stays the minimum, and whether templates need the defence revsets have. |
+| **jj version matrix with a hostile user config** | The core loop, `gc`, `drop` and `undo` under jj 0.43.0 (the minimum), the CI pin (0.45.1) and the newest release, each with the hostile-config fixture from `tests/conftest.py` (colour forced on, `all()` and template keywords aliased, auto-tracking off, `log.showSignature`), and once more with those aliases at repo level. | Whether 0.43.0 stays the minimum, and how far the repo-level alias limit reaches. |
 | **A hostile clone, end to end** | One fixture repository whose manifests try everything the trust boundary refuses: a relative or in-checkout git `path`, a URL `remote`, a committed `[import] query`, `git_path`, an endpoint in `storage_options`, keys with `..` and `\`, a dataset id reused from another dataset naming the same store. Every command runs against it and must refuse without contacting anything it should not. | The security-model section of the configuration guide is a test, not a promise. |
 | **Multi-checkout interleavings** | Two jj workspaces (and two git worktrees) of one dataset stepping through `commit` vs `gc`, `new --shared` vs the first writable `open`, `drop` vs `new` on the dropped bookmark, `restore` vs a `--shared` peer's write, `promote` vs a commit on the trunk, in every order the locks allow. | The repository lock and the `expected`-head moves hold under interleaving, not only in the two races the review reproduced. |
 | **Windows** | The read-only commands (`status`, `verify`, `diff`, `log`, `ops`, `gc --dry-run`) on a Windows runner, and the refusal message for a writing one; if the lock is implemented, the full suite. | The Windows decision in section 1. |
@@ -74,7 +96,8 @@ fixture in `tests/`.
 | --- | --- | --- | --- |
 | **`iceberg`** | `tether.experimental.backends.iceberg` | The 0.1.0b4 fixes (empty tables, pyiceberg 0.11) are in; what is left is the catalog row in section 2 as a CI job (a REST catalog in a container) and the conformance suite passing against it. Then move the module to `tether/backends/`, set `MATURITY = "stable"`, update the backends guide and README. | **Next to graduate**, after its CI row. |
 | **`ducklake`** | `tether.experimental.backends.ducklake` | The 0.1.0b4 fix (absolute `metadata` path) is in; what is left is the section 2 row as a CI job (DuckDB with the Postgres catalog `pytest-postgresql` already provides). | **Next to graduate**, after its CI row. |
-| **`dolt`** | `tether.experimental.backends.dolt` | The 0.1.0b4 and b7 fixes (per-server credentials, merges inside a transaction) are in; the section 2 row against `dolt sql-server` in a container, as a CI job, and the conformance suite against it. | Graduates **after its fixes are observed live**; otherwise ships experimental. |
+| **`dolt`** | `tether.experimental.backends.dolt` | The 0.1.0b4 fixes (per-server credentials, merges inside a transaction) are in; what is left is the section 2 row against `dolt sql-server` in a container, as a CI job, and the conformance suite against it. | Graduates **after a real-server run**; otherwise ships experimental. |
+| **`lakefs`** | removed in 0.1.0b4 | -- | **Cut.** Every fork failed (lakeFS branch ids refuse the dots in `tether.ws.*` names), and `promote` booked lakeFS's merge commit as a fast-forward; redesigning ref naming for one experimental kind was not worth it. A dataset whose history names a lakeFS object still works: `gc` and `verify --all-history` skip those manifests with a note, and their pins still count as references. |
 | **`neon`** | `tether.experimental.backends.neon` | A live run of the section 2 row, and a cost story users accept: one branch per pinning commit, unprotected by default, protected pins on paid plans only. | **Stays experimental** at 0.1.0, with the note. |
 | **Registry** (`export`, `publish`, `import`; `tether.experimental.registry`) | `tether.experimental.registry` | The export schema is declared frozen (a `schema_version` in the bundle and a documented compatibility promise), one round trip has run against a managed Postgres, and `import --sync` has been used on a real dataset. Move to `tether.registry`. | **Stays experimental** past 0.1.0 with a stated horizon. It does not block the release: nothing else depends on it. |
 | **Store lifecycle** (`add --create`, `Repo.create`, `gc --delete-stores`, `--store`; `tether.experimental.lifecycle`) | `tether.experimental.lifecycle`; `Capability.CREATE` in `tether.backends.base` | The five criteria in the module docstring: S3 `delete_store` against a real bucket; the two-clone scenario against a real remote; one release cycle with no data-loss report; a second Forkable backend with `CREATE`; a decision on the touched index. Move the module to `tether/repo/_lifecycle.py`, drop the notes, re-home the CHANGELOG entry. | **Stays experimental** at 0.1.0. `Capability.CREATE` stays declared (it is a per-backend fact with conformance coverage). |
@@ -85,7 +108,7 @@ fixture in `tests/`.
 ### Removing the upgrade path at 0.1.0
 
 Before removal: publish the last beta, confirm `tether upgrade` from every
-alpha format against it once more, and write the "install
+alpha format and from 0.1.0b3 against it once more, and write the "install
 `tether-vcs==<last beta>`, upgrade, reinstall" message into the open-time
 error (`LAST_BETA_WITH_UPGRADE` names it). Then remove, in one revision:
 
@@ -98,8 +121,7 @@ error (`LAST_BETA_WITH_UPGRADE` names it). Then remove, in one revision:
 - `working_ref_workspace` and the legacy per-workspace working-ref parsing
   (`gc --prune-bookmarks`'s "legacy branch" arm), the `UpgradeReport`
   re-export, and the Migrations section of `great-docs.yml`;
-- the `upgrade` sections of the CLI guide and the configuration guide,
-  replaced by the open-time message;
+- the `upgrade` section of the CLI guide, replaced by the open-time message;
 - freeze `CONFIG_VERSION` for 0.1.x.
 
 ## 5. Before tagging 0.1.0
