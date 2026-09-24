@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any, cast
@@ -131,6 +132,50 @@ def test_a_clone_that_commits_a_per_checkout_file_is_refused(
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0, r.output
     assert not marker.exists()
+
+
+def test_open_refuses_a_workspace_toml_the_vcs_began_tracking_after_find(
+    vcs_root: Path,
+) -> None:
+    """`open` re-reads a changed `workspace.toml` on every call, but the
+    tracked-file refusal ran only at `find`: a notebook's `Repo` followed a
+    `workspace.toml` that a pull or commit had put under version control
+    since. A changed file is vetted again, with the refusal `find` gives."""
+    from tether.backends.memory import default_store
+
+    jj = (vcs_root / ".jj").is_dir()
+    Repo.init(vcs_root)
+    repo = Repo.find(vcs_root)
+    system = f"sys-{uuid.uuid4().hex[:8]}"
+    default_store().system(system)
+    repo.add("db", "memory", {"system": system, "branch": "main"})
+    repo.open("db")
+    ignore = vcs_root / ".tether" / ".gitignore"
+    ignore.write_text(
+        "".join(
+            f"{line}\n"
+            for line in ignore.read_text().splitlines()
+            if line != f"/{WORKSPACE_FILENAME}"
+        )
+    )
+    workspace = vcs_root / ".tether" / WORKSPACE_FILENAME
+    workspace.write_text(
+        'workspace_id = "0123abcd"\nbookmark = "main"\n'
+        '[working_refs]\ndb = "tether.ws.feedface.main"\n'
+    )
+    if jj:
+        _vcs(vcs_root, "jj", "commit", "-m", "track the workspace")
+    else:
+        _vcs(vcs_root, "git", "add", "-A")
+        _vcs(vcs_root, "git", "commit", "-qm", "track the workspace")
+    for read_only in (False, True):
+        with pytest.raises(
+            ConfigError, match=rf"tracks \.tether/{WORKSPACE_FILENAME}"
+        ) as opened:
+            repo.open("db", read_only=read_only)
+    with pytest.raises(ConfigError) as found:
+        Repo.find(vcs_root)
+    assert str(opened.value) == str(found.value)
 
 
 def test_executables_come_from_secrets_or_env(

@@ -118,6 +118,15 @@ seconds on some filesystems. A parse made that close to the file's last
 change is not reused (see `RepoCore._parse_cached`)."""
 
 
+def _stat_signature(path: Path) -> tuple[int, int, int, int] | None:
+    """(size, mtime, ctime, inode) of `path`, or ``None`` when it is absent."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+
+
 def _parse_manifest(text: str) -> ObjectManifest:
     """One working-tree manifest, as `read_objects` reads it."""
     manifest = ObjectManifest.from_toml(text)
@@ -272,6 +281,9 @@ class RepoCore:
             # A read-only checkout keeps the id in memory, as before.
             with contextlib.suppress(OSError):
                 self.workspace = claim_workspace(root, self.workspace)
+        self._vetted_workspace = _stat_signature(workspace_path(root))
+        """Stat signature of `workspace.toml` when `_refuse_tracked` last
+        passed it (`_open_vcs`, just before construction); see `_refresh`."""
         self.secrets = read_secrets(root)
         if self.secrets.insecure:
             warnings.warn(
@@ -473,9 +485,21 @@ class RepoCore:
         `forget-workspace` removed it. Only files that changed since this
         `Repo` last parsed them are parsed again; the rest cost a `stat`, so
         a long-lived `Repo` pays for what moved, not for every manifest.
+
+        A `workspace.toml` that changed since it was last vetted is vetted
+        again (`_refuse_tracked`) before it is read: a pull, checkout or
+        commit since `find` can leave the VCS tracking it, and it names the
+        branches writes go to.
+
+        Raises:
+            ConfigError: The VCS now tracks a per-checkout file.
         """
         with self._refresh_guard:
             path = _m.workspace_path(self.root)
+            signature = _stat_signature(path)
+            if signature is not None and signature != self._vetted_workspace:
+                _refuse_tracked(self.root, self.vcs)
+                self._vetted_workspace = signature
             if path.is_file():
                 # Commands change the workspace in place; the parse is kept
                 # pristine.

@@ -30,6 +30,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Another live checkout's `workspace.toml` or `ops.jsonl` that the VCS tracks
   there is skipped, with a warning naming the checkout: a shipped op log could
   make `gc` release pins as this clone's.
+- `open` checks again whether the VCS tracks `workspace.toml` whenever the
+  file has changed, so a long-lived `Repo` refuses one that a pull or commit
+  put under version control after `find`.
 
 ### Added
 
