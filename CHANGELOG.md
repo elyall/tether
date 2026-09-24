@@ -64,9 +64,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each kind with its maturity.
 
 - A plan must carry the preconditions its command requires; one saved by an
-  older tether, or edited, is refused as stale. Every plan binds to the
-  checkout that made it, and `commit`, `restore`, `promote` and `drop` plans
-  to its bookmark.
+  older tether, or edited, is refused as stale. `commit`, `new`, `restore`,
+  `promote`, `drop`, `gc` and `repair` plans bind to the checkout that made
+  them, and `commit`, `restore`, `promote` and `drop` plans to its bookmark;
+  `import`, `upgrade` and `forget-workspace` plans bind to no checkout.
 - `promote` lands committed states only (`tether commit` uncommitted writes
   first). Merges run before fast-forwards, which are held when a merge does
   not land; the trunk moves to the commit the plan reviewed.

@@ -36,11 +36,15 @@ pip install "tether-vcs[all]"                 # everything
 ```
 
 The distribution is `tether-vcs`; the package you import and the command you
-run are both `tether`. Python 3.11 or newer; `git` and/or `jj` on `PATH`
-(minimum versions in the
+run are both `tether`. Python 3.11 or newer; `git` 2.38+ and/or `jj` 0.43+
+on `PATH` (see the
 [CLI guide](https://evanlyall.com/tether/user-guide/cli.html#versions-and-environment)).
 Extras: `objectstore` (S3/GCS/Azure for `file`), `icechunk`, `neon`,
 `iceberg`, `delta`, `lance`, `ducklake`, `dolt`, `postgres`, `all`.
+
+**Windows:** commands that write are refused, since the locks need `fcntl`;
+`status`, `verify`, `diff`, `log`, `ops` and `gc --dry-run` work, and a
+default `open` is read-only. Use WSL to write.
 
 ## Quickstart
 
@@ -221,4 +225,4 @@ the guide's command output with `TETHER_UPDATE_DOCS=1`.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/elyall/tether/blob/main/LICENSE).
