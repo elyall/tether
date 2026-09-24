@@ -3,13 +3,13 @@ title: "Overview"
 guide-section: "Start Here"
 ---
 
-tether is version control for datasets that live in several systems at once:
-an Icechunk repository here, a directory of raw files there, a Postgres
-database, an Iceberg table, the code that produced them. It keeps one small
-manifest per object in a git or jj repository. A commit of those manifests is
-a complete, reproducible position for every object -- and, where the system
-allows it, tether *pins* that position with a native ref so it stays readable,
-and *forks* a writable branch off it when you want to change things safely.
+tether is version control for datasets that live in several systems at
+once: an Icechunk repository, a directory of raw files, a Postgres database,
+the code that produced them. It keeps one small manifest per object in a git
+or jj repository. A commit of those manifests is a reproducible position for
+every object. Where the system allows it, tether *pins* that position with a
+native ref so it stays readable, and *forks* a writable branch off it when
+you want to change things safely.
 
 ## The loop
 
@@ -65,7 +65,7 @@ Eight words carry the whole guide.
 | **working ref** | The store branch this checkout writes through: the upstream branch on the trunk, `tether.ws.<dataset>.<bookmark>` on any other bookmark. |
 | **fork** | A writable branch created off a pin, the first time a bookmark writes to an object. |
 
-Backends fall into four **tiers** by what they can do with a state: *Observed*
-(fingerprint only), *Addressable* (re-read later by id), *Pinnable* (a native
-ref holds it), *Forkable* (a branch can be made from it). The
-[Backends](09-backends.qmd) page lists every system's tier.
+Backends fall into four **tiers**: *Observed* (fingerprint only),
+*Addressable* (re-read later by id), *Pinnable* (a native ref holds it), and
+*Forkable* (a branch can be made from it). [Backends](09-backends.qmd) lists
+every system's tier.

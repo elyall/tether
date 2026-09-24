@@ -30,12 +30,11 @@ dataset 0f2e9c7a11b3; on trunk bookmark main
 
 `add` writes manifests only; `status` is the first command to contact the
 systems. `--branch main` (the default) names the object's *upstream* branch,
-the one the trunk bookmark stands for; `--at SNAPSHOT` starts from a chosen
-state instead (see
-[Starting from an older snapshot](04-branching-and-writing.qmd#starting-from-an-older-snapshot)).
-The tiers say what pinning will mean for each object: Icechunk and Neon are
-*Forkable*, so a native ref will be created; the directory is *Observed*, so
-its state can be recorded but not re-read -- hence `unrecoverable`.
+and `--at SNAPSHOT` starts from a chosen state instead
+([Starting from an older snapshot](04-branching-and-writing.qmd#starting-from-an-older-snapshot)).
+The tiers say what pinning will mean. Icechunk and Neon are *Forkable*, so
+a native ref will be created. The directory is *Observed*: its state can be
+recorded but not read back, hence `unrecoverable`.
 
 ## Pin: the first commit
 
@@ -201,10 +200,10 @@ re-register with acceptance to record the new state
 
 That is deliberate: an "immutable" input silently changing is the worst kind
 of drift. Either the change is legitimate (`tether remove raw/plate1`, `add`
-it again, commit) or something wrote where it should not have. Other objects
-drift benignly: a branch that moved shows `modified` and is pinned by the next
-commit; on the trunk, a branch-less object whose system moved past the pin
-shows `behind` and waits for `pull`.
+it again, commit), or something wrote where it should not have. Other drift
+is benign and exits 0: a moved branch shows `modified` and is pinned by the
+next commit, and on the trunk a branch-less object past its pin shows
+`behind` until `pull`.
 
 ## Verify
 
@@ -224,37 +223,27 @@ tether verify --all-history --deep # every commit in the repository
         ok  cfc66fa79c0a:zarr/imaging
 ```
 
-A report is `ok`, `drifted` (the ref exists but points elsewhere), `missing`
-(the ref or snapshot is gone), or `unknown` (cannot tell without `--deep`).
-`--all-history` streams every manifest at every commit through one object
-reader and verifies each distinct pin once, so it stays fast on long
-histories. Exit status is 1 if anything is not `ok`, `unknown` included, so
-the CI form is `verify --all-history --deep`: a Delta, DuckLake or
-`--pin record` state can only be checked by opening it (see
-[Sharing and CI](13-sharing-and-ci.qmd#a-ci-recipe)).
+A report is `ok`, `drifted` (the ref points elsewhere), `missing` (the ref
+or snapshot is gone), or `unknown` (cannot tell without `--deep`).
+`--all-history` verifies each distinct pin in history once. `verify` exits 1
+if anything is not `ok`, `unknown` included, so the CI form is
+`verify --all-history --deep`
+([A CI recipe](13-sharing-and-ci.qmd#a-ci-recipe)).
 
-A pin is never taken on trust. Before `open --rev`, `new` from a commit, or
-`promote --rev` reads or forks from one, the engine checks it against the
-state the manifest recorded: a pin someone *deleted* falls back to the
-recorded state where the backend can address it (the store usually still has
-it -- `tether repair` recreates the ref); a pin someone *moved* is refused
-with `PinDriftError`, because reading it would hand back the wrong data under
-a commit's name.
+A pin is never taken on trust. Before `open --rev`, `new` or `promote --rev`
+reads or forks from one, the engine checks it against the recorded state.
+A pin someone *deleted* falls back to the recorded state where the backend
+can address it, and `tether repair` recreates the ref. A pin someone
+*moved* is refused with `PinDriftError`, since it would hand back the wrong
+data under a commit's name.
 
 ## Garbage collection
 
-Pins hold storage. When history no longer names a pin -- an aborted commit, a
-squashed or abandoned commit -- `tether gc` releases it:
-
-```bash
-tether gc                 # dry run: print the plan
-tether gc --no-dry-run    # release orphaned pins, prune unreferenced listings
-```
-
-Run `verify --all-history --deep` first; `gc` trusts history, and a pin that
-is referenced but broken is a `verify` finding, not a `gc` one. Dropping
-history on purpose, previewing store writes as plans, and cleaning up working
-branches are covered in [Reclaiming Storage](05-reclaiming-storage.qmd).
+Pins hold storage. When history no longer names a pin (an aborted,
+squashed or abandoned commit), `tether gc` releases it; `tether gc` alone
+is a dry run, and `--no-dry-run` applies. Run `verify --all-history --deep`
+first: a pin that is referenced but broken is a `verify` finding, not a
+`gc` one. [Reclaiming Storage](05-reclaiming-storage.qmd) covers the rest.
 
 ## Next
 

@@ -20,7 +20,7 @@ name, and every object's address. It does not have:
 | `.tether/secrets.toml` | Untracked and per checkout. Each clone writes its own (see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). |
 | `.tether/workspace.toml` | Which bookmark a checkout works on. A fresh clone is on *no* bookmark until `tether new`. |
 | `.tether/ops.jsonl` | The operation log is per checkout: `tether undo` there covers only what that checkout did. |
-| `tether-pinned.jsonl` and the other indexes in `.jj/repo/` or `.git/` | A clone did not create your pins, so its `gc` keeps them as `keep-pin` ([below](#gc-across-clones)). |
+| `tether-pinned.jsonl` and the other indexes in `.jj/repo/` or `.git/` | A clone did not create your pins, so its `gc` keeps them as `keep-pin` ([below](#gc-across-clones)). That includes a re-clone of your own dataset. |
 | local paths | Locators store local paths absolute, as they were on the machine that ran `add` ([below](#local-paths-travel-badly)). |
 
 ## Cloning a dataset: a teammate's checklist
@@ -51,12 +51,16 @@ For read-only jobs, steps 4 to 6 reduce to `TETHER_REV=<commit>` and
 ## Two clones, one bookmark
 
 tether sees only the checkouts of *your* clone. A bookmark another live
-checkout in the same clone works on is refused without `--shared`; a checkout
-in another clone is invisible, so two clones on one bookmark are `--shared`
-whether you asked or not. Both write the same store branch,
-`tether.ws.<dataset>.<bookmark>`, and whoever commits second finds the
-working copy stale after fetching: `tether new` re-forks from the new pins,
-and asks for `--discard` before it throws uncommitted writes away
+checkout of it works on is refused without `--shared`. A checkout in another
+clone is invisible, so two clones on one bookmark are `--shared` whether you
+asked or not. They share no lock either: both write the store branch
+`tether.ws.<dataset>.<bookmark>`, ordered only by the stores'
+[conditional moves](07-cli.qmd#conditional-moves).
+
+Whoever commits second finds the working copy stale after fetching. `tether
+new` forks again from the new pins, and refuses to throw away writes it
+finds on the branch, saying whose they are. A peer's writes are adopted by
+`tether new --shared` rather than discarded
 ([Stale working copies](04-branching-and-writing.qmd#stale-working-copies)).
 One bookmark per person, or the trunk, avoids the question.
 
@@ -70,8 +74,10 @@ remote.
 `add` resolves a relative local path against the directory it ran in and
 stores it absolute, so the committed locator says
 `/home/ann/data/imaging.icechunk`, not `../data/imaging.icechunk`. On another
-machine that path is wrong: `status` reports the object as `error`, lists the
-rest, and exits 1. Three ways out:
+machine that path is wrong: `status` reports the object as `error`, lists
+the rest, and exits 1. (Identities use the fully resolved path, so `/p`,
+`/p/` and `file:///p` are one store:
+[Conventions](09-backends.qmd#conventions).) Three ways out:
 
 - Mount the data at the same absolute path (a shared filesystem, as in
   [Pinning](03-pinning.qmd#register-the-objects)), or a symlink there.
@@ -87,16 +93,17 @@ DuckLake catalog's `metadata` and `data_path`.
 
 ## `gc` across clones
 
-`gc` releases only pins *this clone created* (recorded in
-`tether-pinned.jsonl`), so a fresh clone cannot release yours by accident:
-an unreferenced pin it did not create is listed as `keep-pin`. Fetch every
-bookmark before running `gc`, so the other clones' commits count as
-references; pass `--release-foreign` only for a clone you know is gone. For
-`--prune-bookmarks`, `--keep-bookmark NAME` protects a bookmark that lives
-only on another machine. `drop` notes when a pushed `NAME@origin` still
-reaches the commits; the next `jj git push` (or
-`git push origin --delete NAME`) removes the remote side. The rules are in
-[Reclaiming Storage](05-reclaiming-storage.qmd#pins-this-clone-did-not-create).
+`gc` releases only pins *this clone created*, so a fresh clone cannot
+release yours by accident: an unreferenced pin it did not create is listed
+as `keep-pin`. The record lives beside the repository lock, not in history,
+so re-cloning loses it, and the new clone keeps even your old pins until you
+pass `--release-foreign`. Fetch every bookmark before running `gc`, so the
+other clones' commits count as references, and pass `--release-foreign`
+only for a clone you know is gone. `--keep-bookmark NAME` protects a
+bookmark that lives only on another machine from `--prune-bookmarks`.
+`drop` notes when a pushed `NAME@origin` still reaches the commits; the
+next `jj git push` (or `git push origin --delete NAME`) removes it. The
+rules: [Reclaiming Storage](05-reclaiming-storage.qmd#pins-this-clone-did-not-create).
 
 ## A CI recipe
 
@@ -106,11 +113,14 @@ Three commands make CI gates, because each exits 1 when something is wrong
 | Command | Catches | When |
 | --- | --- | --- |
 | `tether verify --all-history --deep` | a pin that no longer resolves, or a recorded state the system expired | nightly, and on every push |
-| `tether status --snapshot` | drift: an `immutable` file changed, an upstream branch moved, an object unreachable | nightly |
+| `tether status --snapshot` | an `immutable` file that changed, an object that cannot be read | nightly |
 | `tether promote --strategy ff` | a bookmark that cannot land as a fast-forward everywhere | when a bookmark is approved |
 
 `--deep` opens each recorded state. Without it a Delta, DuckLake or
 `--pin record` state reports `unknown`, which is "not ok" and exits 1.
+`status --snapshot` exits 0 when an upstream moved (`modified`, `behind`),
+so to fail on that, test its JSON:
+`tether status --snapshot --json | jq -e 'all(.objects[]; .state == "clean")'`.
 `promote --dry-run` exits 0 whatever the plan says, so gate on the real
 command, or on the plan's JSON.
 

@@ -23,12 +23,11 @@ Extras per backend: `objectstore` (S3/GCS/Azure for `file`; `s3`, `gcs`,
 `ducklake`, `dolt`.
 
 ::: {.callout-note title="Before you start"}
-- `git` or `jj` on `PATH`. tether keeps its history in *your* repository, not
-  its own.
-- Remote objects (S3, Neon, a catalog) need credentials. They never go in the
-  repository -- see [Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml).
-- Backends marked *experimental* in [Backends](09-backends.qmd) have run
-  against a fake of the service, not the service itself.
+- git 2.38+ or jj 0.43+ on `PATH`: tether keeps its history in *your*
+  repository.
+- A POSIX system or WSL: on Windows, commands that write are refused.
+- Remote objects need credentials, which never go in the repository
+  ([Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)).
 :::
 
 ## Some data to track
@@ -71,15 +70,14 @@ dataset 61d0206e8d81; on trunk bookmark main
         new  zarr/imaging  [icechunk/forkable]
 ```
 
-`init` and `add` wrote small TOML manifests under `.tether/` and put the
-working copy on `main`, the dataset's *trunk*. `status` was the first command
-to touch the data: it fingerprinted both objects (an Icechunk snapshot id, a
-digest over the files). The header's `61d0206e8d81` is a hash of the
-manifests as they are right now; it changes with every edit (the dataset's
-permanent id is the 8-hex `[dataset] id` in `tether.toml`). The bracket names
-each object's *tier* -- what tether can do with it. Icechunk is *forkable*: it
-can be pinned and branched. A directory is *observed*: tether can tell you it
-changed, nothing more.
+`init` and `add` wrote small TOML manifests under `.tether/`, and put the
+working copy on `main`, the dataset's *trunk*. `status` was the first
+command to touch the data: it fingerprinted both objects. The header's
+`61d0206e8d81` hashes the manifests as they are now, so it changes with
+every edit; the dataset's permanent id is the `[dataset] id` in
+`tether.toml`. The bracket names each object's *tier*. Icechunk is
+*forkable*: it can be pinned and branched. A directory is *observed*: tether
+can tell you it changed, nothing more.
 
 ```bash
 tether commit -m "Baseline: plate1 imaging and raw files"
@@ -91,9 +89,9 @@ tether commit -m "Baseline: plate1 imaging and raw files"
 committed b55326ca55a0
 ```
 
-One command did three things: created an Icechunk tag (the *pin*) holding the
-snapshot, wrote both states into the manifests, and made a jj/git commit of
-those manifests with the `main` bookmark on it. `b55326ca55a0` is now the
+One command did three things. It created an Icechunk tag (the *pin*)
+holding the snapshot, wrote both states into the manifests, and committed
+them with the `main` bookmark on the commit. `b55326ca55a0` is now the
 handle for this exact combination of states.
 
 ## Read it back
@@ -204,30 +202,25 @@ main -> 7eb84262ce1b
         ok  b55326ca55a0:zarr/imaging
 ```
 
-Icechunk's `main` was fast-forwarded (nothing else had moved it since the
-fork), `main` the bookmark now names the relabel commit, and `verify` confirms
-every pin any commit ever made still resolves. The third commit id is jj's
-empty working-copy commit on top of the one you just made; it carries the
-same manifests, so it verifies the same pin. In CI, run
-`verify --all-history --deep`: `--deep` opens each recorded state, which is
-the only way to check a Delta, DuckLake or `--pin record` object (without it
-they report `unknown`, and `verify` exits 1). The
-[Sharing and CI](13-sharing-and-ci.qmd#a-ci-recipe) page has the recipe.
+Icechunk's `main` was fast-forwarded, the `main` bookmark now names the
+relabel commit, and `verify` confirms every pin any commit made still
+resolves. The third commit is jj's empty working-copy commit, with the same
+manifests. In CI, run `verify --all-history --deep`
+([the recipe](13-sharing-and-ci.qmd#a-ci-recipe)).
 
 ## What was written
 
-Everything committed is small, text, and reviewable in `jj diff` / `git diff`:
-`tether.toml` (the dataset's id and config) and `.tether/objects/<key>.toml`
-(one manifest per object: kind, locator, state, pin). Per-checkout files --
-`.tether/workspace.toml` (which bookmark you are on, which branches you write
-through) and `.tether/ops.jsonl` (what tether did to the stores, for `undo`)
--- are untracked. The full layout is in
-[Configuration](08-configuration.qmd#layout).
+Everything committed is small text, reviewable in `jj diff` or `git diff`:
+`tether.toml` and one manifest per object under `.tether/objects/`. The
+per-checkout files, `.tether/workspace.toml` (which bookmark you are on) and
+`.tether/ops.jsonl` (what tether did to the stores), are untracked. The full
+layout is in [Configuration](08-configuration.qmd#layout).
 
 ## Next
 
-Remote systems register the same way; only the locator changes (`neon` is
-experimental: it has run against a fake of the service, not a live project):
+Remote systems register the same way; only the locator changes. Backends
+marked *experimental*, like `neon`, have run against a fake of the service,
+not the service itself:
 
 ```bash
 tether add zarr/imaging --kind icechunk s3://bucket/imaging.icechunk

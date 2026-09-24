@@ -4,13 +4,11 @@ guide-section: "Core Workflows"
 ---
 
 Seven situations tether is built for, run end to end as one story. Each
-section starts where the previous one left the dataset and ends with `jj log`,
-so you can see what it did to the repository's history and bookmarks, and
-with a pointer to the guide that explains the mechanics. The dataset is an
-Icechunk store `zarr/imaging`, a Lance table `features`, a directory of raw
-files `raw/plate1`, and the analysis code repository `code`. (The other guides
-also use a Neon database, `db/metrics`; it is left out here so that the story
-can run locally.)
+section starts where the previous one left the dataset, and ends with
+`jj log` and a pointer to the page that explains the mechanics. The dataset
+is an Icechunk store `zarr/imaging`, a Lance table `features`, a directory
+of raw files `raw/plate1`, and the analysis code repository `code`. (The
+Neon database of the other pages is left out, so the story runs locally.)
 
 | Section | Situation |
 | --- | --- |
@@ -24,12 +22,11 @@ can run locally.)
 
 ::: {.callout-note title="Executed, not written"}
 `tests/test_use_cases.py` runs every command on this page against local
-copies of the objects (and an ephemeral Postgres for section 7) and writes
-the command and output blocks you see here (`user_guide/_generated/06/`); CI
-fails when a fresh run differs. Ids that change per run -- commit and change
-ids, snapshot ids, pin hashes, operation ids -- are replaced with stable
-stand-ins, consistently, so the same id means the same thing everywhere on
-this page; the operation log runs on the story's clock.
+copies of the objects (and an ephemeral Postgres for section 7). It writes
+the command and output blocks you see (`user_guide/_generated/06/`), and CI
+fails when a fresh run differs. Ids that change per run are replaced with
+stable stand-ins, so the same id means the same thing everywhere on this
+page, and the operation log runs on the story's clock.
 :::
 
 `jj log` uses a compact template set in the examples' jj config: change id,
@@ -51,10 +48,9 @@ read a bookmark as a branch and `@` as `HEAD`.
 
 {{< include _generated/06/03-add.txt >}}
 
-Nothing has been contacted yet. What the VCS sees is a handful of small TOML
-files -- the config and one manifest per object -- and a `main` bookmark that
-`init` put on the working copy, because `main` is the trunk: the bookmark that
-stands for every object's own `main`.
+Nothing has been contacted yet. The VCS sees a few small TOML files (the
+config and one manifest per object), and a `main` bookmark `init` put on the
+working copy: the trunk, which stands for every object's own `main`.
 
 {{< include _generated/06/04-status.sh >}}
 
@@ -92,15 +88,14 @@ so you find out the day a pin stops resolving rather than the day you need it:
 
 {{< include _generated/06/08-verify.txt >}}
 
-(`--all-history` walks every commit that carries manifests, which under jj
-includes the empty working-copy commit that sits on top of the one you just
-made; it holds the same manifests, so it verifies the same pins.)
+(Under jj, `--all-history` includes the empty working-copy commit on top of
+the one you just made; it holds the same manifests, so it verifies the same
+pins.)
 
-What tether guaranteed: the Icechunk tag, the Lance tag, and the git tag are
-native refs that their systems will not expire or garbage collect; the raw
-prefix was *recorded* (size, count, etag digest) and `verify` reports whether
-it still matches, but files cannot be pinned -- the line says so at commit
-time.
+What tether guaranteed: the Icechunk, Lance and git tags are native refs
+their systems will not expire or collect. The raw prefix was *recorded*
+(size, count, etag digest), and `verify` says whether it still matches, but
+files cannot be pinned; the commit said so.
 
 This commit was made on the trunk bookmark, `main`, where each object's
 working ref is its own `main`: the inputs are whatever those branches held.
@@ -152,17 +147,16 @@ The bookmark moved; `main` did not. Two endings. Land it:
 
 {{< include _generated/06/15-promote-relabel.txt >}}
 
-Nothing moved. Lance refuses -- it has branches but no way to move one onto
-another -- and says what to do instead: write the result onto the base
-branch. Icechunk *could* have fast-forwarded (nothing else touched its `main`
-since the fork), and `promote` says so, but holds it: a bookmark is planned
-whole or not at all, because a `main` with the new labels and the old features
-is the half-done state this whole exercise exists to avoid. The two objects the
-job never opened are skipped. That refusal is the honest answer, not a bug.
+Nothing moved. Lance refuses, since it cannot move one branch onto another,
+and says what to do instead: write the result onto the base branch.
+Icechunk *could* have fast-forwarded, and `promote` says so, but holds it:
+new labels beside old features on `main` is the half-done state this
+exercise exists to avoid
+([planned whole or not at all](04-branching-and-writing.qmd#landing-it-tether-promote)).
+The two objects the job never opened are skipped.
 
-Landing it by hand is then two steps. Name the system that can move, which
-is the explicit way to land a subset (the trunk bookmark does not move for a
-subset):
+Landing it by hand is then two steps. Name the system that can move, the
+explicit way to land a subset (the trunk bookmark does not move for one):
 
 {{< include _generated/06/16-promote-imaging.sh >}}
 
@@ -170,8 +164,7 @@ subset):
 
 Then finish the Lance half on the trunk and commit there. Pins are
 content-addressed, so the imaging store, now at what `relabel-v3` pinned,
-gets the very same pin id -- nothing new is created in that store -- and only
-`features` gets a new one:
+gets the very same pin id, and only `features` gets a new one:
 
 {{< include _generated/06/17-new-main.sh >}}
 
@@ -188,9 +181,9 @@ gets the very same pin id -- nothing new is created in that store -- and only
 {{< include _generated/06/20-log-landed.txt >}}
 
 Two lines of history describe the same data now, and the bookmark has done
-its job. Throwing a bookmark away is the opposite of `promote`, and one
-command as well: `drop`. It is a plan first -- the commits only this bookmark
-reaches, the bookmark, and what `gc` will release once they are gone:
+its job. `drop` throws it away. It is a plan first: the commits only this
+bookmark reaches, the bookmark, and what `gc` will release once they are
+gone:
 
 {{< include _generated/06/21-drop-relabel-plan.sh >}}
 
@@ -200,33 +193,29 @@ reaches, the bookmark, and what `gc` will release once they are gone:
 
 {{< include _generated/06/22-drop-relabel.txt >}}
 
-The one pin nothing else names -- the Lance version on the branch (the
-imaging pin is also `main`'s) -- is released, and both branches go: Icechunk's
-head is `main`'s pin, and Lance's head is a state the dropped commit had
-pinned. That last rule is `drop`'s own: `gc --prune-bookmarks` would keep a
-branch whose pin was just released ("unpinned writes"), because it cannot
-tell an afternoon's forgotten work from a deliberate throw-away; `drop` can,
-because you named the commits. Writes nobody ever committed are still kept,
-and said so, unless you pass `--force-prune`.
+The one pin nothing else names, the Lance version on the branch, is
+released (the imaging pin is also `main`'s). Both branches go: Icechunk's
+head is `main`'s pin, and Lance's head is a state the dropped commit pinned.
+That last rule is
+[`drop`'s own](04-branching-and-writing.qmd#throwing-it-away-tether-drop):
+`gc --prune-bookmarks` would keep the branch as "unpinned writes".
 
 {{< include _generated/06/23-log-clean.sh >}}
 
 {{< include _generated/06/23-log-clean.txt >}}
 
-The other ending -- the attempt failed -- is the same `drop` without the
-trunk commit in between. Run it from the bookmark itself and it leaves for
-the trunk first (`--to` picks another bookmark); the plan shows the leave as
-its first step. `drop` is not undoable by tether: `jj undo` brings the
-commits and the bookmark back, `tether repair` re-pins what they recorded
-while those states are still in the stores, and a `tether new` on the
-bookmark starts it from those pins (see [the CLI guide](07-cli.qmd#drop)).
+The other ending, a failed attempt, is the same `drop` without the trunk
+commit in between. Run from the bookmark itself, it leaves for the trunk
+first (`--to` picks another bookmark). `drop` is not undoable by tether, but
+[three steps](04-branching-and-writing.qmd#throwing-it-away-tether-drop)
+bring a bookmark back.
 
 ::: {.callout-note title="Rehearsing a database migration"}
-The same flow rehearses a schema change on a Neon database: `tether new -b
-migration`, run it against the Neon branch's URL, run the test suite, `tether
-diff main --content` to see the row counts move. Neon, like Lance, cannot
-promote a child branch into its parent; landing it is the trunk recipe above
-or applying the migration to `main` yourself; the branch was the rehearsal.
+The same flow rehearses a schema change on a Neon database. Run `tether new
+-b migration`, apply the migration at the Neon branch's URL, run the tests,
+and watch the row counts move with `tether diff main --content`. Neon
+cannot promote a child branch, so landing it is the trunk recipe above, or
+the migration applied to `main` itself: the branch was the rehearsal.
 :::
 
 Mechanics: [Branching and Writing](04-branching-and-writing.qmd#landing-it-tether-promote).
@@ -236,10 +225,10 @@ Mechanics: [Branching and Writing](04-branching-and-writing.qmd#landing-it-tethe
 *Two labeling approaches. Run both against the same inputs, compare, promote
 the winner, and leave nothing of the loser behind.*
 
-Each candidate is a bookmark -- `a` and `b` -- and each bookmark is a branch
-of the same name in every system, so the two never share a branch anywhere.
-Run them side by side from two checkouts (a jj workspace or a git worktree
-each): **A** works in `analysis/`, **B** in `analysis-b/`.
+Each candidate is a bookmark, `a` and `b`, and each bookmark is a branch of
+the same name in every system, so the two never share a branch. Run them
+side by side from two checkouts (a jj workspace or git worktree each): **A**
+works in `analysis/`, **B** in `analysis-b/`.
 
 **Set up.** B's checkout is created from A's; each starts its own bookmark.
 From A:
@@ -259,8 +248,8 @@ And in B:
 {{< include _generated/06/26-new-b.txt >}}
 
 **Run and commit.** Each job labels the imaging store through its own
-handle; each `commit` pins its bookmark's branch, lands a dataset commit in
-the VCS, and moves the bookmark onto it. A:
+handle. Each `commit` pins its bookmark's branch, lands a dataset commit,
+and moves the bookmark onto it. A:
 
 {{< include _generated/06/27-label-a.py >}}
 
@@ -285,29 +274,25 @@ both branch off the snapshot `main` pins. From A, B's working copy shows as
 
 {{< include _generated/06/31-log-ab.txt >}}
 
-**Compare** -- from either checkout, as datasets rather than directories. The
-two heads are on different branches, so Icechunk cannot diff one into the
-other directly; tether diffs each against the snapshot they diverged from and
-reports what either side changed:
+**Compare**, from either checkout, as datasets rather than directories.
+Icechunk cannot diff one branch head into another directly, so tether diffs
+each against the snapshot they diverged from:
 
 {{< include _generated/06/32-diff-ab.sh >}}
 
 {{< include _generated/06/32-diff-ab.txt >}}
 
-**Land A.** One command from A: `promote` moves Icechunk's `main` onto `a`'s
-branch (a fast-forward: `main` had not moved since the fork), skips the
-objects A never opened, and -- everything having landed -- moves the `main`
-bookmark onto A's dataset commit.
+**Land A.** One command from A. `promote` fast-forwards Icechunk's `main`
+onto `a`'s branch and skips the objects A never opened. Everything having
+landed, it moves the `main` bookmark onto A's dataset commit.
 
 {{< include _generated/06/33-promote-a.sh >}}
 
 {{< include _generated/06/33-promote-a.txt >}}
 
-B is untouched by this: its bookmark and branches are its own. If B's
-checkout later moves onto the new `main` (`jj new main`), `tether status`
-says the working copy left bookmark `b` and how to return; `tether new b`
-returns, and a bookmark whose pins the dataset no longer names is re-forked
-(refused while it holds uncommitted writes).
+B is untouched: its bookmark and branches are its own. If B's checkout
+later moves onto the new `main` (`jj new main`), `tether status` says the
+working copy left bookmark `b`, and `tether new b` returns to it.
 
 **Retire B** -- from A's checkout, since B's is about to stop being one.
 Forget B's checkout first: `drop` refuses a bookmark another live checkout is
@@ -321,11 +306,9 @@ working on, and that is the guard you want. Then drop the bookmark:
 
 {{< include _generated/06/35-drop-b.txt >}}
 
-Nothing is left to run in `analysis-b/`; the directory can be deleted (`git
-worktree remove` already did, for git). B's Icechunk branch went with the
-commit that pinned its head -- B's labels were committed work being thrown
-away by name, which is the one case `drop` treats differently from
-`gc --prune-bookmarks`.
+Nothing is left to run in `analysis-b/`, and the directory can be deleted
+(`git worktree remove` already did, for git). B's Icechunk branch went with
+the commit that pinned its head, by `drop`'s own rule.
 
 {{< include _generated/06/36-log-final.sh >}}
 
@@ -337,7 +320,7 @@ a later `gc --prune-bookmarks` retire the winner's branches the same way once
 nobody works on them.
 
 Mechanics: [Workspaces and bookmarks](04-branching-and-writing.qmd#workspaces-and-bookmarks),
-[`drop`](07-cli.qmd#drop).
+[`drop`](04-branching-and-writing.qmd#throwing-it-away-tether-drop).
 
 ## 4. Catch drift nightly without a watcher
 
@@ -365,10 +348,11 @@ registry or spreadsheet that already lists it -- and commit it:
 {{< include _generated/06/40-log-inventory.txt >}}
 
 Then schedule two commands. `status --snapshot` fingerprints every object
-concurrently and only *reports* -- on the trunk, `modified` means an upstream
-branch moved, `behind` that a branch-less object's system has a newer state
-than the pin; nothing moves. `verify` checks that every pin still names what
-the manifest says. Both exit 1 when something is wrong. On a quiet night:
+concurrently and only *reports*. On the trunk, `modified` means an upstream
+branch moved, and `behind` that a branch-less object's system is past the
+pin; both exit 0. `verify` checks that every pin still names what the
+manifest says. Each exits 1 when something is wrong: an unreachable object,
+a changed immutable file, a pin that does not resolve. On a quiet night:
 
 {{< include _generated/06/41-nightly.sh >}}
 
@@ -407,12 +391,11 @@ still has that state:
 
 {{< include _generated/06/47-repair.txt >}}
 
-Lance gets its tag back under the same name. Icechunk keeps a tombstone for
-every deleted tag and never lets a name be reused, so tether creates the pin
-again under the next *generation* of the same id -- `tether.<id>.2`. The pin
-id, which is what commits and `gc` key on, is unchanged; the manifest goes on
-saying `tether.<id>`, and every reader resolves a pin through whichever
-generation is live, so history needs no rewriting. `verify` says which one:
+Lance gets its tag back under the same name. Icechunk never lets a deleted
+tag's name be reused, so tether creates the pin under the next
+*generation* of the same id, `tether.<id>.2`. The pin id and the manifest
+stay, and readers resolve a pin through its live generation, so history
+needs no rewriting. `verify` says which one:
 
 {{< include _generated/06/48-verify-repaired.sh >}}
 
@@ -422,10 +405,9 @@ generation is live, so history needs no rewriting. `verify` says which one:
 
 {{< include _generated/06/49-open-after-repair.txt >}}
 
-(Between the deletion and the `repair`, reads at that commit worked too -- by
-snapshot id, since the manifest records it -- and a bookmark started there
-would have forked from the snapshot the same way. Nothing about a deleted tag
-makes the data unreachable while the store keeps the snapshot.)
+(Between the deletion and the `repair`, reads and forks at that commit
+worked too, by the snapshot id the manifest records: a deleted tag does not
+make the data unreachable while the store keeps the snapshot.)
 
 **Upstream moves on its own.** A pipeline appends to the Lance table; a
 colleague commits to the code repository. On the trunk those branches *are*
@@ -439,12 +421,10 @@ the working refs, so `status` sees them as `modified`:
 
 {{< include _generated/06/52-status-moved.txt >}}
 
-Nothing watches anything. Each run fingerprints the objects (an Icechunk
-snapshot id, a Lance version, a git sha, one `LIST` of the prefix) and
-compares them with the manifests; the cost is one round of metadata calls.
-Neither command touches history. A third one does, when you want the dataset
-to *trail* the world rather than merely watch it: a nightly `tether pull` on
-`main` commits whatever moved, and leaves nothing when nothing did.
+Nothing watches anything. Each run fingerprints the objects and compares
+them with the manifests, one round of metadata calls. Neither command
+touches history. To have the dataset *trail* the world rather than watch
+it, a nightly `tether pull` on `main` commits whatever moved:
 
 {{< include _generated/06/53-pull.sh >}}
 
@@ -475,10 +455,9 @@ Commit the registration, then run the sweep on its own bookmark:
 
 {{< include _generated/06/56-new-sweep.txt >}}
 
-(A `record` object gets its branch at `new` time rather than on first write:
-with no tag to fork from later, the recorded version is taken while it is
-known to exist.) Each trial relabels the imaging store and appends to the
-scratch table -- `sweep.py`:
+(A `record` object gets its branch at `new` time, while the recorded
+version is known to exist.) Each trial relabels the imaging store and
+appends to the scratch table, in `sweep.py`:
 
 {{< include _generated/06/57-sweep-py.py >}}
 
@@ -504,25 +483,20 @@ snapshots, not patches), so trial 4 still names its own pins:
 {{< include _generated/06/61-log-abandoned.txt >}}
 
 Trial 4 was rebased onto trial 1 (new commit id, same change id, same
-manifests), the `sweep` bookmark followed it, and `scratch/embeddings` freed
-nothing -- it had no pins to release, which was the point of `--pin record`.
-(tether's `abandon` restores each descendant's manifests as they were, so the
-empty working copy is re-created on top: a new change id for `@`.) Releasing
-a tag makes the snapshot *eligible*; the store reclaims the bytes on its own
-schedule (`repo.expire_snapshots(...)` then `repo.garbage_collect(...)` for
-Icechunk, `cleanup_old_versions()` for Lance). Recorded states past their
-retention show up in `tether verify --all-history` as missing -- that is the
-trade you made with `--pin record`, stated back to you.
+manifests), and the `sweep` bookmark followed it. `scratch/embeddings` freed
+nothing: it had no pins, which was the point of `--pin record`. (`abandon`
+restores each descendant's manifests, so the empty working copy is created
+again on top, with a new change id.) Releasing a tag makes the snapshot
+*eligible*; the store reclaims the bytes on its own schedule. Recorded
+states past their retention show up in `verify --all-history` as missing:
+the trade you made with `--pin record`, stated back to you.
 
 **A store that should not outlive its probe** *(experimental)*. So far every
 store existed before tether saw it, and tether never deletes what it merely
-adopted. A probe often needs a store of its own -- a second embeddings table
-to compare against -- and that store has no reason to exist once the probe is
-thrown away. `add --create` has tether make the store, on a bookmark of its
-own. (This is the one tether operation with no `repair` path, and it has not
-yet run against real S3 or a real second clone; the commands say so, and
-[Reclaiming Storage](05-reclaiming-storage.qmd#stores-tether-created) has the
-rules and the graduation criteria.)
+adopted. A probe often needs a store of its own, such as a second embeddings
+table, with no reason to exist once the probe is thrown away. `add --create`
+has tether make it, on a bookmark of its own
+([Stores tether created](05-reclaiming-storage.qmd#stores-tether-created)).
 
 {{< include _generated/06/62-ls-before.sh >}}
 
@@ -536,13 +510,11 @@ rules and the graduation criteria.)
 
 {{< include _generated/06/64-add-probe.txt >}}
 
-The store is created empty with an owner marker naming this dataset, and
-remembered in a repository-wide index outside history
-(`.jj/repo/tether-created.jsonl` next to the repository lock), along with the
-bookmark it was made on. Because the probe is a bookmark, the new store's
-working branch is forked at once -- no second `new` -- and the first writable
-`open` lands on it (from Python, `repo.create("scratch/probe", "icechunk",
-{"uri": ...})` does the `add` and the `open` in one call):
+The store is created empty, with an owner marker naming this dataset, and
+remembered with the bookmark it was made on in `.jj/repo/tether-created.jsonl`.
+On a bookmark its working branch is forked at once, so the first writable
+`open` lands on it. (`repo.create("scratch/probe", "icechunk", {"uri": ...})`
+does the `add` and the `open` in one call.)
 
 {{< include _generated/06/65-probe-py.py >}}
 
@@ -558,12 +530,9 @@ working branch is forked at once -- no second `new` -- and the first writable
 
 {{< include _generated/06/68-log-probe.txt >}}
 
-The probe did not pan out. One `drop`, from the bookmark itself: `--to sweep`
-says where to leave for (the trunk otherwise), and `--delete-stores` opts into
-the experimental step for the store the probe created -- a deleted store has
-no `repair`, and `gc` only knows the history this clone has fetched, so the
-store side of `drop` is exactly `gc --prune-bookmarks` for this bookmark plus
-whatever you opt into:
+The probe did not pan out. One `drop`, from the bookmark itself: `--to
+sweep` says where to leave for, and `--delete-stores` opts into the
+experimental step for the store the probe created:
 
 {{< include _generated/06/69-drop-probe.sh >}}
 
@@ -573,16 +542,14 @@ whatever you opt into:
 
 {{< include _generated/06/70-ls-after.txt >}}
 
-Leave, drop the commit, unpin, delete the branches (the sweep table's, too:
-its recorded state was the dropped commit's), and -- with nothing left in the
-store but the owner marker -- delete the store, in that order and only then.
-The data directory is as it was before the probe. A store tether *adopted* is
-never deleted this way, and a clone of the dataset cannot make it happen by
-editing a manifest: only the marker in the store and the index in your own
-repository say a store is tether's to remove. Had another checkout or clone
-forked its own branch in the store meanwhile -- a bookmark this clone never
-had -- the plan would have kept the store whole, that branch and your pins
-alike, and said so.
+Leave, drop the commit, unpin, delete the branches (the sweep table's too:
+its recorded state was the dropped commit's), and, with nothing left but
+the owner marker, delete the store. The data directory is as it was before
+the probe. A store tether *adopted* is never deleted this way, and editing a
+manifest cannot make it happen: only the marker in the store and the index
+in your repository say a store is tether's to remove. Had another clone
+forked its own branch in the store meanwhile, the plan would have kept the
+store whole, and said so.
 
 Mechanics: [Reclaiming Storage](05-reclaiming-storage.qmd).
 
@@ -607,8 +574,8 @@ Mechanics: [Reclaiming Storage](05-reclaiming-storage.qmd).
 
 Five branches deleted, the workspace file and the VCS working copy put back,
 the bookmark gone: the checkout is on `sweep` again as if nothing happened.
-`sweep`'s own branches were never in play -- a new bookmark forks its own,
-even from a commit whose branches already sit exactly at the pins.
+`sweep`'s own branches were never in play, since a new bookmark forks its
+own.
 
 **One object's branch on the wrong state** -- everything else is fine, only
 `zarr/imaging` should go back to what an older commit pinned. `restore`
@@ -622,11 +589,10 @@ resets the current bookmark's branch for that object, and nothing else:
 
 {{< include _generated/06/75-status-restored.txt >}}
 
-The other branches, the manifests, and the working copy stay put; the next
-`commit` would pin what you restored. Here it was a demonstration. `undo`
-does not guess where a branch it *reset* should go -- the store may not allow
-re-pointing, and which head you want is your call -- so it restores the
-workspace record, says what the branch was, and leaves the move to you:
+The other branches, the manifests and the working copy stay put, and the
+next `commit` would pin what you restored. Here it was a demonstration.
+`undo` does not guess where a branch it *reset* should go, so it restores
+the workspace record, says what the branch was, and leaves the move to you:
 
 {{< include _generated/06/76-undo-restore.sh >}}
 
@@ -665,19 +631,13 @@ per slip:
 {{< include _generated/06/82-undo-restore-features.txt >}}
 
 The restore had *created* `features`' branch on `sweep` (nothing had written
-to `features` there yet), so undoing it deletes that branch again; `sweep`
-has exactly the branches it had before. What `undo` reverses on the store
-side is exactly what an operation *created*: branches from `new`, `fork`,
-and a first `restore`; pins and commits from `commit` (uncommitted, pins
-kept). What it reset or deleted it reports, with the tool that puts it right
-(`restore`, `new --discard`, `repair`).
+to `features` there yet), so undoing it deletes that branch again, and
+`sweep` has exactly the branches it had before.
 
-**A pin deleted by hand, or by a `gc` run on the wrong clone** -- the
-manifests still promise it. Section 4 ran this one: `verify` reports
-`missing`, `repair` recreates the pin from the recorded state -- under the
-same name where the store allows it (Lance, git), under the next generation
-of the id where it does not (Icechunk) -- and until then reads and forks at
-that commit fall back to the recorded snapshot.
+**A pin deleted by hand, or by a `gc` run on the wrong clone**: the
+manifests still promise it, and section 4 ran this one. `verify` reports
+`missing`, and `repair` recreates the pin from the recorded state; until
+then, reads and forks at that commit fall back to the recorded snapshot.
 
 None of this touched history: the `scratch` and `again` bookmarks came and
 went without a commit, and `restore` acts on the stores. The log is what
@@ -687,11 +647,9 @@ section 5 left, and the workspace is back on `sweep`:
 
 {{< include _generated/06/83-log-recovered.txt >}}
 
-The boundary: `jj undo` and `git reset` move the manifests, never the stores;
-tether's `undo` and `repair` cover tether's side and say exactly what they
-could not do (a pin whose snapshot the store already expired, a `promote`). `status` also tells you when a dataset commit
-vanished from the VCS behind tether's back, or a bookmark was deleted,
-renamed, or moved by hand.
+tether's `undo` and `repair` cover tether's side, and say exactly what they
+could not do (a snapshot the store already expired, a `promote`); `jj undo`
+covers the VCS's ([Undo](04-branching-and-writing.qmd#undo)).
 
 Mechanics: [`ops`, `undo`, `repair`](07-cli.qmd#ops-undo-repair) in the CLI Guide.
 
@@ -726,25 +684,24 @@ For a provenance dashboard, `tether export` writes the same tables as files:
 
 {{< include _generated/06/86-export.txt >}}
 
-And when the registry -- not the repository -- is where objects are declared,
-run the other direction: `tether import` from a query, `commit`, and the
-manifests follow the registry; section 4 did that from a CSV.
+When the registry, not the repository, is where objects are declared, run
+the other direction: `tether import` from a query, then `commit`. Section 4
+did that from a CSV.
 
-Producers and consumers meet in the middle: the producer commits and
-publishes, the consumer's pipeline verifies the commit it is about to read
+Producers and consumers meet in the middle. The producer commits and
+publishes. The consumer's pipeline verifies the commit it is about to read,
 and refuses to start on a pin that is gone (`--deep` opens each recorded
-state, which is the only way to check a `record`-pinned object):
+state, the only way to check a `record`-pinned object):
 
 {{< include _generated/06/87-verify-rev.sh >}}
 
 {{< include _generated/06/87-verify-rev.txt >}}
 
-`publish` and `export` write to Postgres and to files, not to the repository,
-so the story ends where section 5 left it: the sweep on its bookmark, `main`
-behind it. Landing it is section 2's recipe: `promote` will refuse the Lance
-scratch table and hold the imaging store, so `promote zarr/imaging` lands the
-labels on purpose and the scratch rows, which are scratch, stay on their
-branch.
+`publish` and `export` do not write to the repository, so the story ends
+where section 5 left it: the sweep on its bookmark, `main` behind it.
+Landing it is section 2's recipe. `promote` will refuse the Lance scratch
+table and hold the imaging store, so `promote zarr/imaging` lands the labels
+on purpose, and the scratch rows stay on their branch.
 
 {{< include _generated/06/88-log-end.sh >}}
 

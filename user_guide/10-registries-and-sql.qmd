@@ -3,9 +3,9 @@ title: "Registries and SQL"
 guide-section: "Advanced"
 ---
 
-An optional layer for teams that keep a data catalog: publish tether's history
-as SQL tables that dashboards and pipelines can join, or drive which objects
-tether tracks from a registry query. Nothing here is needed for the core loop.
+An optional layer for teams that keep a data catalog. Publish tether's
+history as SQL tables that dashboards and pipelines can join, or drive which
+objects tether tracks from a registry query.
 
 ::: {.callout-note title="Experimental"}
 `export`, `publish`, and `import` are tested and documented but sit outside
@@ -18,11 +18,10 @@ re-exports, stay. See
 "experimental" promises.
 :::
 
-Data registries keep pointers and metadata in SQL: one row per object saying
-what exists and where. tether keeps its own facts as TOML manifests in the
-VCS, because that is what gives it diffs, merges, undo, and a cheap history
-walk. The two meet through three commands that treat SQL tables as a *derived
-view* of the manifests -- never the other way round:
+Data registries keep one row per object in SQL, saying what exists and
+where. tether keeps its facts as TOML manifests in the VCS, which is what
+gives it diffs, merges, undo and a cheap history walk. Three commands treat
+SQL tables as a *derived view* of the manifests, never the other way round:
 
 | Direction | Command | What moves |
 | --- | --- | --- |
@@ -135,16 +134,15 @@ published 9 row(s) to schema 'tether' (12 commit(s) already present)
   tether_meta        5 row(s)
 ```
 
-It is idempotent and incremental: commits are immutable, so rows of
-`commits`, `commit_parents`, and `objects` whose commit is already in the
-schema are skipped; `refs`, `workspace`, and `tether_meta` describe *now* and
-are rewritten; everything runs in one transaction with
-`INSERT ... ON CONFLICT DO UPDATE`. Tables and views are created with
-`IF NOT EXISTS`, so the first run needs `CREATE` on the database and later
-runs only need write access to the schema. Like `--append`, it never deletes
-commit rows: a jj commit rewritten after it was published keeps its row under
-its old id (no ref points at it, so `objects_head` is unaffected). Drop and
-republish the schema when that matters.
+It is idempotent and incremental. Commits are immutable, so rows of
+`commits`, `commit_parents` and `objects` whose commit is already in the
+schema are skipped. `refs`, `workspace` and `tether_meta` describe *now*
+and are rewritten. Everything runs in one transaction, with `INSERT ... ON
+CONFLICT DO UPDATE`. Tables and views are created `IF NOT EXISTS`, so only
+the first run needs `CREATE` on the database. Like `--append`, it never
+deletes commit rows: a jj commit rewritten after publishing keeps its row
+under its old id, which `objects_head` ignores. Drop and republish the
+schema when that matters.
 
 The DSN comes from `--to` or `$TETHER_PUBLISH_DSN`, never from `tether.toml`
 -- the same rule as backend credentials. Needs the `postgres` extra
@@ -188,11 +186,12 @@ plan: import (2 write(s))
                       zarr/run-043: unchanged
 ```
 
-Sources: a Postgres DSN, a SQLite file (`--table` or `--query`), a `.csv`, or a
-`.jsonl`. The query runs as one statement in a read-only transaction. A
-standing query lives in `.tether/secrets.toml`, not the committed
-`tether.toml`: whoever writes a committed file would choose SQL that runs with
-every cloner's DSN.
+Sources: a Postgres DSN, a SQLite file (`--table` or `--query`), a `.csv`, or
+a `.jsonl`. The query runs as one statement in a read-only transaction. A
+standing query lives in `.tether/secrets.toml`, which `import` uses when
+neither `--table` nor `--query` is given. The committed `tether.toml` may
+not hold one, or its author would choose SQL that runs with every cloner's
+DSN.
 
 ```toml
 # .tether/secrets.toml
@@ -209,11 +208,11 @@ Then `tether import postgresql://...` is enough. The plan has three verbs:
 - `remove`: only with `--sync`, for registered keys the source no longer
   lists. Like `tether remove`, this leaves working branches for `gc`.
 
-A key whose `kind` would change is refused -- remove and re-add it
-explicitly. `--plan FILE` / `--from-plan FILE` work as for the other planned
-commands, and apply refuses a plan whose manifests have changed underneath
-it. After importing, run `tether status` and `tether commit`: import changed
-*what is tracked*; commit records *what state it is in*.
+A key whose `kind` would change is refused: remove and add it again.
+`--plan FILE` and `--from-plan FILE` work as for other planned commands; an
+import plan checks the manifests, not the checkout. After importing, run
+`tether status` and `tether commit`: import changed *what is tracked*, and
+commit records *what state it is in*.
 
 ### Round trip
 

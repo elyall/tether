@@ -3,263 +3,239 @@ title: "Caveats and Performance"
 guide-section: "Reference"
 ---
 
-What to know before relying on tether in a pipeline: the limits that come from
-the model itself, the ones that come from each backend, and what the commands
-cost.
+What to know before relying on tether in a pipeline: the limits of the
+model, the limits of each backend, and what the commands cost.
 
 ## Limits of the model
-
-### Promotion is per system
-
-`tether promote` fast-forwards a base branch when it is unchanged since the
-fork point, uses the native three-way merge where one exists (git, Dolt),
-and otherwise refuses with the system's recipe: Icechunk and Iceberg
-cannot merge, Lance cannot move a branch head, Neon cannot promote a child
-branch. A bookmark is planned whole or not at all, so one refusal holds every
-other system back until you land a subset by name or finish on the trunk.
-Landing the dataset commit in jj never merges data by itself.
 
 ### No cross-system atomicity
 
 A commit records each object's state within a capture window;
-point-consistency requires quiesced writers. The Neon quiescence check helps
-(see [Neon](#neon)), but nothing coordinates two systems.
+point-consistency requires quiesced writers. The Neon quiescence check
+helps ([Neon](#neon)), but nothing coordinates two systems. `promote` lands
+system by system, and a failure part-way leaves the earlier ones landed
+([Landing it](04-branching-and-writing.qmd#landing-it-tether-promote)).
+Promotion is per system too: a system with no merge refuses a diverged base.
 
-### What `undo` can and cannot do
+### Concurrent writers on one branch
 
-`jj undo` / `git reset` move the manifests, never the stores. `tether undo`
-deletes what tether's newest operation created and reports what it reset,
-from its [operation log](07-cli.qmd#the-operation-log). It cannot bring back
-what `gc` released or reverse a `promote`; `repair` and `restore` cover
-those. The table, per command, is in the [CLI Guide](07-cli.qmd#undo).
+Two writers on one store branch (a `--shared` bookmark, two clones on one
+bookmark) are ordered by a compare-and-swap only where the backend has one:
+git, and Icechunk on `s3://`. Icechunk on local storage and Lance check the
+head just before moving it, which leaves a window
+([conditional moves](07-cli.qmd#conditional-moves)). Keep such writers on
+one checkout, or give each its own bookmark.
+
+### Native handles do not follow `new`
+
+Every `open` follows the bookmark the checkout is on now, but a handle
+already open keeps writing to the branch it was opened on. A notebook that
+opened a handle before another process ran `tether new -b` writes to the
+old branch. Open the object again after a `new`.
 
 ### Icechunk never reuses a deleted tag name
 
 A `tether.*` tag deleted by hand, or released by a `gc` you then regret,
-cannot be recreated under the same name: Icechunk keeps a tombstone. tether
-keeps the pin id and moves the *ref* on instead -- `repair` (or the next
-commit of that state) creates `tether.<id>.2`, then `.3`, and readers resolve
-a pin through its live generation -- so nothing is lost while the store keeps
-the snapshot. The generation names are the visible trace; there are a
-thousand of them per id.
+cannot be recreated under its name: Icechunk keeps a tombstone. tether
+keeps the pin id and moves the *ref* on instead. `repair`, or the next
+commit of that state, creates `tether.<id>.2`, then `.3`, and readers
+resolve a pin through its live generation. So nothing is lost while the
+store keeps the snapshot. There are a thousand generations per id.
 
 ### Pin-then-commit ordering
 
-Pins are created before the VCS commit. If anything after them fails -- a
-manifest write, the VCS commit -- `commit` releases the pins it created and
-puts the manifests back; if the process dies outright, the journal entry it
-wrote first stays `INCOMPLETE` in `tether ops`, and `gc` -- run from any
-checkout of the repository -- keeps the pins that entry names. Re-running the
-commit finishes what it started; `forget-workspace` retires the log with the
-checkout. Re-run `tether verify` after merging manifests across branches.
+Pins are created before the VCS commit. If anything after them fails (a
+manifest write, a listing, the VCS commit), `commit` releases the pins it
+created and puts the manifests back. It never releases a pin an earlier
+commit made and this one reused. If the process dies outright, its journal
+entry stays `INCOMPLETE`, and `gc` from any checkout keeps the pins that
+entry names; re-running the commit finishes it. One thing is never undone:
+a dataset commit that landed. If the adapter fails *after* writing it,
+history already names the pins, so the commit stands and the error is
+reported. Re-run `tether verify` after merging manifests across branches.
 
 ### One writer per checkout, one per repository
 
-Every command that writes takes an advisory lock on the checkout
-(`.tether/lock`), and the ones that create or release references -- `commit`,
-`pull`, `gc`, `undo`, `abandon`, `new`, the first writable `open` of a
-`--shared` bookmark -- also one on the repository, shared by every checkout of
-it; a second command waits, then gives up with a message naming the lock.
-Threads sharing one `Repo` take turns the same way. On Windows, which has no
-`fcntl`, nothing can order two processes, so commands that write are refused
-there with one clear message while `status`, `verify`, `diff`, `log`, `ops`
-and `gc --dry-run` work; run the writing commands from a POSIX system or WSL
-until the lock has a Windows implementation.
+Every writing command takes an advisory lock on the checkout
+(`.tether/lock`). `commit`, `pull`, `new`, `restore`, `gc`, `drop`,
+`abandon`, `undo` and `repair`, and any lazy fork a writable `open`
+performs, also take `tether.lock` in the VCS's shared directory, which
+every checkout of the repository shares. So a `gc` here cannot race a
+commit in another workspace, and two checkouts cannot both find a branch
+absent and fork over each other. A second command waits, then gives up
+with a message naming the lock (30 s for the checkout, 60 s for the
+repository). Threads sharing one `Repo` take turns the same way. Separate
+clones share no lock.
 
-### Forks are lazy
+### Windows
 
-`new` records which branch each object *will* get; the first writable `open`
-creates it from the pin. Workspaces that only read leave nothing behind, but
-that first `open` is a store write (no dry run; preview with
-`new --eager --dry-run`) and needs the pin to still exist. Objects with
-`--pin record` fork during `new` regardless: with no tag, the branch is the
-only thing keeping their snapshot or version from expiring. `--eager` or
-`[new] fork = "eager"` restores up-front branches. A writable `open` never
-resets a branch on its own: it reuses one already at the pin (or one a sibling
-object of the same branch space already writes through), resets one only onto
-the head `new` reviewed, and otherwise stops so `new` can decide with the head
-in view.
+Windows has no `fcntl`, so nothing can order two processes. Commands that
+write are refused there with one message, and a default `open` is
+read-only. `status`, `verify`, `diff`, `log`, `ops` and `gc --dry-run`
+work. Run the writing commands from a POSIX system, or WSL, until the lock
+has a Windows implementation. Nothing has run on Windows in CI yet.
 
 ### Data history costs storage
 
-Every pin holds bytes in its system until the commit that names it is dropped
-and `gc` releases it. `--pin record` skips the native ref on any backend and
-forks from the recorded state instead, at the price of retention-bound
-recoverability. The planned commands (`commit`, `new`, `restore`, `promote`,
-`gc`, `drop`, `forget-workspace`, `import`, `repair`, `upgrade`) take
-`--dry-run` (and `--plan FILE` / `--from-plan FILE`) so their writes can be
-reviewed first; `pull`, `undo`, `abandon --gc`, `add --create` and the lazy
-fork in `open` have no preview. See
-[Reclaiming Storage](05-reclaiming-storage.qmd#preview-before-you-write-plans).
+Every pin holds bytes in its system until the commit that names it is
+dropped and `gc` releases it. `--pin record` skips the native ref and forks
+from the recorded state, at the price of retention-bound recoverability.
+Most store writes can be previewed as
+[plans](05-reclaiming-storage.qmd#preview-before-you-write-plans).
 
 ### A clone is untrusted input
 
-Nothing in `tether.toml` or the manifests may choose an executable, an
-endpoint, SQL, or the environment variable a secret is read from; tether
-refuses committed files that try. Those settings live in the untracked
-`.tether/secrets.toml` or the environment (see
-[Configuration](08-configuration.qmd#trust-boundary-tethersecretstoml)). What
-the trust boundary does *not* cover: a manifest's locator still names the
-store tether reads and writes -- a hostile clone can point an object at a
-bucket you have access to, and a `commit` will pin what it finds there. Review
-manifests as you would review code.
-
-Secrets are never stored in manifests -- only credential *references* (an
-environment variable or secret name). Each backend reads the real credential
-from the environment.
+Nothing committed may choose an executable, an endpoint, SQL, or where a
+secret is read from. What the boundary does *not* cover: a manifest's
+locator still names the store tether reads and writes, so a hostile clone
+can point an object at a bucket you can reach. Review manifests as you
+would review code ([Security model](08-configuration.qmd#security-model)).
 
 ## Per backend
 
 ### Neon
 
-Experimental: tested against a fake of the Neon API, not a live project. This
-section is the one home for Neon's caveats; the Backends page points here.
+Experimental: tested against a fake of the Neon API, not a live project.
+This section is the one home for Neon's caveats.
 
 **Lineage.** Pins are child branches, so a working branch cannot be deleted
-while its pins exist (`gc --prune-bookmarks` plans it as
-`keep-branch: cannot be deleted` and names the pins, even under
-`--force-prune`), `gc` only drops leaf pins, and `new` onto a *different* pin
-forks a sibling (`<name>.2`, `.3`, ...) rather than resetting a branch with
-children (`commit` then `new` reuses the branch, since it already sits at the
-pin). Neon cannot merge or promote a child into `main`; run production writes
-on the trunk bookmark, where the working ref is `main` itself.
+while its pins exist. `gc --prune-bookmarks` plans it as `keep-branch:
+cannot be deleted` and names the pins, even under `--force-prune`. `gc`
+only drops leaf pins. `new` onto a *different* pin forks a sibling
+(`<name>.2`, `.3`, ...) rather than reset a branch with children, while
+`commit` then `new` reuses the branch, since it sits at the pin. Neon cannot
+merge or promote a child into `main`: run production writes on the trunk
+bookmark.
 
-**A branch per commit.** Every pin is a branch, so each commit that changes a
-Neon object adds one to the project. Neon plans cap branches per project (10
-on the free plan) or bill the ones past the allowance per branch-month; `gc`
-releases pins no commit references, and `--pin record` takes none at all.
-Pins are unprotected unless `protected_pins = true` in `secrets.toml`, which
-needs a paid plan (Free has no protected branches; paid plans allow a few, and
-every pinning commit would use one). Branches *are* the storage
+**A branch per commit.** Each commit that changes a Neon object adds a
+branch. Neon plans cap branches per project (10 on Free) or bill those past
+the allowance. `gc` releases pins no commit references, and `--pin record`
+takes none at all. Pins are unprotected unless `protected_pins = true` in
+`secrets.toml`. Neon will not delete a protected branch, and only paid plans
+have a few, one per pinning commit. Branches *are* the storage
 (`BRANCH_IS_STORAGE`): `gc --prune-bookmarks` never deletes a Neon working
-branch holding unpinned data without `--force-prune`, and never by its state
-alone.
+branch holding unpinned data without `--force-prune`.
 
-**Control plane.** Answers of 423 (another operation on the project is
-running), 429 and 503 are retried with backoff for about a minute. `commit`
-refuses while `pg_stat_activity` shows active writers unless `--force`.
+**Control plane.** Answers of 423 (another operation is running), 429 and
+503 are retried with backoff for about a minute. `commit` refuses while
+`pg_stat_activity` shows active writers, unless `--force`. Objects that
+fingerprint one branch at once share one endpoint, created once.
 
-**Fingerprint cost.** The LSN moves without user writes, so it is a volatile
-(address-only) key: only `commit_xid`, the newest committed transaction id,
-and the lineage count as change. A compute that restarts skips transaction
-ids nobody used; those never commit, so they are not a change. A snapshot may
-still wake a suspended compute, and on a branch with no compute yet it
-creates the read-write endpoint; a plain `status` does not fingerprint
-(`--snapshot`, `commit`, and `verify` do).
+**Fingerprint cost.** The LSN moves without user writes, so it is a
+volatile address key. Only `commit_xid`, the newest committed transaction
+id, and the lineage count as change; ids a restarted compute skipped never
+commit, so they do not count. A snapshot may wake a suspended compute, and
+creates the read-write endpoint on a branch with none. A plain `status`
+does not fingerprint.
 
 **Content is `{commit_xid, lineage}`.** `branch` in a Neon state is the
-*lineage* -- the object's source branch when the branch read descends from it
--- so that a fork with no writes compares equal to the pin it was cut from.
-The price: two sibling branches of the same lineage whose newest commits share
-a transaction id compare equal too. Neon exposes no content hash and no
-history query to tell them apart, which is why `gc` never judges a Neon
-branch by its state alone and `promote` is not offered.
+*lineage*: the object's source branch, when the branch read descends from
+it. So a fork with no writes compares equal to the pin it was cut from. The
+price: two sibling branches of one lineage whose newest commits share a
+transaction id compare equal too. Neon exposes no content hash or history
+query to tell them apart, which is why `gc` never judges a Neon branch by
+its state alone, and `promote` is not offered.
 
 ### Files on unversioned storage
 
-Observed: detectably but not recoverably drifted. Bucket or container
-versioning promotes single remote objects to Addressable (`--file versioned`);
-local paths and prefixes stay Observed under that policy too (tether does not
-record per-object version ids), and a recorded object state that carries no
-version id -- the bucket was not versioned after all -- is refused by `open`
-rather than served from the object's current bytes. Object-store credentials
-come from the environment; `[backends.file] storage_options` in `tether.toml`
-passes the allowlisted non-secret options (`region`, `allow_http`,
-`virtual_hosted_style_request`, `conditional_put`) to obstore; endpoints,
-account names, and credentials go in `.tether/secrets.toml`.
+Observed: detectably but not recoverably drifted. `--file versioned` on a
+versioned bucket makes a single remote object Addressable; local paths and
+prefixes stay Observed. A local path's identity is its resolved form, so
+re-pointing a symlink makes a new store: its pins stay safe, but its old
+listings are not found.
 
 ### Iceberg catalog variance
 
-S3 Tables disables maintenance when user refs exist; use `--pin record` there
-(forks then come from the snapshot id, valid until snapshot expiry).
+S3 Tables disables maintenance when user refs exist. Use `--pin record`
+there, so forks come from the snapshot id, valid until snapshot expiry.
 
 ### Delta has no refs
 
-Versions are recorded, not pinned; `VACUUM` (7-day default) and log retention
-(30 days) bound how long `open -r` works. A recreated table (new metadata id)
-verifies as drifted, not re-addressed.
+Versions are recorded, not pinned. `VACUUM` (7-day default) and log
+retention (30 days) bound how long `open -r` works. A recreated table (new
+metadata id) verifies as drifted, not re-addressed.
 
 ### Lance versions are branch-scoped
 
-State is `(branch, version)`, plus the branch's id off `main`: a branch
-deleted and re-created under its name restarts its version numbers, and a
-state recorded on its earlier life verifies as missing rather than opening
-the new one. An untouched fork reports its parent's address so no-op commits
-stay no-ops. Lance refuses to delete a branch a tag
-references, so a pinned working branch outlives its bookmark until `gc` drops
-the tag (a re-fork picks `name.2`); `gc` reports that branch as a failed
-`delete-branch` rather than a deletion. `--at N` is version `N` of the
-locator's branch.
+A branch deleted and created again restarts its version numbers, so a state
+from its earlier life verifies as missing rather than opening the new one.
+A pinned working branch outlives its bookmark until `gc` drops the tag,
+since Lance refuses to delete a branch a tag references; `gc` reports it as
+a failed `delete-branch`. A conditional fork onto an existing branch
+compares, then deletes and creates it again, so a peer's branch created in
+that window can be replaced.
 
 ### DuckLake attachments
 
-A DuckDB-file metadata catalog can be attached only once per process, so
-tether attaches per operation and a `DuckLakeHandle` owns its attachment:
-`close()` it (or use it as a context manager) before the next `status`, and do
-not hold your own writer connection open in the same process. Postgres,
-SQLite, and MySQL catalogs have no such limit. Snapshots are catalog-wide;
-`table` only scopes the handle. Put `CREATE SECRET` statements in
+A DuckDB-file metadata catalog can be attached only once per process. So
+tether attaches per operation, and a `DuckLakeHandle` owns its attachment:
+`close()` it (or use it as a context manager) before the next `status`, and
+do not hold your own writer connection open in the same process. Postgres,
+SQLite and MySQL catalogs have no such limit. Snapshots are catalog-wide,
+and `table` only scopes the handle. Put `CREATE SECRET` statements in
 `[backends.ducklake] init_sql` rather than credentials in the locator.
 
 ### Dolt working sets
 
-Uncommitted changes on a branch are not in any commit; a dirty branch is
-reported and refused at `commit`. Credentials come from the server's
-`[uris."mysql://host:port"]` entry in `.tether/secrets.toml` -- never the
-manifest, an `[objects.*]` entry or the environment by convention -- and a
-server without one gets none. Dirty
-detection needs a Dolt with the `dirty` column on `dolt_branches`; older
-servers report clean.
+Uncommitted changes on a branch are in no commit: a dirty branch is
+reported and refused at `commit`. Credentials come only from the server's
+`[uris."mysql://host:port"]` entry in `.tether/secrets.toml`, and a server
+with none gets none. Dirty detection needs a Dolt with the `dirty` column
+on `dolt_branches`; older servers report clean.
 
 ### git remotes
 
-With `remote` set, a pin is only a pin once the tag push succeeds: a failed
+With `remote` set, a pin is a pin only once the tag push succeeds: a failed
 push fails the `pin` and removes the local tag, and `unpin` deletes on the
-remote first. A committed `remote` names a remote the repository has
-configured; a URL goes in `.tether/secrets.toml` as `[objects."<key>"]
-remote`.
+remote first. A committed `remote` must name a configured remote; a URL
+goes in `.tether/secrets.toml` as `[objects."<key>"] remote`.
 
 ## Performance
 
-tether is an orchestrator; its cost is the network round-trips it fans out,
+tether is an orchestrator: its cost is the network round trips it fans out,
 not Python.
 
 ### Fan-out uses threads, not asyncio
 
-Every backend SDK tether wraps (obstore, psycopg, pyiceberg, deltalake, lance,
-duckdb, pymysql, `git`) is synchronous, the per-object Python work is
-microseconds, and a thread pool gives the same wall-clock concurrency without
-forcing an async protocol on backend authors. `snapshot`, `verify`, and the
-fork step of `new` all run concurrently.
+Every backend SDK tether wraps (obstore, psycopg, pyiceberg, deltalake,
+lance, duckdb, pymysql, `git`) is synchronous, and the per-object Python
+work is microseconds. A thread pool gives the same wall-clock concurrency
+without forcing an async protocol on backend authors. `snapshot`, `verify`
+and the fork step of `new` all run concurrently. Credentials for one
+profile or role are resolved once, however many threads ask.
 
 ### History walks are batched
 
-`gc`, `verify --all-history`, `repair --all-history`, and `upgrade` stream
-every manifest at every commit through one `git cat-file --batch` process (jj
-repositories are git-backed, so the same plumbing applies), caching trees and
-blobs by object id and verifying each distinct `(system, state, pin)` once. On
-a repository with 200 commits and 5 objects this is ~20-40 ms end to end
-versus 6-12 s with one process per read. History *rewrites* (`upgrade`,
-`abandon`) only read and transform the commits that touch the dataset
-directory; under jj the rest are rebased, under git the answer is cached per
-subtree id.
+`gc`, `verify --all-history`, `repair --all-history` and `upgrade` stream
+every manifest at every commit through one `git cat-file --batch` process
+(jj repositories are git-backed). Trees and blobs are cached by object id,
+and each distinct `(system, state, pin)` is verified once. On a repository
+with 200 commits and 5 objects this takes ~20-40 ms, against 6-12 s with one
+process per read. History *rewrites* (`upgrade`, `abandon`) read and
+transform only the commits that touch the dataset directory.
+
+### Opens and refreshes pay for what changed
+
+Every `open` re-reads the workspace and the manifests, but a file whose
+size, mtime, ctime and inode are unchanged costs a `stat`, not a parse. A
+changed `workspace.toml` also costs one VCS call, to check it is still
+untracked.
 
 ### Fingerprints are metadata-only, except the first local one
 
-A remote object is one `HEAD`; a prefix is one paged `LIST`; the etag is the
-store's content hash. Local files are sha256-hashed so that timestamps do not
-count as change, with the hash cached by `(size, mtime_ns, ctime_ns, inode)`
-under `.tether/cache/` (ctime, because an overwrite that restores the mtime
-cannot restore it; on filesystems with whole-second mtimes an entry hashed
-within the same second is re-read next time): the first fingerprint of a tree
-reads every byte (~1.5-3 GB/s per core, eight files at a time, so disk-bound
-on NVMe), every later one is an `os.scandir` walk (~4-20 us per file) plus the
-files whose stat changed.
+A remote object is one `HEAD`, a prefix one paged `LIST`, and the etag is
+the store's content hash. Local files are sha256-hashed, so timestamps do
+not count as change. The hash is cached under `.tether/cache/` by
+`(size, mtime_ns, ctime_ns, inode)`; ctime, because an overwrite that
+restores the mtime cannot restore it. A file changed within two seconds of
+the last read is read again. The first fingerprint of a tree reads every
+byte (~1.5-3 GB/s per core, eight files at a time); every later one is an
+`os.scandir` walk (~4-20 us per file) plus the files whose stat changed.
 
 ### Content diffs are metadata-only too
 
-Each backend reads manifests, logs, or catalog tables -- never data -- so
-`diff --content` costs about one fingerprint per changed object (two manifest
-reads for Icechunk and Lance, one log walk for Delta, one catalog query for
-DuckLake, one prolly-tree diff for Dolt). Two stored file listings diff in
-pure Python at ~50 ms per 100k paths.
+Each backend reads manifests, logs or catalog tables, never data. So
+`diff --content` costs about one fingerprint per changed object: two
+manifest reads for Icechunk and Lance, one log walk for Delta, one catalog
+query for DuckLake, one prolly-tree diff for Dolt. Two stored file listings
+diff in pure Python at ~50 ms per 100k paths.

@@ -5,12 +5,10 @@ guide-section: "Advanced"
 
 For contributors adding a system tether does not know yet. A backend maps
 tether's operations onto one class of system. One instance serves every
-object of its kind; per-object addressing travels in the `locator`, so
-backends are cheap, stateless coordinators over resources the user already
-has. Implement the `ObjectBackend` protocol (`tether.backends.base`),
-register it, and run the conformance suite. This page also defines the
-capability flags the rest of the guide refers to, and what *experimental*
-means for a backend.
+object of its kind, and per-object addressing travels in the `locator`.
+Implement the `ObjectBackend` protocol (`tether.backends.base`), register
+it, and run the conformance suite. This page also defines the capability
+flags, and what *experimental* means for a backend.
 
 ## The protocol
 
@@ -48,21 +46,21 @@ Method by method:
 
 | Method | Contract |
 | --- | --- |
-| `identity(locator)` | The subset of the locator that names the *system* (not the branch, region, or credential references). It is hashed into the pin id, so two objects with the same identity and state share a pin. |
+| `identity(locator)` | The subset of the locator that names the *system* (not the branch, region, or credential references). It is hashed into the pin id, so two objects with the same identity and state share a pin. Pass a local path through `canonical_uri`, so every spelling of one directory is one identity. |
 | `fingerprint(locator, working_ref)` | The current state at `working_ref` (a branch `fork` returned) or at the locator's base ref when `None`. Must be a JSON-compatible dict whose *content* keys are stable across calls when nothing changed and different after any change. Keys that merely address the data (an LSN, a derived id) go in `VOLATILE_KEYS` so `content_state` excludes them from equality and pin ids; never include coordinates that move on unrelated activity (Iceberg's `metadata_location`). |
 | `VOLATILE_KEYS` (class attribute) | State keys that address but do not identify: excluded from drift detection, pin ids, listing names, and export hashes; still passed to `pin` / `open` / `verify`. Default: none. |
 | `pin(locator, state, pin_id)` | Create the native ref `ref_for_pin(pin_id)` (`tether.<id>`) pointing at `state`. The id is opaque to the backend (`<dataset8>.<hash16>`; the engine namespaces it). Idempotent: if it exists and points at the same state, return it; if it points elsewhere, raise `BackendError`. Raise if the state is no longer reachable -- `repair` relies on that. |
 | `unpin(locator, pin)` | Delete the ref. A ref that is already gone is a no-op or a `BackendError`, never a library exception. |
 | `list_pins(locator)` | Pin ids (without the `tether.` prefix) that exist natively, every dataset's included. The engine keeps only its own namespace before `gc` subtracts the referenced ones. |
 | `verify(locator, state, pin, deep)` | With a pin: `OK` if it resolves to `state`, `DRIFTED` if it points elsewhere, `MISSING` if gone. Without: `UNKNOWN` unless `deep`, then actually open the state. |
-| `fork(locator, source, name, *, expected=None)` | Create writable branch `name` and return the working ref (usually `name`; a backend may pick a sibling name if `name` is taken). `source` is a `Pin` (branch from the native ref) or a recorded `State` (branch straight from the snapshot / version / commit -- used by `pin = "record"` objects; raise `BackendError` if the state is no longer reachable). **Reset contract**: if `name` already exists, move it back onto `source` (Icechunk `reset_branch`, a `set-snapshot-ref` update, a branch restore, delete-and-recreate); leave it alone when it is already there. The conformance suite forks onto an existing name and expects the source's state. **Conditional move**: `expected` is the head the caller reviewed -- a `State` the branch must still hold, or `ABSENT` (it must not exist yet); anything else raises `RefMovedError` and moves nothing, through the system's compare-and-swap where it has one (git `update-ref <new> <old>`, Icechunk `reset_branch(from_snapshot_id=)`) or `check_expected(self, locator, expected, ref=name)` first where it has none. `None` -- or a signature without the keyword, which the engine detects with `accepts_expected` and calls without it -- moves unconditionally. |
+| `fork(locator, source, name, *, expected=None)` | Create writable branch `name` and return the working ref (usually `name`; a backend may pick a sibling if `name` is taken). `source` is a `Pin`, or a recorded `State` for `pin = "record"` objects (raise `BackendError` if it is no longer reachable). **Reset contract**: an existing `name` is moved back onto `source` (a reset, a ref update, a branch restore, delete-and-recreate), and left alone when it is already there; conformance checks it. **Conditional move**: `expected` is the head the caller reviewed, a `State` or `ABSENT`; anything else raises `RefMovedError` and moves nothing. Use the system's compare-and-swap where it has one (git `update-ref <new> <old>`, Icechunk `reset_branch(from_snapshot_id=)`) and declare `CONDITIONAL_REF`; elsewhere call `check_expected(self, locator, expected, ref=name)` first. `None` moves unconditionally. A signature without the keyword is called without it, and the engine warns that its moves are unconditional. |
 | `delete_working_ref(locator, ref)` | Delete a branch `fork` created; never the base branch. Ignore "already gone". |
 | `working_ref_blockers(locator, ref)` | Why `ref` cannot be deleted right now, or `None`. `gc --prune-bookmarks` / `forget-workspace` plan a blocked branch as kept with the reason instead of failing at apply. Neon: pin children. Default: none. |
 | `rename_pin(locator, old, state, new_id)` | Give an existing pin a new id (`tether upgrade` when the naming scheme changes). Default: `pin` the state under the new id, then `unpin` the old -- right wherever pins are tags. Override where a pin is a branch with children (Neon renames in place). |
 | `rename_working_ref(locator, old, new)` | Rename a working branch; return the resulting ref. Default: `fork` `new` from `old`'s head state and delete `old`. |
 | `list_working_refs(locator)` | Native branches named `tether.ws.*` (`WORKING_REF_PREFIX`) in this system, every dataset's included; the engine filters to its own namespace. `gc --prune-bookmarks` fingerprints each stray one and deletes it only if its head is pinned or equals the base head (`--force-prune` overrides); `repair` uses it to notice a missing working branch. Default: none. |
-| `promote(locator, source, *, expected=None)` | `PROMOTE`: fast-forward the locator's base branch to `source` (a working ref, `Pin`, or `State`). Refuse with `BackendError` unless the base head is an ancestor of the source; no-op when already there. Return the base's new state. `expected` is the base head the plan reviewed: raise `RefMovedError` and move nothing when the base holds another state -- through the compare-and-swap where the system has one (git's `update-ref` old value, Icechunk's `from_snapshot_id`), so a commit landing between the ancestry check and the move fails the move instead of vanishing, or `check_expected(self, locator, expected, what="promote")` first elsewhere. `None`, or a signature without the keyword, promotes as before. |
-| `merge(locator, source, message, *, expected=None)` | `MERGE`: three-way merge `source` (a working ref, `Pin`, or `State`) into the base; raise `MergeConflict(conflicts=[...])` and leave the base untouched when the system reports conflicts. Return the base's new state. The engine passes the *state* the plan reviewed, so resolve a `State` to its commit and merge that, not the branch head. `expected` is the base head the plan reviewed: `check_expected(self, locator, expected, what="merge")` before merging raises `RefMovedError` when the base moved (merges have no old-value form; the check is before the act). |
+| `promote(locator, source, *, expected=None)` | `PROMOTE`: fast-forward the base branch to `source` (a working ref, `Pin`, or `State`); refuse with `BackendError` unless the base head is an ancestor of it, and no-op when already there. Return the base's new state. `expected` is the base head the plan reviewed: raise `RefMovedError` when the base holds another state, through the compare-and-swap where there is one, else `check_expected(self, locator, expected, what="promote")` first. |
+| `merge(locator, source, message, *, expected=None)` | `MERGE`: three-way merge `source` into the base; raise `MergeConflict(conflicts=[...])` and leave the base untouched on conflicts. Return the base's new state. The engine passes the *state* the plan reviewed, so merge that commit, not the branch head. Check `expected` with `check_expected(self, locator, expected, what="merge")` first: merges have no old-value form. |
 | `ancestor_of(locator, ancestor, descendant)` | Whether `ancestor` (a state) is in `descendant`'s history; `None` when unknown. `promote` falls back to it when no fork point was recorded. |
 | `PROMOTE_HINT` (class attribute) | The sentence `promote` shows when it refuses: what the user should do with the system's own tools. |
 | `open(locator, target, read_only)` | `target` is `None` (base ref), a `str` working ref, a `Pin` (read the pinned state), or a `State` (read an Addressable state). Return a `Handle` subclass carrying the native address and, where cheap, a native object. |
@@ -93,9 +91,10 @@ Optional members:
   backend is tested against a fake of a network service rather than the
   service itself. `tether backends` prints it; `add` mentions it.
 - `LOCAL_PATH_KEYS` (class attribute): locator keys that may hold a local
-  filesystem path. The engine resolves a relative one against the caller's
-  directory at `add`/`import`, so a committed locator means the same path
-  from every directory and clone.
+  filesystem path, after any of `LOCAL_PATH_PREFIXES` (DuckLake's
+  `ducklake:`, `sqlite:`, ...). At `add`/`import` the engine expands a
+  leading `~` and resolves a relative path against the caller's directory,
+  so a committed locator means one path from every directory and clone.
 - `branch_scope(locator) -> str` and `ref_namespace(locator) -> str` when the
   native resource that owns branches, or the one whose pins `list_pins`
   returns, is wider than one object -- a Neon project, an Iceberg table. The
@@ -118,17 +117,14 @@ Optional members:
 
 Raise `BackendError` (or `CapabilityError` for unsupported operations) with
 `kind=self.kind`; the engine aggregates per-object failures into
-`MultiObjectError`. Import optional third-party libraries *inside* methods so
-`import tether.backends.mysys` works without them and the error surfaces when
-the backend is actually used. Decorate the class with
-`@wrap_library_errors` and provide a `_library_errors()` staticmethod
-returning the library's exception types: every protocol method then re-raises
-them as `BackendError`. The decorator wraps the methods *defined on the
-class* (`cls.__dict__`), so a method inherited from a mixin or base class is
-not wrapped -- define or re-declare it on the decorated class. Implement
-`validate_locator` for the checks that are cheap at `add` time (a URI scheme
-you support, an `at` that must be a number): the refusal then reaches the
-manifest's author, not the first reader of a clone.
+`MultiObjectError`. Import optional libraries *inside* methods, so the
+module imports without them. Decorate the class with `@wrap_library_errors`
+and give it a `_library_errors()` staticmethod returning the library's
+exception types, which every protocol method then re-raises as
+`BackendError`. The decorator wraps only methods *defined on the class*, so
+re-declare an inherited one. `validate_locator` runs the checks that are
+cheap at `add` time, so a refusal reaches the manifest's author, not the
+first reader of a clone.
 
 ## Capabilities decide behavior
 
@@ -144,6 +140,7 @@ Declare only what the system truly supports; the engine degrades explicitly.
 | `RETENTION_BOUND` | (informational) surface that recoverability expires |
 | `NEEDS_QUIESCENCE` | call `check_quiescence` before pinning |
 | `ATOMIC_REF` | (informational) pins are create-if-absent |
+| `CONDITIONAL_REF` | trust that `fork`, and `promote` / `merge` where declared, honour `expected` in one atomic step. Declare it only then; `effective_capabilities` can declare it per object (Icechunk: on `s3://` only). Conformance runs 8 racing forks and fails a backend that declares it and ignores `expected`. |
 | `DIFF` | call `diff` for `diff --content`, `listing` at commit |
 | `HISTORY` | call `history` for `tether log` and `add --pick` |
 | `BRANCH_IS_STORAGE` | never delete a stray working branch in `gc --prune-bookmarks` without `--force-prune` (deleting reclaims the data, as in Neon) |
@@ -159,16 +156,15 @@ what is counted (files, tables, arrays, ...), exact `added`/`removed`/
 detail)`). Read metadata only; never data.
 
 If your state is a digest that cannot be diffed on its own, also implement
-`listing(locator, state)` to return a detailed text description (JSON lines
-work well). The engine stores it under `.tether/listings/` at commit, commits
-it, and hands both sides back in `listings=(text_a, text_b)` at diff time --
-so make `diff` degrade gracefully (a summary line) when either is `None`.
+`listing(locator, state)`, returning a detailed text description (JSON
+lines work well). The engine commits it under `.tether/listings/` and hands
+both sides back as `listings=(text_a, text_b)`. Degrade to a summary line
+when either is `None`.
 
 ## Experimental and graduation
 
-Backends that have been driven only through fakes of their service (Neon,
-Dolt, DuckLake, Iceberg) and the registry layer (`export`,
-`publish`, `import`) live under `tether.experimental`:
+Backends driven only through fakes of their service (Neon, Dolt, DuckLake,
+Iceberg) and the registry layer live under `tether.experimental`:
 
 ```
 tether/experimental/backends/{neon,dolt,ducklake,iceberg}.py
@@ -176,34 +172,31 @@ tether/experimental/registry/{export,registry}.py
 ```
 
 **What is stable.** Kind names (`tether add --kind neon`), extras
-(`tether-vcs[neon]`), CLI commands (`tether export` / `publish` / `import`),
-the `Repo` methods (`repo.export()`, `plan_import`, `apply_import`,
-`import_objects`), and the `tether.<Symbol>` re-exports (`ExportBundle`,
-`ImportSpec`, `ImportReport`, `PublishReport`, `build_bundle`,
-`specs_from_rows`). These do not change when something graduates. Module
-paths under `tether.experimental` are *not* API, and the alpha-era paths
-(`tether.backends.neon`, `tether.export`, `tether.registry`) are gone.
+(`tether-vcs[neon]`), the CLI commands, the `Repo` methods (`repo.export()`,
+`plan_import`, `apply_import`, `import_objects`), and the `tether.<Symbol>`
+re-exports (`ExportBundle`, `ImportSpec`, `ImportReport`, `PublishReport`,
+`build_bundle`, `specs_from_rows`). These do not change when something
+graduates. Module paths under `tether.experimental` are *not* API, and the
+alpha-era paths (`tether.backends.neon`, `tether.export`, `tether.registry`)
+are gone.
 
 **It is a real boundary.** `import tether` and `import tether.cli` load
-nothing under `tether.experimental.registry`: the `Repo` methods are thin
-delegates that import `tether.experimental.registry.ops` on first call, the
-`tether.<Symbol>` names resolve lazily (module `__getattr__`), and the three
-CLI commands are attached by `tether.experimental.cli.register(app)`. A
-reader of `tether.repo` sees the core loop only.
+nothing under `tether.experimental.registry`. The `Repo` methods import it
+on first call, the `tether.<Symbol>` names resolve lazily, and
+`tether.experimental.cli.register(app)` attaches the three CLI commands.
 
 **What "experimental" means.** The backend passes the conformance suite and
-its engine lifecycle against a fake, not against the service; `tether
-backends` reports `experimental`, and `tether add` prints a note. Behaviour
-that only a live run can confirm (rate limits, eventual consistency, what a
-protected branch costs) is what remains to be seen.
+its engine lifecycle against a fake, not the service. `tether backends`
+reports `experimental`, and `tether add` prints a note. What only a live run
+can confirm (rate limits, eventual consistency, what a protected branch
+costs) remains to be seen.
 
 **Graduation is a file move.** `build_backend` resolves a kind through
-`_BUILTIN_MODULES` (kind -> module path) and the class's `MATURITY` attribute
-drives the label. To graduate a backend: move its file to `tether/backends/`,
-point its `_BUILTIN_MODULES` entry there, set `MATURITY = "stable"`, and update
-the maturity table in [Backends](09-backends.qmd). Nothing users type or
-import changes, because none of it named the module path. The registry layer
-graduates the same way: move the package up, keep the `tether` re-exports.
+`_BUILTIN_MODULES`, and the class's `MATURITY` drives the label. Move the
+file to `tether/backends/`, point its `_BUILTIN_MODULES` entry there, set
+`MATURITY = "stable"`, and update the table in [Backends](09-backends.qmd).
+Nothing users type or import changes. The registry graduates the same way,
+keeping the `tether` re-exports. `ROADMAP.md` has each backend's call.
 
 ## Conformance suite
 
@@ -236,42 +229,44 @@ def test_conformance() -> None:
     run_conformance(MyHarness())
 ```
 
-The suite checks fingerprint stability and change, identity/pin-id
-determinism, `DIFF` (empty self-diff, non-empty after a mutation), `HISTORY`
-(the newest entry is the current state and its id works as `at`; an older
-entry is a different state; `limit` bounds the result),
-`ADDRESSABLE` (open by state -- an older recorded state too, on a handle
-naming another address than the current one), `PIN` (create, list, verify
-shallow and deep, idempotency, protection against later drift of the working
-ref), `FORK` (a fresh fork fingerprints equal to the pinned state; writes to
-the fork leave the base untouched; a conditional fork -- `expected=` a stale
-head, or `ABSENT` onto an existing branch -- raises `RefMovedError` and moves
-nothing, where the backend takes the keyword), `PROMOTE` (the base follows
-the fork, a second promote is a no-op, a base that moved on its own is
-refused, a stale `expected` is `RefMovedError`), `MERGE` (two diverged sides
-make a new base state; a stale `expected` is refused), `ancestor_of` (the
-fork point is an ancestor of the fork, not the other way round; the default
-answers `None`), and unpin. For `CREATE` it walks the store lifecycle at a
-`fresh_locator()`: `create` -> `owner` names the creator -> `is_ref_empty` is
-`True` -> a second `create` is refused -> a written fork makes it `False`, and
-`True` again when that fork is in `ignoring` -> the fork deleted, `True` ->
-`delete_store` -> `owner` is `None` and `fingerprint` raises -> `create` at the
-same locator works again. A harness may set `capabilities` to exercise a
-specific tier of a multi-tier backend.
+What the suite checks, per capability:
 
-Look at `tether.backends.memory` for the executable specification the suite was
-written against, and at `tether.backends.lance` for a Forkable backend that had
-to bend the mapping (branch-scoped version numbers, undeletable tagged
-branches) without breaking the contract.
+- **Always:** fingerprint stability and change, identity and pin-id
+  determinism, and unpin.
+- **`DIFF`:** an empty self-diff, and a non-empty one after a mutation.
+- **`HISTORY`:** the newest entry is the current state and works as `at`,
+  an older entry is another state, and `limit` bounds the result.
+- **`ADDRESSABLE`:** open by state, an older recorded state included.
+- **`PIN`:** create, list, verify shallow and deep, idempotency, and
+  protection against later drift of the working ref.
+- **`FORK`:** a fresh fork equals the pinned state, and writes to it leave
+  the base alone. A stale `expected`, or `ABSENT` onto an existing branch,
+  raises `RefMovedError` and moves nothing.
+- **`CONDITIONAL_REF`:** of 8 threads forking with one `expected`, exactly
+  one moves the branch; the backend must take `expected`.
+- **`PROMOTE` and `MERGE`:** the base follows the fork, a second promote is
+  a no-op, a base that moved is refused, two diverged sides merge, and a
+  stale `expected` is refused. `ancestor_of` answers in the right direction,
+  or `None`.
+- **`CREATE`:** the store lifecycle at a `fresh_locator()`, from `create`
+  through `owner`, `is_ref_empty` (with and without `ignoring`) and a second
+  `create` refused, to `delete_store` and a `create` that works again.
+
+A harness may set `capabilities` to exercise one tier of a multi-tier
+backend. `tether.backends.memory` is the executable specification the suite
+was written against. `tether.backends.lance` is a Forkable backend that had
+to bend the mapping (branch-scoped versions, undeletable tagged branches)
+without breaking the contract.
 
 ## VCS adapters
 
-Two members beyond reading and committing files: `history_digest()` digests
-every visible commit id (gc plans bind to it, so a commit made in another
-workspace stales them), and `shared_dir()` names the directory every
-checkout of the repository shares (git's common dir, jj's repo dir), where
-the repository-wide lock and the created- and touched-store indexes
-(`tether-created.jsonl`, `tether-touched.jsonl`) live.
+Three members beyond reading and committing files. `history_digest()`
+digests every visible commit id, so a commit made in another workspace
+stales a gc plan. `shared_dir()` names the directory every checkout of the
+repository shares (git's common dir, jj's repo dir), where the repository
+lock and the pinned, created and touched indexes live. `tracked(paths)`
+says which of tether's per-checkout files the VCS tracks, so `find` can
+refuse a clone that ships them.
 
 Backends never touch the VCS. If you need to support another version-control
 system for the *manifests*, implement `tether.vcs.VcsAdapter` (resolve, read

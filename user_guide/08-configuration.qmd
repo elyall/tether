@@ -3,59 +3,55 @@ title: "Configuration"
 guide-section: "Reference"
 ---
 
-What a dataset is made of on disk, what `tether.toml` can say, and where
-credentials and other per-checkout settings live.
+What a dataset is made of on disk, what `tether.toml` can say, where
+credentials and other per-checkout settings live, and what a cloned dataset
+can and cannot make tether do.
 
 ## Layout
 
 ```
 <dataset-root>/
-  tether.toml                 # committed: tether.version (older -> `tether upgrade`), dataset.id (the namespace
-                              #   of this dataset's refs), snapshot.auto, verify.on_status,
-                              #   new.fork (lazy|eager), default policies, non-secret backend options
+  tether.toml                 # committed: format version, dataset id, snapshot/verify/new settings,
+                              #   default policies, non-secret backend options
   .tether/
     .gitignore                # ignores workspace.toml, ops.jsonl, secrets.toml, cache/, lock
-    secrets.toml              # untracked: everything a clone must not decide -- credentials or references,
-                              #   endpoints, executables, init SQL; per kind, per URI prefix, per object
+    secrets.toml              # per checkout: credentials or references, endpoints, executables, SQL
     objects/<key>.toml        # committed, one per object: kind, locator, policy, state, pin,
                               #   recoverable, captured_at, origin (only when "created")
-    listings/<hash>.jsonl     # committed, content-addressed per-file listings for directory/prefix
-                              #   states (so `diff --content` can compare them); pruned by gc
-    workspace.toml            # untracked: workspace_id, bookmark, working refs, pending forks, base states, fork points, last snapshot
-    ops.jsonl                 # untracked: the operation log -- each store-writing command, what it did, what it replaced
+    listings/<hash>.jsonl     # committed, content-addressed per-file listings of directory and
+                              #   prefix states (for `diff --content`); pruned by gc
+    workspace.toml            # per checkout: workspace id, bookmark, working refs, pending forks,
+                              #   base states, fork points, last snapshot
+    ops.jsonl                 # per checkout: the operation log
 
-<vcs shared dir>/           # .jj/repo/ or .git/ -- one per clone, shared by every checkout, never committed
-  tether.lock                 # the repository-wide lock (commit, pull, gc, drop, abandon, undo, new hold it)
-  tether-pinned.jsonl         # pins this clone created (commit, repair): the only ones `gc` releases without
-                              #   --release-foreign; seeded from the op logs the first time gc needs it
-  tether-created.jsonl        # stores this clone created with `add --create`: dataset id, kind, identity,
-                              #   locator, key, when, the bookmark it was made on -- what `gc --delete-stores`
-                              #   may delete once nothing references them
-  tether-touched.jsonl        # stores this clone forked a branch in or pinned: where `gc` looks for this
-                              #   dataset's dead refs once no manifest names the store any more
+<vcs shared dir>/           # .jj/repo/ or .git/: one per clone, shared by its checkouts, never committed
+  tether.lock                 # the repository-wide lock (see Caveats)
+  tether-pinned.jsonl         # pins this clone created: the only ones gc releases by default
+  tether-created.jsonl        # stores this clone made with `add --create`
+  tether-touched.jsonl        # stores this clone forked a branch in or pinned
 ```
 
-The indexes live with the repository rather than in history or a checkout
-on purpose: an abandoned fork takes with it the manifest that named the
-store, and `forget-workspace` takes the checkout's own files; the memory of
-what tether made, pinned, and wrote has to survive both. They are only
-memories -- the owner marker the backend wrote into the store decides whose
-the store is (see [Reclaiming Storage](05-reclaiming-storage.qmd)).
+The three per-checkout files are refused while the VCS tracks them (the
+[security model](#security-model)). The indexes live with the repository,
+not in history or a checkout: an abandoned fork takes the manifest that
+named a store with it, and `forget-workspace` takes the checkout's files.
+They are memories, not authority. [Reclaiming Storage](05-reclaiming-storage.qmd)
+says how `gc` uses them, and why a re-clone starts without them.
 
-`pin_id = <dataset-id>.<blake2b(kind, locator identity, content state)[:16]>`;
-the native ref is `tether.<pin_id>`. Identical state yields the same pin within
-a dataset, so re-committing an unchanged object is a no-op and identical states
-dedupe to one pin; the dataset id keeps `gc` inside its own namespace when
-several datasets pin one store.
+`pin_id = <dataset-id>.<blake2b(kind, locator identity, content state)[:16]>`,
+and the native ref is `tether.<pin_id>`. An identical state yields the same
+pin within a dataset: re-committing an unchanged object is a no-op, and
+identical states dedupe to one pin. The identity is the backend's canonical
+form of the locator, such as a resolved local path
+([Backends](09-backends.qmd#conventions)).
 
 ## `tether.toml`
 
-A dataset's configuration is `tether.toml` at the dataset root, committed with
-the manifests and loaded into `RepoConfig`. Every key but `[dataset] id` has a
-default; a minimal file is `[tether] version = 5` plus the id `init` generates.
-A dataset whose version is older than this tether's is refused by every
-command except `tether upgrade`, which brings it forward in one step (see the
-[CLI Guide](07-cli.qmd#upgrade)).
+A dataset's configuration is `tether.toml` at the dataset root, committed
+with the manifests and loaded into `RepoConfig`. Every key but
+`[dataset] id` has a default. A dataset whose version is older than this
+tether's is refused by every command except
+[`tether upgrade`](07-cli.qmd#upgrade).
 
 ```toml
 [tether]
@@ -81,18 +77,18 @@ pin = "native"       # native | record
 prefer = "jj"        # which adapter to use when both .jj and .git exist
 trunk = "main"       # the bookmark that stands for every object's upstream branch
 
-[backends.file]      # non-secret options only; one table per kind (see "Trust boundary")
+[backends.file]      # non-secret options only; one table per kind
 storage_options = { region = "us-west-2" }
 ```
 
 ## Dataset id
 
-`init` generates `[dataset] id`; `tether.toml` is committed, so every clone
-shares it. Every native ref carries it -- pins `tether.<id>.<hash>`, working
-branches `tether.ws.<id>.<bookmark>` -- and `gc` stays inside that
-namespace, so datasets can share one Icechunk repo or Neon project without
-being able to delete each other's pins. Datasets from before the id existed get
-one from `tether upgrade`.
+`init` generates `[dataset] id`, and every clone shares it. Every native ref
+carries it (pins `tether.<id>.<hash>`, working branches
+`tether.ws.<id>.<bookmark>`), and `gc` stays inside that namespace. So
+datasets can share one Icechunk repository or Neon project without deleting
+each other's pins. Datasets from before the id existed get one from
+`tether upgrade`.
 
 ::: {.callout-warning}
 ## Do not change the id after committing
@@ -100,67 +96,47 @@ one from `tether upgrade`.
 - Pins and branches made under the old id stop being this dataset's: `gc`
   treats them as foreign and leaves them alone.
 - `repair` recreates the pins the manifests name, under the new id.
-- A fork meant to become an *independent* dataset must change the id *before*
-  it pins anything, or the two share a namespace and can `gc` each other.
+- A fork meant to become an *independent* dataset must change the id
+  *before* it pins anything, or the two share a namespace and can `gc` each
+  other.
 :::
 
 ## Policies
 
-A `Policy` is stored per object (`[policy]` in its manifest), set with the
-`--file` and `--pin` options of `tether add` (or `Repo.add(policy=...)`)
-and changed in place with `tether set KEY... --file|--pin`. Whether writes
-fork a branch or land on the upstream branch is not a policy: it is which
-bookmark the working copy is on (the trunk writes upstream; any other
-bookmark forks). Manifests from before 0.1.0a9 carry a `write` key; it is read
-and ignored, and `tether upgrade` drops it.
+A `Policy` is stored per object (`[policy]` in its manifest). It is set with
+the `--file` and `--pin` options of `tether add` (or `Repo.add(policy=...)`)
+and changed with `tether set KEY... --file|--pin`. Whether writes fork or
+land upstream is not a policy: the trunk writes upstream, and any other
+bookmark forks. Manifests from before 0.1.0a9 carry a `write` key, which is
+ignored and dropped by `tether upgrade`.
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket/container is Addressable through its version id. |
-| `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without creating a native ref, and `new` forks straight from the recorded state. Cheaper (no tag/branch per commit, nothing for `gc` to release) but recoverable only while the system retains that state -- `verify` reports `missing` once it is gone. See [Reclaiming Storage](05-reclaiming-storage.qmd). |
-
-## Import query
-
-`[import] query` in `.tether/secrets.toml` is the default SQL for
-`tether import` when neither `--table` nor `--query` is given. It must yield
-tether's canonical columns (`key`, `kind`, `uri` / `locator_json`, optional
-`policy_*`, `at`), and runs as one statement in a read-only transaction; the
-source (DSN or file) is still passed on the command line. The committed
-`tether.toml` may not set it (see the trust boundary below): `import` refuses
-one there and names where it goes. See
-[Registries and SQL](10-registries-and-sql.qmd).
-
-```toml
-# .tether/secrets.toml
-[import]
-query = "SELECT 'zarr/' || name AS key, 'icechunk' AS kind, uri FROM catalog WHERE format = 'icechunk'"
-```
+| `file` | `immutable` (default), `versioned` | `file` backend only. `immutable`: any drift is an error at `status`. `versioned`: a single object in a versioning-enabled bucket or container is Addressable through its version id. |
+| `pin` | `native` (default), `record` | Any backend. `record` drops `PIN`: `commit` records the state without a native ref, and `new` forks from the recorded state. Cheaper, but recoverable only while the system keeps that state ([Lever 1](05-reclaiming-storage.qmd#lever-1-do-not-pin-what-you-will-not-need---pin-record)). |
 
 ## Backend options
 
-`[backends.<kind>]` is handed to the backend when it is first used. Only what
-a backend allowlists may be set in the committed file -- `storage_options` for
-`file`/`delta`/`lance`, `catalog` for `iceberg` -- and inside those tables only
-the keys the backend names (`region`, `allow_http`,
+`[backends.<kind>]` is handed to the backend when it is first used. The
+committed file may set only what a backend allowlists: `storage_options`
+for `file`, `delta` and `lance`, and `catalog` for `iceberg`. Inside those
+tables only the named keys pass (`region`, `allow_http`,
 `virtual_hosted_style_request`, `conditional_put`; `type`, `warehouse`,
-`name`). Any other key is refused by name: an allowlist, so an option tether
-has never heard of cannot reach a store from a clone. Everything else goes in
-`.tether/secrets.toml` (next section), where the same tables may hold any key.
-The per-backend keys are listed in [Backends](09-backends.qmd).
+`name`). Any other key is refused by name, so an option tether has never
+heard of cannot reach a store from a clone. Everything else goes in
+`.tether/secrets.toml`, where the same tables may hold any key. Per-backend
+keys: [Backends](09-backends.qmd).
 
 ## Trust boundary: `.tether/secrets.toml` {#trust-boundary-tethersecretstoml}
 
 A cloned dataset is untrusted input. `tether.toml` and the manifests arrive
-with every clone, so nothing in them may choose an executable tether runs, an
-endpoint your credentials are sent to, SQL to execute, or which environment
-variable holds a secret. tether refuses a committed `tether.toml` that tries
-(`[vcs] git_path`, `[import] query`, `[backends.neon] api_url`,
-`[backends.ducklake] init_sql`, a `storage_options.endpoint`, ...) and says
-where the key belongs. What that adds up to is the
-[security model](#security-model) below.
-
-Those settings live in `.tether/secrets.toml` -- untracked, per checkout,
-never committed -- or in the environment:
+with every clone, so nothing in them may choose an executable, an endpoint
+your credentials go to, SQL to run, or the variable a secret is read from.
+tether refuses a committed `tether.toml` that tries (`[vcs] git_path`,
+`[import] query`, `[backends.neon] api_url`, `[backends.ducklake]
+init_sql`, a `storage_options.endpoint`, ...), and says where the key
+belongs: `.tether/secrets.toml`, per checkout and never committed, or the
+environment.
 
 ```toml
 [vcs]
@@ -186,37 +162,39 @@ profile = "lab-a"                          # an AWS shared-config profile ...
 profile = "imaging"
 
 [uris."mysql://dolt.internal:3306"]       # a Dolt server: the only one sent this password
-user = "svc"                              #   (Dolt reads server entries only; an [objects.*]
-password_env = "DOLT_PASSWORD"            #   entry does not reach it)
+user = "svc"                              #   (Dolt reads server entries only)
+password_env = "DOLT_PASSWORD"
 
-[import]                                  # the default SQL for `tether import`
+[import]                                  # the default SQL for `tether import` (see Registries and SQL)
 query = "SELECT name AS key, 'file' AS kind, uri FROM catalog"
 ```
 
 Resolution per object, first match wins: `[objects."<key>"]`, then the
 longest matching `[uris."<prefix>"]`, then `[backends.<kind>]`, then the
-environment and instance credential chain -- which is exactly today's
-behaviour for an object with no entry. A `profile` or `role_arn` is resolved
-through `boto3` (install it when you use them) into explicit credentials, so
-two stores with two identities work in one command; `file`, `delta`, and
-`lance` take the same entries as storage options; `icechunk` passes them to
-`s3_storage` instead of reading the environment. Dolt is the exception: it
-honours only the server's `[uris."mysql://host:port"]` entry (or one for
-`mysql://host:port/database`), never an `[objects.*]` entry or the kind
-section, because the manifest chooses the host the password is sent to.
+environment and instance credential chain. Per-object entries also reach
+`add --create` and `gc --delete-stores`. `file`, `delta` and `lance` take
+the entries as storage options, and `icechunk` passes them to `s3_storage`.
+Dolt honours only the server's `[uris."mysql://host:port"]` entry (or one
+for `mysql://host:port/database`), because the manifest chooses the host a
+password is sent to.
 
-The file may hold literal credentials, so tether warns when it is readable by
-other users (`chmod 600`) and never prints its contents -- not in `status`,
-not in `--json`, not in an error. `init` lists it in `.tether/.gitignore`;
-`Repo.find` re-adds the entry if an older dataset lacks it.
+A `profile` or `role_arn` is resolved through `boto3` (install it when you
+use them) into explicit credentials. Concurrent callers share one
+resolution, cached until five minutes before the keys expire. Icechunk
+takes a profile or role as a refreshing credential source, so a session
+held for hours gets fresh keys instead of failing mid-write.
+
+The file may hold literal credentials, so tether warns when other users can
+read it (`chmod 600`) and never prints its contents: not in `status`, not in
+`--json`, not in an error. `init` lists it in `.tether/.gitignore`, and
+`Repo.find` adds the entry to an older dataset that lacks it.
 
 ### Advanced: two stores, two identities
 
-The case the per-URI and per-object entries exist for. A dataset tracks an
+The case the per-URI and per-object entries exist for: a dataset tracks an
 Icechunk repository in the imaging lab's account and another in the
-sequencing core's; each account issues its own credentials, and one
-`commit` fingerprints and pins both. With `from_env` alone that is an
-`AWS_PROFILE` switch between commands, which a single `commit` cannot do.
+sequencing core's, and one `commit` pins both. With `from_env` alone that
+is an `AWS_PROFILE` switch between commands, which one `commit` cannot do.
 
 ```bash
 tether add zarr/imaging s3://imaging-lab-data/plate-01.icechunk --kind icechunk
@@ -234,42 +212,44 @@ region = "us-east-2"
 ```
 
 `tether commit` now opens `zarr/imaging` with the `imaging-lab` profile's
-keys and `zarr/reads` with a session assumed into the sequencing core's role,
-in the same process, with no environment change between them. Each entry is
-resolved through `boto3` when the object is first touched; a third object
-with no entry keeps using the ambient environment. The manifests record only
-the two URIs -- the identities never leave this checkout.
+keys and `zarr/reads` with a session assumed into the sequencing core's
+role, in one process. A third object with no entry keeps the ambient
+environment, and the manifests record only the two URIs.
 
-On CI the same layout works with literal keys injected by the runner:
-
-```toml
-[uris."s3://imaging-lab-data/"]
-access_key_id = "${IMAGING_KEY_ID}"      # a template your CI expands before
-secret_access_key = "${IMAGING_SECRET}"  # writing the file; tether reads values
-```
-
-(tether does not expand `${...}` itself; write the file with the values in
-place, or use a profile / role and let the runner's identity assume it.)
+On CI the same layout works with literal keys the runner writes into the
+file before the first command. tether does not expand `${...}` itself, so
+write the values in, or use a role the runner's identity can assume
+([A CI recipe](13-sharing-and-ci.qmd#a-ci-recipe)).
 
 ## Security model
 
-What a cloned dataset -- its `tether.toml`, its manifests and history, and
-every other file in the checkout -- can and cannot make tether do.
+What a cloned dataset (its `tether.toml`, manifests, history, and every
+other file in the checkout) can and cannot make tether do.
 
 It cannot:
 
 - **Run a program.** Executables come from `secrets.toml` or the
-  environment. git runs with `core.fsmonitor`, hooks, and `ext::` transports
-  off, and never takes a directory for a bare repository by itself. A `git`
-  object's `path` must be absolute and outside the checkout, whose files came
-  with the clone.
-- **Send your credentials somewhere.** Endpoints are refused in committed
-  files (the trust boundary above), and a Dolt password goes only to a server
-  `secrets.toml` lists.
-- **Run SQL.** `[import] query` and `init_sql` come from `secrets.toml` or the
-  command line, and an import query runs as one statement in a read-only
+  environment. `secrets.toml`, `workspace.toml` and `ops.jsonl` are refused
+  while the VCS tracks them, since a clone brings a tracked copy with it.
+  `find` checks, and so does every later refresh (each `open`, each writing
+  command) that finds `workspace.toml` changed.
+  The check runs before `secrets.toml` is read, so a jj reachable only
+  through its `jj_path` needs `TETHER_JJ`.
+- **Run git code through a `git` object.** The `git` backend runs with
+  `core.fsmonitor`, hooks and `ext::` transports off, and never takes a
+  directory for a bare repository by itself (`safe.bareRepository`, which
+  is why git 2.38 is required). A `git` object's `path` must be absolute and
+  outside the checkout, whose files came with the clone.
+- **Choose where writes go, or which pins `gc` releases.** Those are
+  `workspace.toml` and the op log, refused when tracked. Another checkout's
+  tracked copy is skipped with a warning naming the checkout.
+- **Send your credentials somewhere.** Endpoints, and Icechunk's
+  `allow_http` and `force_path_style`, come from `secrets.toml` only. A
+  Dolt password goes only to a server `secrets.toml` lists.
+- **Run SQL.** `[import] query` and `init_sql` come from `secrets.toml` or
+  the command line. An import query runs as one statement in a read-only
   transaction.
-- **Push your code.** A manifest's git `remote` must name a remote the
+- **Push your code.** A git object's `remote` must name a remote the
   repository already has.
 - **Write outside `.tether/`.** Object keys are checked when a manifest is
   read, not only at `add`: no `..`, no `\`, no drive letters.
@@ -277,25 +257,25 @@ It cannot:
 It can:
 
 - **Name stores.** A locator is an address. A manifest can point `status`,
-  `commit`, and `verify` at any store your ambient credentials reach, and
+  `commit` and `verify` at any store your ambient credentials reach, and
   they sign the requests (a signature does not reveal the secret). `commit`
-  records what it finds there, a directory's file names and hashes
-  included, and pushing publishes that.
-- **Release pins in your stores.** `gc` releases the pins in its dataset's
-  namespace that its own history does not reference and that its clone
-  created; with `--release-foreign`, any of them. A clone that reuses your
-  dataset id and names your stores can then release yours.
+  records what it finds, a directory's file names and hashes included, and
+  pushing publishes that.
+- **Release pins in your stores, with your help.** `gc` releases only pins
+  in its dataset's namespace that no manifest names and that this clone
+  created. `--release-foreign` drops the last condition. In a clone that
+  reuses another dataset's id and names its stores, that releases the other
+  dataset's pins.
 - **Make commands fail.** Every refusal above is an error: a hostile clone
   can stop a command, not redirect it.
 
 So read a clone's manifests before its first `commit`, and a `gc` plan
-before applying it.
+before applying it. The dataset's own repository runs your git hooks on
+dataset commits; those live in your `.git/`, which no clone brings.
 
 ## Workspace state
 
-`.tether/workspace.toml` is untracked (ignored by the `.tether/.gitignore` that
-`init` writes, alongside the operation log `.tether/ops.jsonl`) and is per
-checkout / per jj workspace:
+`.tether/workspace.toml` is per checkout (per jj workspace or git worktree):
 
 ```toml
 workspace_id = "7c1e0a4d9b2e4f6a8c1d3e5f7a9b0c2d"
@@ -318,30 +298,47 @@ snapshot_id = "K3F7Q2ZJ1XN4Y8W0"     #   (differs from the manifest => stale)
 [fork_points."zarr/imaging"]         # base state when the branch was forked (for promote)
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 
-[last_snapshot."zarr/imaging"]
+[last_snapshot."zarr/imaging"]       # what a plain `status` shows (errors are kept too)
 snapshot_id = "K3F7Q2ZJ1XN4Y8W0"
 ```
 
-`base_states` drive stale-working-copy detection (per object); `working_refs`
-are what `open` writes to; `pending_forks` are the branches `new` decided on but has not
-created (the first writable `open` moves an entry to `working_refs`);
-`pending_resets` record the head `new` saw on a branch it will reset, so a
-writable `open` never resets a branch that moved in between; `last_snapshot`
-(and `last_snapshot_at`) is what a plain `status` shows.
+A writable `open` moves an entry from `pending_forks` to `working_refs`.
+`pending_resets` keeps it from resetting a branch that moved since `new`,
+and `base_states` drive the stale check. Every `open` re-reads the file, so
+a long-lived `Repo` follows what another process's `new` wrote.
 
 ## Operation log
 
-`.tether/ops.jsonl`, next to `workspace.toml` and equally untracked: one JSON
-line per store-writing command, appended only (an interruption loses at most
-the line being written). `tether ops` reads it, `tether undo` reverses from
-it. Deleting it loses nothing but the ability to undo what came before. What
-each entry holds, and how the journal survives an interrupted command:
-[The operation log](07-cli.qmd#the-operation-log) in the CLI Guide.
+`.tether/ops.jsonl` is this checkout's operation log: one JSON line per
+store-writing command, appended only, like jj's `op log`. The VCS records
+the manifests, but it cannot see which refs `commit` created, which
+branches `new` forked or reset, what `gc` deleted, or where `promote` moved
+a base branch from. Each entry holds the plan it applied, what it did, and
+what it replaced. `tether ops` lists the entries, and `tether undo`
+reverses from them.
+
+The log is a journal. A store-writing command appends its entry and syncs
+it *before* the first side effect, appends a progress record as each effect
+lands, and marks completion with the result. A process killed in between
+leaves an `INCOMPLETE` entry. `undo` refuses it, `repair --dry-run` says
+how far it got, and running the command again finishes what is left. The
+`new` and `gc` a `drop` runs are journaled as its steps (`parent`). An
+interruption loses at most the line being written, and the next entry
+starts on a fresh line.
+
+Other commands read the log too, so deleting it loses more than `undo`:
+
+- `gc` keeps every pin an unfinished operation in any live checkout set out
+  to create;
+- `status` and `ops` flag dataset commits that vanished from the VCS;
+- the first `gc` seeds the [pin index](05-reclaiming-storage.qmd#pins-this-clone-did-not-create)
+  from the logs, so pins whose entries are gone by then are kept as
+  another clone's.
 
 ## Environment variables
 
-Every variable tether reads -- `TETHER_REV`, `TETHER_JJ` / `TETHER_GIT`,
+Every variable tether reads (`TETHER_REV`, `TETHER_JJ` / `TETHER_GIT`,
 `TETHER_PUBLISH_DSN`, `NEON_API_KEY`, the Dolt `*_env` names, the cloud
-credential chains -- is in one table in the
-[CLI Guide](07-cli.qmd#versions-and-environment), with the `GIT_*` variables
-tether ignores.
+credential chains) is in one table in the
+[CLI Guide](07-cli.qmd#versions-and-environment), with the `GIT_*`
+variables tether ignores.
